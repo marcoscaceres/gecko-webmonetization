@@ -544,10 +544,12 @@ let JSWINDOWACTORS = {
         DOMHeadElementParsed: {},
         DOMLinkAdded: {},
         DOMLinkChanged: {},
+        DOMLinkRemoved: {},
         pageshow: {},
         // The `pagehide` event is only used to clean up state which will not be
         // present if the actor hasn't been created.
         pagehide: { createActor: false },
+        visibilitychange: {},
       },
     },
 
