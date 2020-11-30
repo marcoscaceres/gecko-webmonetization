@@ -158,7 +158,8 @@ nsDataDocumentContentPolicy::ShouldLoad(nsIURI* aContentLocation,
       contentType == ExtContentPolicy::TYPE_SCRIPT ||
       contentType == ExtContentPolicy::TYPE_XSLT ||
       contentType == ExtContentPolicy::TYPE_FETCH ||
-      contentType == ExtContentPolicy::TYPE_WEB_MANIFEST) {
+      contentType == ExtContentPolicy::TYPE_WEB_MANIFEST ||
+      contentType == nsIContentPolicy::TYPE_MONETIZATION) {
     *aDecision = nsIContentPolicy::REJECT_TYPE;
   }
 

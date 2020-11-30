@@ -571,6 +571,7 @@ nsresult nsMixedContentBlocker::ShouldLoad(bool aHadInsecureImageRedirect,
     case ExtContentPolicy::TYPE_SUBDOCUMENT:
     case ExtContentPolicy::TYPE_PING:
     case ExtContentPolicy::TYPE_WEB_MANIFEST:
+    case ExtContentPolicy::TYPE_MONETIZATION:
     case ExtContentPolicy::TYPE_XMLHTTPREQUEST:
     case ExtContentPolicy::TYPE_XSLT:
     case ExtContentPolicy::TYPE_OTHER:
