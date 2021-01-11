@@ -159,6 +159,7 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(Navigator)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mAddonManager)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mWebGpu)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mLocks)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mMonetization)
 
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mWindow)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mMediaKeySystemAccessManager)
@@ -243,6 +244,8 @@ void Navigator::Invalidate() {
   mLocks = nullptr;
 
   mSharePromise = nullptr;
+
+  mMonetization = nullptr;
 }
 
 void Navigator::GetUserAgent(nsAString& aUserAgent, CallerType aCallerType,
@@ -2081,6 +2084,21 @@ dom::MediaSession* Navigator::MediaSession() {
 
 bool Navigator::HasCreatedMediaSession() const {
   return mMediaSession != nullptr;
+}
+
+dom::Monetization* Navigator::Monetization() {
+  if (!mMonetization) {
+    ErrorResult rv;
+    mMonetization = ConstructJSImplementation<dom::Monetization>(
+        "@mozilla.org/webmonetization/Monetization;1", GetWindow()->AsGlobal(),
+        rv);
+    if (rv.Failed()) {
+      rv.SuppressException();
+      return nullptr;
+    }
+  }
+
+  return mMonetization;
 }
 
 Clipboard* Navigator::Clipboard() {
