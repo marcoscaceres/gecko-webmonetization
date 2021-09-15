@@ -106,7 +106,7 @@ class MonetizationChild extends JSWindowActorChild {
           assetScale: details.amount.assetScale,
           receipt: details.receipt,
         };
-        this.contentWindow.monetization.dispatchEvent(
+        this.contentWindow.navigator.monetization.dispatchEvent(
           new this.contentWindow.MonetizationProgressEvent(
             "progress",
             eventInit

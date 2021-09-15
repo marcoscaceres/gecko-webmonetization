@@ -6,8 +6,8 @@
 
 EXTRA_JS_MODULES += [
     "MonetizationFetcher.jsm",
-    "MonetizationGlobal.js",
     "MonetizationLoader.jsm",
+    "NavigatorMonetization.js",
 ]
 
 XPCOM_MANIFESTS += [

@@ -63,7 +63,6 @@ class Document;
 class Element;
 class Location;
 class MediaKeys;
-class Monetization;
 class Navigator;
 class Performance;
 class Selection;
@@ -185,8 +184,6 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
    * Return if any MediaKeys instances are associated with this window.
    */
   bool HasActiveMediaKeysInstance();
-
-  mozilla::dom::Monetization* Monetization();
 
   mozilla::dom::Performance* GetPerformance();
 
@@ -633,7 +630,6 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
 
   nsCOMPtr<mozilla::dom::EventTarget> mParentTarget;  // strong
 
-  RefPtr<mozilla::dom::Monetization> mMonetization;
   RefPtr<mozilla::dom::Performance> mPerformance;
   mozilla::UniquePtr<mozilla::dom::TimeoutManager> mTimeoutManager;
 

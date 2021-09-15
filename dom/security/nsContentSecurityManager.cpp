@@ -614,7 +614,7 @@ static nsresult DoContentSecurityChecks(nsIChannel* aChannel,
       break;
     }
 
-    case nsIContentPolicy::TYPE_MONETIZATION: {
+    case ExtContentPolicy::TYPE_MONETIZATION: {
       mimeTypeGuess = "application/spsp4+json"_ns;
       break;
     }

@@ -216,7 +216,7 @@ void nsHTTPSOnlyStreamListener::RecordUpgradeTelemetry(nsIRequest* request,
         typeKey = "webmanifest"_ns;
         break;
 
-      case nsIContentPolicy::TYPE_MONETIZATION:
+      case ExtContentPolicy::TYPE_MONETIZATION:
         typeKey = "monetization"_ns;
         break;
 

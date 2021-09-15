@@ -586,6 +586,7 @@ enum class ExtContentPolicyType : uint8_t {
   TYPE_FETCH = nsIContentPolicy::TYPE_FETCH,
   TYPE_IMAGESET = nsIContentPolicy::TYPE_IMAGESET,
   TYPE_WEB_MANIFEST = nsIContentPolicy::TYPE_WEB_MANIFEST,
+  TYPE_MONETIZATION = nsIContentPolicy::TYPE_MONETIZATION,
   TYPE_SAVEAS_DOWNLOAD = nsIContentPolicy::TYPE_SAVEAS_DOWNLOAD,
   TYPE_SPECULATIVE = nsIContentPolicy::TYPE_SPECULATIVE,
   TYPE_UA_FONT = nsIContentPolicy::TYPE_UA_FONT,

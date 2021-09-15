@@ -138,7 +138,6 @@
 #include "mozilla/dom/LocalStorageCommon.h"
 #include "mozilla/dom/Location.h"
 #include "mozilla/dom/MediaKeys.h"
-#include "mozilla/dom/MonetizationBinding.h"
 #include "mozilla/dom/NavigatorBinding.h"
 #include "mozilla/dom/Nullable.h"
 #include "mozilla/dom/PartitionedLocalStorage.h"
@@ -1287,7 +1286,6 @@ void nsGlobalWindowInner::FreeInnerObjects() {
   }
   mSessionStorage = nullptr;
   mPerformance = nullptr;
-  mMonetization = nullptr;
 
   mContentMediaController = nullptr;
 
@@ -1383,7 +1381,7 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INTERNAL(nsGlobalWindowInner)
   }
 
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mNavigator)
-  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mMonetization)
+
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mPerformance)
 
 #ifdef MOZ_WEBSPEECH
@@ -1482,7 +1480,6 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(nsGlobalWindowInner)
 
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mNavigator)
 
-  NS_IMPL_CYCLE_COLLECTION_UNLINK(mMonetization)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mPerformance)
 
 #ifdef MOZ_WEBSPEECH
@@ -1735,7 +1732,6 @@ void nsGlobalWindowInner::InitDocumentDependentState(JSContext* aCx) {
   mLocalStorage = nullptr;
   mSessionStorage = nullptr;
   mPerformance = nullptr;
-  mMonetization = nullptr;
 
   // This must be called after nullifying the internal objects because here we
   // could recreate them, calling the getter methods, and store them into the JS
@@ -2352,20 +2348,6 @@ CustomElementRegistry* nsGlobalWindowInner::CustomElements() {
 
 CustomElementRegistry* nsGlobalWindowInner::GetExistingCustomElements() {
   return mCustomElements;
-}
-
-Monetization* nsPIDOMWindowInner::Monetization() {
-  if (!mMonetization) {
-    ErrorResult rv;
-    mMonetization = ConstructJSImplementation<dom::Monetization>(
-        "@mozilla.org/webmonetization/Monetization;1", AsGlobal(), rv);
-    if (rv.Failed()) {
-      rv.SuppressException();
-      return nullptr;
-    }
-  }
-
-  return mMonetization;
 }
 
 Performance* nsPIDOMWindowInner::GetPerformance() {
