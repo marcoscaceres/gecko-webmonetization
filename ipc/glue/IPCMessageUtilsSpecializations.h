@@ -42,6 +42,7 @@
 #include "nsString.h"
 #include "nsTArray.h"
 #include "nsTHashSet.h"
+#include "mozilla/dom/MonetizationBinding.h"
 
 // XXX Includes that are only required by implementations which could be moved
 // to the cpp file.
@@ -632,13 +633,14 @@ template <>
 struct ParamTraits<nsContentPolicyType>
     : public ContiguousEnumSerializerInclusive<
           nsContentPolicyType, nsIContentPolicy::TYPE_INVALID,
-          nsIContentPolicy::TYPE_INTERNAL_FETCH_PRELOAD> {};
-
-template <>
-struct ParamTraits<nsContentPolicyType>
-    : public ContiguousEnumSerializerInclusive<
-          nsContentPolicyType, nsIContentPolicy::TYPE_INVALID,
           nsIContentPolicy::TYPE_MONETIZATION> {};
+//          nsIContentPolicy::TYPE_INTERNAL_FETCH_PRELOAD> {};
+
+// template <>
+// struct ParamTraits<mozilla::dom::Monetization>
+//     : public ContiguousEnumSerializerInclusive<
+//           nsContentPolicyType, nsIContentPolicy::TYPE_INVALID,
+//           nsIContentPolicy::TYPE_MONETIZATION> {};
 
 template <>
 struct ParamTraits<mozilla::TimeDuration> {
