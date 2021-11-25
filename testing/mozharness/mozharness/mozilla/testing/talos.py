@@ -235,6 +235,15 @@ class Talos(
                     "help": "Set a browser preference. May be used multiple times.",
                 },
             ],
+            [
+                ["--skip-preflight"],
+                {
+                    "action": "store_true",
+                    "dest": "skip_preflight",
+                    "default": False,
+                    "help": "skip preflight commands to prepare machine.",
+                },
+            ],
         ]
         + testing_config_options
         + copy.deepcopy(code_coverage_config_options)
@@ -449,7 +458,7 @@ class Talos(
             return self.webextensions_zip
 
     def get_suite_from_test(self):
-        """ Retrieve the talos suite name from a given talos test name."""
+        """Retrieve the talos suite name from a given talos test name."""
         # running locally, single test name provided instead of suite; go through tests and
         # find suite name
         suite_name = None
@@ -475,7 +484,7 @@ class Talos(
         return suite_name
 
     def validate_suite(self):
-        """ Ensure suite name is a valid talos suite. """
+        """Ensure suite name is a valid talos suite."""
         if self.query_talos_json_config() and self.suite is not None:
             if self.suite not in self.talos_json_config.get("suites"):
                 self.fatal(

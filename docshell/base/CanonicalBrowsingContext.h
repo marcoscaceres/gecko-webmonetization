@@ -125,7 +125,8 @@ class CanonicalBrowsingContext final : public BrowsingContext {
       nsDocShellLoadState* aLoadState, nsIChannel* aChannel);
 
   UniquePtr<LoadingSessionHistoryInfo> ReplaceLoadingSessionHistoryEntryForLoad(
-      LoadingSessionHistoryInfo* aInfo, nsIChannel* aChannel);
+      LoadingSessionHistoryInfo* aInfo, nsIChannel* aOldChannel,
+      nsIChannel* aNewChannel);
 
   already_AddRefed<Promise> Print(nsIPrintSettings* aPrintSettings,
                                   ErrorResult& aRv);
@@ -139,7 +140,7 @@ class CanonicalBrowsingContext final : public BrowsingContext {
 
   void SessionHistoryCommit(uint64_t aLoadId, const nsID& aChangeID,
                             uint32_t aLoadType, bool aPersist,
-                            bool aCloneEntryChildren);
+                            bool aCloneEntryChildren, bool aChannelExpired);
 
   // Calls the session history listeners' OnHistoryReload, storing the result in
   // aCanReload. If aCanReload is set to true and we have an active or a loading
@@ -273,8 +274,7 @@ class CanonicalBrowsingContext final : public BrowsingContext {
                                      SessionHistoryEntry* aEntry);
 
   void GetLoadingSessionHistoryInfoFromParent(
-      Maybe<LoadingSessionHistoryInfo>& aLoadingInfo, int32_t* aRequestedIndex,
-      int32_t* aLength);
+      Maybe<LoadingSessionHistoryInfo>& aLoadingInfo);
 
   void HistoryCommitIndexAndLength();
 
@@ -347,6 +347,8 @@ class CanonicalBrowsingContext final : public BrowsingContext {
   bool StartApzAutoscroll(float aAnchorX, float aAnchorY, nsViewID aScrollId,
                           uint32_t aPresShellId);
   void StopApzAutoscroll(nsViewID aScrollId, uint32_t aPresShellId);
+
+  void AddFinalDiscardListener(std::function<void(uint64_t)>&& aListener);
 
  protected:
   // Called when the browsing context is being discarded.
@@ -453,6 +455,10 @@ class CanonicalBrowsingContext final : public BrowsingContext {
 
   void CancelSessionStoreUpdate();
 
+  void AddPendingDiscard();
+
+  void RemovePendingDiscard();
+
   // XXX(farre): Store a ContentParent pointer here rather than mProcessId?
   // Indicates which process owns the docshell.
   uint64_t mProcessId;
@@ -517,6 +523,12 @@ class CanonicalBrowsingContext final : public BrowsingContext {
   RefPtr<GenericNonExclusivePromise> mClonePromise;
 
   JS::Heap<JS::Value> mPermanentKey;
+
+  uint32_t mPendingDiscards = 0;
+
+  bool mFullyDiscarded = false;
+
+  nsTArray<std::function<void(uint64_t)>> mFullyDiscardedListeners;
 };
 
 }  // namespace dom

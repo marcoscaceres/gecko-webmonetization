@@ -83,6 +83,7 @@ class nsExternalHelperAppService : public nsIExternalHelperAppService,
                                bool* aResult) override;
   NS_IMETHOD GetProtocolHandlerInfo(const nsACString& aScheme,
                                     nsIHandlerInfo** aHandlerInfo) override;
+
   NS_IMETHOD LoadURI(nsIURI* aURI, nsIPrincipal* aTriggeringPrincipal,
                      mozilla::dom::BrowsingContext* aBrowsingContext,
                      bool aWasTriggeredExternally) override;
@@ -118,6 +119,9 @@ class nsExternalHelperAppService : public nsIExternalHelperAppService,
                                              nsACString& aMIMEType);
 
   static already_AddRefed<nsExternalHelperAppService> GetSingleton();
+
+  // Internal method. Only called directly from tests.
+  static nsresult EscapeURI(nsIURI* aURI, nsIURI** aResult);
 
  protected:
   virtual ~nsExternalHelperAppService();
@@ -269,6 +273,9 @@ class nsExternalAppHandler final : public nsIStreamListener,
   void SetShouldCloseWindow() { mShouldCloseWindow = true; }
 
  protected:
+  // Record telemetry about a download that was attempted.
+  void RecordDownloadTelemetry(nsIChannel* aChannel, const char* aAction);
+
   bool IsDownloadSpam(nsIChannel* aChannel);
 
   ~nsExternalAppHandler();
@@ -488,6 +495,11 @@ class nsExternalAppHandler final : public nsIStreamListener,
    */
   void SendStatusChange(ErrorType type, nsresult aStatus, nsIRequest* aRequest,
                         const nsString& path);
+
+  /**
+   * Tell the launcher to open the local file with its configured handler.
+   */
+  nsresult LaunchLocalFile();
 
   /**
    * Set in nsHelperDlgApp.js. This is always null after the user has chosen an

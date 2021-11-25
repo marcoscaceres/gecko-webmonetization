@@ -28,9 +28,9 @@ declare namespace MockedExports {
     "resource://gre/modules/AppConstants.jsm": typeof import("resource://gre/modules/AppConstants.jsm");
     "resource:///modules/CustomizableUI.jsm": typeof import("resource:///modules/CustomizableUI.jsm");
     "resource:///modules/CustomizableWidgets.jsm": typeof import("resource:///modules/CustomizableWidgets.jsm");
-    "resource://devtools/shared/Loader.jsm": typeof import("resource://devtools/shared/Loader.jsm");
+    "resource://devtools/shared/loader/Loader.jsm": typeof import("resource://devtools/shared/loader/Loader.jsm");
     "resource://devtools/client/performance-new/popup/background.jsm.js": typeof import("resource://devtools/client/performance-new/popup/background.jsm.js");
-    "resource://devtools/client/shared/browser-loader.js": any;
+    "resource://devtools/shared/loader/browser-loader.js": any;
     "resource://devtools/client/performance-new/popup/menu-button.jsm.js": typeof import("devtools/client/performance-new/popup/menu-button.jsm.js");
     "resource://devtools/client/performance-new/typescript-lazy-load.jsm.js": typeof import("devtools/client/performance-new/typescript-lazy-load.jsm.js");
     "resource://devtools/client/performance-new/popup/panel.jsm.js": typeof import("devtools/client/performance-new/popup/panel.jsm.js");
@@ -291,7 +291,6 @@ declare namespace MockedExports {
      * Then add the file path to the KnownModules above.
      */
     import: <S extends keyof KnownModules>(module: S) => KnownModules[S];
-    createObjectIn: (content: ContentWindow) => object;
     exportFunction: (fn: Function, scope: object, options?: object) => void;
     cloneInto: (value: any, scope: object, options?: object) => void;
     isInAutomation: boolean;
@@ -302,6 +301,18 @@ declare namespace MockedExports {
     Ci: Ci;
     Cu: Cu;
   };
+
+  interface FluentLocalization {
+    /**
+     * This function sets the attributes data-l10n-id and possibly data-l10n-args
+     * on the element.
+     */
+    setAttributes(
+      target: Element,
+      id?: string,
+      args?: Record<string, string>
+    ): void;
+  }
 }
 
 declare module "devtools/client/shared/vendor/react" {
@@ -378,7 +389,7 @@ declare module "resource:///modules/PanelMultiView.jsm" {
   export = MockedExports.PanelMultiViewJSM;
 }
 
-declare module "resource://devtools/shared/Loader.jsm" {
+declare module "resource://devtools/shared/loader/Loader.jsm" {
   export = MockedExports.LoaderJSM;
 }
 
@@ -400,6 +411,11 @@ declare interface ChromeDocument extends Document {
    */
   createXULElement: ((type: "iframe") => XULIframeElement) &
     ((type: string) => XULElement);
+
+  /**
+   * This is a fluent instance connected to this document.
+   */
+  l10n: MockedExports.FluentLocalization;
 }
 
 /**

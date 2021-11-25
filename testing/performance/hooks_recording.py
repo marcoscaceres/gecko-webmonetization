@@ -61,7 +61,7 @@ def before_runs(env):
             app_name = "firefox"
 
         name = [
-            "mitm6",
+            "mitm7",
             platform_name,
             "gve" if app_name == "geckoview_example" else app_name,
             test_site["name"],
@@ -76,8 +76,20 @@ def before_runs(env):
         )
 
         add_option(env, "browsertime.url", test_site.get("test_url"), overwrite=True)
-        add_option(env, "browsertime.secondary_url", test_site.get("secondary_url"))
         add_option(env, "browsertime.screenshot", "true")
         add_option(env, "browsertime.testName", test_site.get("name"))
 
-        print("Recording %s to file: %s" % (test_site.get("url"), recording_file))
+        prefs = test_site.get("preferences", {})
+        for pref, val in prefs.items():
+            add_option(env, "firefox.preference", f"{pref}:{val}")
+
+        second_url = test_site.get("secondary_url", None)
+        if second_url:
+            add_option(env, "browsertime.secondary_url", second_url)
+
+        cmds = test_site.get("test_cmds", [])
+        if cmds:
+            parsed_cmds = [":::".join([str(i) for i in item]) for item in cmds if item]
+            add_option(env, "browsertime.commands", ";;;".join(parsed_cmds))
+
+        print("Recording %s to file: %s" % (test_site.get("test_url"), recording_file))

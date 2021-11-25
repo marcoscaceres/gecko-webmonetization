@@ -21,7 +21,7 @@ function removeOverrides(config) {
   return config;
 }
 
-const xpcshellTestPaths = ["**/test*/unit*/", "**/test*/xpcshell/"];
+const xpcshellTestPaths = ["**/test*/unit*/**/", "**/test*/xpcshell/**/"];
 
 const browserTestPaths = ["**/test*/**/browser*/"];
 
@@ -82,6 +82,26 @@ module.exports = {
       },
     },
     {
+      files: "*.sjs",
+      rules: {
+        complexity: "warn",
+        "no-undef": "warn",
+        "no-empty": "warn",
+        "no-shadow": "warn",
+        "no-redeclare": "warn",
+        "no-unused-vars": "warn",
+        "no-fallthrough": "warn",
+        "no-control-regex": "warn",
+        "no-throw-literal": "warn",
+        "no-useless-concat": "warn",
+        "consistent-return": "warn",
+        "mozilla/use-cc-etc": "warn",
+        "mozilla/use-services": "warn",
+        "mozilla/use-includes-instead-of-indexOf": "warn",
+        "mozilla/no-compare-against-boolean-literals": "warn",
+      },
+    },
+    {
       files: [
         "*.html",
         "*.xhtml",
@@ -125,6 +145,76 @@ module.exports = {
       },
     },
     {
+      // This section enables warning of no-unused-vars globally for all test*.js
+      // files in xpcshell test paths.
+      // These are turned into errors with selected exclusions in the next
+      // section.
+      // Bug 1612907: This section should go away once the exclusions are removed
+      // from the following section.
+      files: xpcshellTestPaths.map(path => `${path}test*.js`),
+      rules: {
+        // No declaring variables that are never used
+        "no-unused-vars": [
+          "warn",
+          {
+            args: "none",
+            vars: "all",
+          },
+        ],
+      },
+    },
+    {
+      // This section makes global issues with no-unused-vars be reported as
+      // errors - except for the excluded lists which are being fixed in the
+      // dependencies of bug 1612907.
+      files: xpcshellTestPaths.map(path => `${path}test*.js`),
+      excludedFiles: [
+        // These are suitable as good first bugs, take one or two related lines
+        // per bug.
+        "caps/tests/unit/test_origin.js",
+        "caps/tests/unit/test_site_origin.js",
+        "chrome/test/unit/test_no_remote_registration.js",
+        "extensions/permissions/**",
+        "image/test/unit/**",
+        "intl/uconv/tests/unit/test_bug317216.js",
+        "intl/uconv/tests/unit/test_bug340714.js",
+        "modules/libjar/test/unit/test_empty_jar_telemetry.js",
+        "modules/libjar/zipwriter/test/unit/test_alignment.js",
+        "modules/libjar/zipwriter/test/unit/test_bug419769_2.js",
+        "modules/libjar/zipwriter/test/unit/test_storedata.js",
+        "modules/libjar/zipwriter/test/unit/test_zippermissions.js",
+        "modules/libpref/test/unit/test_changeType.js",
+        "modules/libpref/test/unit/test_dirtyPrefs.js",
+        "toolkit/crashreporter/test/unit/test_crash_AsyncShutdown.js",
+        "toolkit/mozapps/update/tests/unit_aus_update/testConstants.js",
+        "xpcom/tests/unit/test_hidden_files.js",
+        "xpcom/tests/unit/test_localfile.js",
+
+        // These are more complicated bugs which may require some in-depth
+        // investigation or different solutions. They are also likely to be
+        // a reasonable size.
+        "browser/components/**",
+        "browser/modules/**",
+        "dom/**",
+        "netwerk/**",
+        "security/manager/ssl/tests/unit/**",
+        "services/**",
+        "testing/xpcshell/**",
+        "toolkit/components/**",
+        "toolkit/modules/**",
+      ],
+      rules: {
+        // No declaring variables that are never used
+        "no-unused-vars": [
+          "error",
+          {
+            args: "none",
+            vars: "all",
+          },
+        ],
+      },
+    },
+    {
       ...browserTestConfig,
       files: browserTestPaths.map(path => `${path}**`),
     },
@@ -159,7 +249,6 @@ module.exports = {
       rules: {
         "mozilla/no-arbitrary-setTimeout": "off",
         "mozilla/no-define-cc-etc": "off",
-        "mozilla/use-services": "off",
         "consistent-return": "off",
         "no-eval": "off",
         "no-global-assign": "off",
@@ -285,7 +374,6 @@ module.exports = {
         "no-nested-ternary": "off",
         "no-new-object": "off",
         "no-new-wrappers": "off",
-        "no-octal": "off",
         "no-redeclare": "off",
         "no-return-await": "off",
         "no-restricted-globals": "off",
@@ -404,7 +492,6 @@ module.exports = {
         "no-empty": "off",
         "no-eval": "off",
         "no-lone-blocks": "off",
-        "no-octal": "off",
         "no-redeclare": "off",
         "no-shadow": "off",
         "no-throw-literal": "off",
@@ -446,10 +533,7 @@ module.exports = {
     {
       // TODO: Bug 1609271 Fix all violations for ChromeUtils.import(..., null)
       files: [
-        "browser/base/content/test/forms/head.js",
-        "browser/base/content/test/general/browser_datachoices_notification.js",
         "browser/base/content/test/sync/browser_fxa_web_channel.js",
-        "browser/base/content/test/webextensions/head.js",
         "browser/components/customizableui/test/browser_1042100_default_placements_update.js",
         "browser/components/customizableui/test/browser_1096763_seen_widgets_post_reset.js",
         "browser/components/customizableui/test/browser_1161838_inserted_new_default_buttons.js",
@@ -457,37 +541,14 @@ module.exports = {
         "browser/components/customizableui/test/browser_currentset_post_reset.js",
         "browser/components/customizableui/test/browser_panel_keyboard_navigation.js",
         "browser/components/customizableui/test/browser_proton_toolbar_hide_toolbarbuttons.js",
-        "browser/components/enterprisepolicies/tests/browser/browser_policies_setAndLockPref_API.js",
-        "browser/components/enterprisepolicies/tests/xpcshell/head.js",
-        "browser/components/enterprisepolicies/tests/xpcshell/test_proxy.js",
-        "browser/components/enterprisepolicies/tests/xpcshell/test_runOnce_helper.js",
-        "browser/components/extensions/test/browser/browser_ext_browserAction_context.js",
-        "browser/components/extensions/test/browser/browser_ext_browserAction_popup_preload.js",
-        "browser/components/extensions/test/browser/browser_ext_currentWindow.js",
-        "browser/components/extensions/test/browser/browser_ext_getViews.js",
-        "browser/components/extensions/test/browser/browser_ext_management.js",
-        "browser/components/extensions/test/browser/browser_ext_pageAction_context.js",
-        "browser/components/extensions/test/browser/browser_ext_pageAction_show_matches.js",
-        "browser/components/extensions/test/browser/browser_ext_sessions_getRecentlyClosed_private.js",
-        "browser/components/extensions/test/browser/browser_ext_sessions_restore.js",
-        "browser/components/extensions/test/browser/browser_ext_tabs_audio.js",
-        "browser/components/extensions/test/browser/browser_ext_tabs_duplicate.js",
-        "browser/components/extensions/test/browser/browser_ext_tabs_removeCSS.js",
-        "browser/components/extensions/test/browser/browser_ext_tabs_zoom.js",
-        "browser/components/extensions/test/browser/browser_ext_windows.js",
-        "browser/components/extensions/test/browser/browser_ext_windows_events.js",
-        "browser/components/extensions/test/browser/head.js",
-        "browser/components/extensions/test/xpcshell/test_ext_url_overrides_newtab.js",
         "browser/components/migration/tests/unit/test_Edge_db_migration.js",
         "browser/components/translation/test/unit/test_cld2.js",
         "browser/extensions/formautofill/test/unit/test_sync.js",
-        "browser/extensions/report-site-issue/test/browser/head.js",
         "devtools/client/aboutdebugging/test/browser/browser_aboutdebugging_addons_debug_popup.js",
         "dom/ipc/tests/browser_memory_distribution_telemetry.js",
         "dom/push/test/xpcshell/head.js",
         "dom/push/test/xpcshell/test_broadcast_success.js",
         "dom/push/test/xpcshell/test_crypto.js",
-        "security/manager/ssl/RemoteSecuritySettings.jsm",
         "services/common/tests/unit/head_helpers.js",
         "services/common/tests/unit/test_uptake_telemetry.js",
         "services/fxaccounts/tests/xpcshell/test_accounts.js",
@@ -502,35 +563,8 @@ module.exports = {
         "toolkit/components/crashes/tests/xpcshell/test_crash_manager.js",
         "toolkit/components/crashes/tests/xpcshell/test_crash_service.js",
         "toolkit/components/crashes/tests/xpcshell/test_crash_store.js",
-        "toolkit/components/enterprisepolicies/tests/EnterprisePolicyTesting.jsm",
-        "toolkit/components/extensions/ExtensionPreferencesManager.jsm",
-        "toolkit/components/extensions/ExtensionXPCShellUtils.jsm",
-        "toolkit/components/extensions/parent/ext-management.js",
-        "toolkit/components/extensions/test/mochitest/test_ext_contentscript_cache.html",
-        "toolkit/components/extensions/test/xpcshell/head_native_messaging.js",
-        "toolkit/components/extensions/test/xpcshell/test_ext_api_permissions.js",
-        "toolkit/components/extensions/test/xpcshell/test_ext_background_early_shutdown.js",
-        "toolkit/components/extensions/test/xpcshell/test_ext_background_teardown.js",
-        "toolkit/components/extensions/test/xpcshell/test_ext_contentscript_context.js",
-        "toolkit/components/extensions/test/xpcshell/test_ext_contentscript_context_isolation.js",
-        "toolkit/components/extensions/test/xpcshell/test_ext_contentscript_teardown.js",
-        "toolkit/components/extensions/test/xpcshell/test_ext_contexts_gc.js",
-        "toolkit/components/extensions/test/xpcshell/test_ext_privacy_disable.js",
-        "toolkit/components/extensions/test/xpcshell/test_ext_schemas_interactive.js",
-        "toolkit/components/extensions/test/xpcshell/test_ext_shutdown_cleanup.js",
-        "toolkit/components/extensions/test/xpcshell/test_ext_storage_sync_kinto.js",
-        "toolkit/components/extensions/test/xpcshell/test_ext_storage_sync_kinto_crypto.js",
-        "toolkit/components/extensions/test/xpcshell/test_ext_tab_teardown.js",
-        "toolkit/components/extensions/test/xpcshell/test_native_manifests.js",
         "toolkit/components/featuregates/test/unit/test_FeatureGate.js",
         "toolkit/components/normandy/test/browser/browser_actions_ShowHeartbeatAction.js",
-        "toolkit/components/osfile/modules/osfile_async_front.jsm",
-        "toolkit/components/osfile/modules/osfile_native.jsm",
-        "toolkit/components/osfile/tests/xpcshell/test_osfile_kill.js",
-        "toolkit/components/passwordmgr/test/unit/test_getFormFields.js",
-        "toolkit/components/passwordmgr/test/unit/test_getPasswordFields.js",
-        "toolkit/components/passwordmgr/test/unit/test_getUserNameAndPasswordFields.js",
-        "toolkit/components/processsingleton/MainProcessSingleton.jsm",
         "toolkit/modules/subprocess/test/xpcshell/test_subprocess.js",
         "toolkit/modules/tests/xpcshell/test_GMPInstallManager.js",
         "toolkit/mozapps/extensions/internal/AddonTestUtils.jsm",
@@ -546,13 +580,11 @@ module.exports = {
         "toolkit/mozapps/extensions/test/xpcshell/test_permissions_prefs.js",
         "toolkit/mozapps/extensions/test/xpcshell/test_signed_updatepref.js",
         "toolkit/mozapps/extensions/test/xpcshell/test_signed_verify.js",
-        "toolkit/mozapps/extensions/test/xpcshell/test_webextension.js",
         "toolkit/mozapps/extensions/test/xpcshell/test_webextension_events.js",
         "toolkit/mozapps/extensions/test/xpcshell/test_XPIStates.js",
-        "toolkit/mozapps/installer/precompile_cache.js",
       ],
       rules: {
-        "mozilla/reject-chromeutils-import-params": "off",
+        "mozilla/reject-chromeutils-import-params": "warn",
       },
     },
   ],

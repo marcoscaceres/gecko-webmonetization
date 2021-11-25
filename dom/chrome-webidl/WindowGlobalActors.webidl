@@ -33,6 +33,11 @@ interface WindowContext {
   // It won't become false if the image becomes non-lazy.
   readonly attribute boolean hadLazyLoadImage;
 
+  // True if any of the windows in the subtree rooted at this window
+  // has active peer connections.  If this is called for a non-top-level
+  // context, it always returns false.
+  readonly attribute boolean hasActivePeerConnections;
+
   /**
    * Partially determines whether script execution is allowed in this
    * BrowsingContext. Script execution will be permitted only if this
@@ -121,7 +126,7 @@ interface WindowGlobalParent : WindowContext {
    */
   [Throws]
   JSWindowActorParent getActor(UTF8String name);
-  JSWindowActorParent getExistingActor(UTF8String name);
+  JSWindowActorParent? getExistingActor(UTF8String name);
 
   /**
    * Renders a region of the frame into an image bitmap.
@@ -191,5 +196,5 @@ interface WindowGlobalChild {
    */
   [Throws]
   JSWindowActorChild getActor(UTF8String name);
-  JSWindowActorChild getExistingActor(UTF8String name);
+  JSWindowActorChild? getExistingActor(UTF8String name);
 };

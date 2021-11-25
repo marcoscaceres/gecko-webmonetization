@@ -37,6 +37,8 @@ namespace mozilla {
 class nsDisplayItem;
 class nsPaintedDisplayItem;
 class nsDisplayTransform;
+class nsDisplayListBuilder;
+struct DisplayItemClipChain;
 
 struct ActiveScrolledRoot;
 
@@ -119,9 +121,9 @@ class TransactionBuilder final {
 
   void ClearDisplayList(Epoch aEpoch, wr::WrPipelineId aPipeline);
 
-  void GenerateFrame(const VsyncId& aVsyncId);
+  void GenerateFrame(const VsyncId& aVsyncId, wr::RenderReasons aReasons);
 
-  void InvalidateRenderedFrame();
+  void InvalidateRenderedFrame(wr::RenderReasons aReasons);
 
   void SetDocumentView(const LayoutDeviceIntRect& aDocRect);
 
@@ -263,8 +265,9 @@ class WebRenderAPI final {
 
   void ClearAllCaches();
   void EnableNativeCompositor(bool aEnable);
-  void EnableMultithreading(bool aEnable);
   void SetBatchingLookback(uint32_t aCount);
+  void SetBool(wr::BoolParameter, bool value);
+  void SetInt(wr::IntParameter, int32_t value);
 
   void SetClearColor(const gfx::DeviceColor& aColor);
   void SetProfilerUI(const nsCString& aUIString);
@@ -692,6 +695,14 @@ class DisplayListBuilder final {
   // nsDisplayItem::CanApplyOpacity.
   float GetInheritedOpacity() { return mInheritedOpacity; }
   void SetInheritedOpacity(float aOpacity) { mInheritedOpacity = aOpacity; }
+  const DisplayItemClipChain* GetInheritedClipChain() {
+    return mInheritedClipChain;
+  }
+  void PushInheritedClipChain(nsDisplayListBuilder* aBuilder,
+                              const DisplayItemClipChain* aClipChain);
+  void SetInheritedClipChain(const DisplayItemClipChain* aClipChain) {
+    mInheritedClipChain = aClipChain;
+  }
 
   layers::DisplayItemCache* GetDisplayItemCache() { return mDisplayItemCache; }
 
@@ -762,6 +773,7 @@ class DisplayListBuilder final {
   layers::DisplayItemCache* mDisplayItemCache;
   Maybe<uint16_t> mCurrentCacheSlot;
   float mInheritedOpacity = 1.0f;
+  const DisplayItemClipChain* mInheritedClipChain = nullptr;
 
   friend class WebRenderAPI;
   friend class SpaceAndClipChainHelper;

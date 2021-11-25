@@ -241,7 +241,13 @@ void Navigator::Invalidate() {
 
   mWebGpu = nullptr;
 
-  mLocks = nullptr;
+  if (mLocks) {
+    // Unloading a page does not immediately destruct the lock manager actor,
+    // but we want to abort the lock requests as soon as possible. Explicitly
+    // call Shutdown() to do that.
+    mLocks->Shutdown();
+    mLocks = nullptr;
+  }
 
   mSharePromise = nullptr;
 
@@ -630,6 +636,11 @@ void Navigator::GetDoNotTrack(nsAString& aResult) {
   }
 }
 
+bool Navigator::GlobalPrivacyControl() {
+  return StaticPrefs::privacy_globalprivacycontrol_enabled() &&
+         StaticPrefs::privacy_globalprivacycontrol_functionality_enabled();
+}
+
 uint64_t Navigator::HardwareConcurrency() {
   workerinternals::RuntimeService* rts =
       workerinternals::RuntimeService::GetOrCreateService();
@@ -638,12 +649,6 @@ uint64_t Navigator::HardwareConcurrency() {
   }
 
   return rts->ClampedHardwareConcurrency();
-}
-
-void Navigator::RefreshMIMEArray() {
-  if (mMimeTypes) {
-    mMimeTypes->Refresh();
-  }
 }
 
 namespace {
@@ -1368,8 +1373,12 @@ Promise* Navigator::GetBattery(ErrorResult& aRv) {
 //*****************************************************************************
 
 Promise* Navigator::Share(const ShareData& aData, ErrorResult& aRv) {
-  if (NS_WARN_IF(!mWindow || !mWindow->GetDocShell() ||
-                 !mWindow->GetExtantDoc())) {
+  if (!mWindow || !mWindow->IsFullyActive()) {
+    aRv.ThrowInvalidStateError("The document is not fully active.");
+    return nullptr;
+  }
+
+  if (NS_WARN_IF(!mWindow->GetDocShell() || !mWindow->GetExtantDoc())) {
     aRv.Throw(NS_ERROR_UNEXPECTED);
     return nullptr;
   }
@@ -1377,7 +1386,7 @@ Promise* Navigator::Share(const ShareData& aData, ErrorResult& aRv) {
   if (!FeaturePolicyUtils::IsFeatureAllowed(mWindow->GetExtantDoc(),
                                             u"web-share"_ns)) {
     aRv.ThrowNotAllowedError(
-        "Document's Permission Policy does not allow calling "
+        "Document's Permissions Policy does not allow calling "
         "share() from this context.");
     return nullptr;
   }
@@ -1389,7 +1398,7 @@ Promise* Navigator::Share(const ShareData& aData, ErrorResult& aRv) {
   }
 
   // null checked above
-  auto* doc = mWindow->GetExtantDoc();
+  Document* doc = mWindow->GetExtantDoc();
 
   if (StaticPrefs::dom_webshare_requireinteraction() &&
       !doc->ConsumeTransientUserGestureActivation()) {
@@ -1399,40 +1408,20 @@ Promise* Navigator::Share(const ShareData& aData, ErrorResult& aRv) {
     return nullptr;
   }
 
-  // If none of data's members title, text, or url are present, reject p with
-  // TypeError, and abort these steps.
-  bool someMemberPassed = aData.mTitle.WasPassed() || aData.mText.WasPassed() ||
-                          aData.mUrl.WasPassed();
-  if (!someMemberPassed) {
-    aRv.ThrowTypeError(
-        "Must have a title, text, or url in the ShareData dictionary");
+  ValidateShareData(aData, aRv);
+
+  if (aRv.Failed()) {
     return nullptr;
   }
+
+  // TODO: Process file member, which we don't currently support.
 
   // If data's url member is present, try to resolve it...
   nsCOMPtr<nsIURI> url;
   if (aData.mUrl.WasPassed()) {
     auto result = doc->ResolveWithBaseURI(aData.mUrl.Value());
-    if (NS_WARN_IF(result.isErr())) {
-      aRv.ThrowTypeError<MSG_INVALID_URL>(
-          NS_ConvertUTF16toUTF8(aData.mUrl.Value()));
-      return nullptr;
-    }
     url = result.unwrap();
-    // Check that we only share loadable URLs (e.g., http/https).
-    // we also exclude blobs, as it doesn't make sense to share those outside
-    // the context of the browser.
-    const uint32_t flags =
-        nsIScriptSecurityManager::DISALLOW_INHERIT_PRINCIPAL |
-        nsIScriptSecurityManager::DISALLOW_SCRIPT;
-    if (NS_FAILED(
-            nsContentUtils::GetSecurityManager()->CheckLoadURIWithPrincipal(
-                doc->NodePrincipal(), url, flags, doc->InnerWindowID())) ||
-        url->SchemeIs("blob")) {
-      aRv.ThrowTypeError<MSG_INVALID_URL_SCHEME>("Share",
-                                                 url->GetSpecOrDefault());
-      return nullptr;
-    }
+    MOZ_ASSERT(url);
   }
 
   // Process the title member...
@@ -1484,6 +1473,70 @@ Promise* Navigator::Share(const ShareData& aData, ErrorResult& aRv) {
   return mSharePromise;
 }
 
+//*****************************************************************************
+//    Navigator::CanShare() - Web Share API
+//*****************************************************************************
+bool Navigator::CanShare(const ShareData& aData) {
+  if (!mWindow || !mWindow->IsFullyActive()) {
+    return false;
+  }
+
+  if (!FeaturePolicyUtils::IsFeatureAllowed(mWindow->GetExtantDoc(),
+                                            u"web-share"_ns)) {
+    return false;
+  }
+
+  IgnoredErrorResult rv;
+  ValidateShareData(aData, rv);
+  return !rv.Failed();
+}
+
+void Navigator::ValidateShareData(const ShareData& aData, ErrorResult& aRv) {
+  // TODO: remove this check when we support files share.
+  if (aData.mFiles.WasPassed() && !aData.mFiles.Value().IsEmpty()) {
+    aRv.ThrowTypeError("Passing files is currently not supported.");
+    return;
+  }
+
+  bool titleTextOrUrlPassed = aData.mTitle.WasPassed() ||
+                              aData.mText.WasPassed() || aData.mUrl.WasPassed();
+
+  // At least one member must be present.
+  if (!titleTextOrUrlPassed) {
+    aRv.ThrowTypeError(
+        "Must have a title, text, or url member in the ShareData dictionary");
+    return;
+  }
+
+  // If data's url member is present, try to resolve it...
+  nsCOMPtr<nsIURI> url;
+  if (aData.mUrl.WasPassed()) {
+    Document* doc = mWindow->GetExtantDoc();
+    Result<OwningNonNull<nsIURI>, nsresult> result =
+        doc->ResolveWithBaseURI(aData.mUrl.Value());
+    if (NS_WARN_IF(result.isErr())) {
+      aRv.ThrowTypeError<MSG_INVALID_URL>(
+          NS_ConvertUTF16toUTF8(aData.mUrl.Value()));
+      return;
+    }
+    url = result.unwrap();
+    // Check that we only share loadable URLs (e.g., http/https).
+    // we also exclude blobs, as it doesn't make sense to share those outside
+    // the context of the browser.
+    const uint32_t flags =
+        nsIScriptSecurityManager::DISALLOW_INHERIT_PRINCIPAL |
+        nsIScriptSecurityManager::DISALLOW_SCRIPT;
+    if (NS_FAILED(
+            nsContentUtils::GetSecurityManager()->CheckLoadURIWithPrincipal(
+                doc->NodePrincipal(), url, flags, doc->InnerWindowID())) ||
+        url->SchemeIs("blob")) {
+      aRv.ThrowTypeError<MSG_INVALID_URL_SCHEME>("Share",
+                                                 url->GetSpecOrDefault());
+      return;
+    }
+  }
+}
+
 already_AddRefed<LegacyMozTCPSocket> Navigator::MozTCPSocket() {
   RefPtr<LegacyMozTCPSocket> socket = new LegacyMozTCPSocket(GetWindow());
   return socket.forget();
@@ -1491,8 +1544,7 @@ already_AddRefed<LegacyMozTCPSocket> Navigator::MozTCPSocket() {
 
 void Navigator::GetGamepads(nsTArray<RefPtr<Gamepad>>& aGamepads,
                             ErrorResult& aRv) {
-  if (!mWindow || !mWindow->GetExtantDoc()) {
-    aRv.Throw(NS_ERROR_UNEXPECTED);
+  if (!mWindow || !mWindow->IsFullyActive()) {
     return;
   }
   NS_ENSURE_TRUE_VOID(mWindow->GetDocShell());

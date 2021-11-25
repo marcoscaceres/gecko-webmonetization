@@ -494,7 +494,7 @@ void nsCanvasFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
       // conform to their HCM background color when a solid color is rendered,
       // and some websites use solid-color images instead of an overwritable
       // background color.
-      if (!PresContext()->PrefSheetPrefs().mUseDocumentColors &&
+      if (PresContext()->ForcingColors() &&
           StaticPrefs::
               browser_display_suppress_canvas_background_image_on_forced_colors()) {
         return true;
@@ -554,7 +554,7 @@ void nsCanvasFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
         if (bgItem) {
           thisItemList.AppendToTop(
               nsDisplayFixedPosition::CreateForFixedBackground(
-                  aBuilder, this, nullptr, bgItem, i));
+                  aBuilder, this, nullptr, bgItem, i, asr));
         }
 
       } else {

@@ -170,7 +170,8 @@ static const struct wl_registry_listener registry_listener = {
     global_registry_handler, global_registry_remover};
 
 nsDMABufDevice::nsDMABufDevice()
-    : mXRGBFormat({true, false, GBM_FORMAT_XRGB8888, nullptr, 0}),
+    : mUseWebGLDmabufBackend(true),
+      mXRGBFormat({true, false, GBM_FORMAT_XRGB8888, nullptr, 0}),
       mARGBFormat({true, true, GBM_FORMAT_ARGB8888, nullptr, 0}),
       mGbmDevice(nullptr),
       mGbmFd(-1),
@@ -265,34 +266,35 @@ bool nsDMABufDevice::IsDMABufTexturesEnabled() { return false; }
 bool nsDMABufDevice::IsDMABufVideoEnabled() {
   LOGDMABUF(
       ("nsDMABufDevice::IsDMABufVideoEnabled: EGL %d DMABufEnabled %d  "
-       "!media_ffmpeg_dmabuf_textures_disabled %d !XRE_IsRDDProcess() %d\n",
+       "!media_ffmpeg_dmabuf_textures_disabled %d\n",
        gfx::gfxVars::UseEGL(), IsDMABufEnabled(),
-       !StaticPrefs::media_ffmpeg_dmabuf_textures_disabled(),
-       !XRE_IsRDDProcess()));
+       !StaticPrefs::media_ffmpeg_dmabuf_textures_disabled()));
   return !StaticPrefs::media_ffmpeg_dmabuf_textures_disabled() &&
-         !XRE_IsRDDProcess() && gfx::gfxVars::UseDMABuf() && IsDMABufEnabled();
+         gfx::gfxVars::UseDMABuf() && IsDMABufEnabled();
 }
 bool nsDMABufDevice::IsDMABufVAAPIEnabled() {
   LOGDMABUF(
       ("nsDMABufDevice::IsDMABufVAAPIEnabled: EGL %d DMABufEnabled %d  "
-       "media_ffmpeg_vaapi_enabled %d CanUseHardwareVideoDecoding %d "
-       "!XRE_IsRDDProcess %d\n",
+       "media_ffmpeg_vaapi_enabled %d CanUseHardwareVideoDecoding %d\n",
        gfx::gfxVars::UseEGL(), IsDMABufEnabled(),
        StaticPrefs::media_ffmpeg_vaapi_enabled(),
-       gfx::gfxVars::CanUseHardwareVideoDecoding(), !XRE_IsRDDProcess()));
-  return StaticPrefs::media_ffmpeg_vaapi_enabled() && !XRE_IsRDDProcess() &&
+       gfx::gfxVars::CanUseHardwareVideoDecoding()));
+  return StaticPrefs::media_ffmpeg_vaapi_enabled() &&
          gfx::gfxVars::UseDMABuf() && IsDMABufEnabled() &&
          gfx::gfxVars::CanUseHardwareVideoDecoding();
 }
 bool nsDMABufDevice::IsDMABufWebGLEnabled() {
   LOGDMABUF(
-      ("nsDMABufDevice::IsDMABufWebGLEnabled: EGL %d DMABufEnabled %d  "
+      ("nsDMABufDevice::IsDMABufWebGLEnabled: EGL %d mUseWebGLDmabufBackend %d "
+       "DMABufEnabled %d  "
        "widget_dmabuf_webgl_enabled %d\n",
-       gfx::gfxVars::UseEGL(), IsDMABufEnabled(),
+       gfx::gfxVars::UseEGL(), mUseWebGLDmabufBackend, IsDMABufEnabled(),
        StaticPrefs::widget_dmabuf_webgl_enabled()));
-  return gfx::gfxVars::UseDMABuf() && IsDMABufEnabled() &&
-         StaticPrefs::widget_dmabuf_webgl_enabled();
+  return gfx::gfxVars::UseDMABuf() && mUseWebGLDmabufBackend &&
+         IsDMABufEnabled() && StaticPrefs::widget_dmabuf_webgl_enabled();
 }
+
+void nsDMABufDevice::DisableDMABufWebGL() { mUseWebGLDmabufBackend = false; }
 
 GbmFormat* nsDMABufDevice::GetGbmFormat(bool aHasAlpha) {
   GbmFormat* format = aHasAlpha ? &mARGBFormat : &mXRGBFormat;

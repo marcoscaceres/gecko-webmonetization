@@ -11,66 +11,58 @@
 
 #include "mozilla/Assertions.h"  // MOZ_ASSERT
 #include "mozilla/Attributes.h"  // MOZ_STACK_CLASS, MOZ_ALWAYS_INLINE, MOZ_NEVER_INLINE, MOZ_RAII
-#include "mozilla/Maybe.h"   // mozilla::Maybe, mozilla::Some
-#include "mozilla/Span.h"    // mozilla::Span
-#include "mozilla/Vector.h"  // mozilla::Vector
+#include "mozilla/Maybe.h"  // mozilla::Maybe, mozilla::Some
+#include "mozilla/Span.h"   // mozilla::Span
 
-#include <functional>  // std::function
-#include <stddef.h>    // ptrdiff_t
-#include <stdint.h>    // uint16_t, uint32_t
+#include <stddef.h>  // ptrdiff_t
+#include <stdint.h>  // uint16_t, uint32_t
 
-#include "frontend/AbstractScopePtr.h"           // ScopeIndex
-#include "frontend/BCEParserHandle.h"            // BCEParserHandle
-#include "frontend/BytecodeControlStructures.h"  // NestableControl
-#include "frontend/BytecodeOffset.h"             // BytecodeOffset
+#include "frontend/AbstractScopePtr.h"  // ScopeIndex
 #include "frontend/BytecodeSection.h"  // BytecodeSection, PerScriptData, CGScopeList
 #include "frontend/DestructuringFlavor.h"  // DestructuringFlavor
 #include "frontend/EitherParser.h"         // EitherParser
-#include "frontend/ErrorReporter.h"        // ErrorReporter
-#include "frontend/FullParseHandler.h"     // FullParseHandler
 #include "frontend/IteratorKind.h"         // IteratorKind
 #include "frontend/JumpList.h"             // JumpList, JumpTarget
 #include "frontend/NameAnalysisTypes.h"    // NameLocation
 #include "frontend/NameCollections.h"      // AtomIndexMap
 #include "frontend/ParseNode.h"            // ParseNode and subclasses
 #include "frontend/Parser.h"               // Parser, PropListType
-#include "frontend/ParserAtom.h"           // TaggedParserAtomIndex
-#include "frontend/PrivateOpEmitter.h"     // PrivateOpEmitter
+#include "frontend/ParserAtom.h"           // TaggedParserAtomIndex, ParserAtom
 #include "frontend/ScriptIndex.h"          // ScriptIndex
-#include "frontend/SharedContext.h"        // SharedContext, TopLevelFunction
 #include "frontend/SourceNotes.h"          // SrcNoteType
-#include "frontend/TokenStream.h"          // TokenPos
 #include "frontend/ValueUsage.h"           // ValueUsage
-#include "js/RootingAPI.h"                 // JS::Rooted, JS::Handle
+#include "js/AllocPolicy.h"                // ReportOutOfMemory
 #include "js/TypeDecls.h"                  // jsbytecode
 #include "vm/BuiltinObjectKind.h"          // BuiltinObjectKind
-#include "vm/BytecodeUtil.h"               // JSOp
 #include "vm/CheckIsObjectKind.h"          // CheckIsObjectKind
 #include "vm/CompletionKind.h"             // CompletionKind
 #include "vm/FunctionPrefixKind.h"         // FunctionPrefixKind
 #include "vm/GeneratorResumeKind.h"        // GeneratorResumeKind
-#include "vm/JSFunction.h"                 // JSFunction
-#include "vm/JSScript.h"       // JSScript, BaseScript, MemberInitializers
-#include "vm/Runtime.h"        // ReportOutOfMemory
-#include "vm/SharedStencil.h"  // GCThingIndex
-#include "vm/StencilEnums.h"   // TryNoteKind
-#include "vm/StringType.h"     // JSAtom
-#include "vm/ThrowMsgKind.h"   // ThrowMsgKind, ThrowCondition
+#include "vm/Opcodes.h"                    // JSOp
+#include "vm/SharedStencil.h"              // GCThingIndex, MemberInitializers
+#include "vm/StencilEnums.h"               // TryNoteKind
+#include "vm/ThrowMsgKind.h"               // ThrowMsgKind, ThrowCondition
 
 namespace js {
 namespace frontend {
 
+class BytecodeOffset;
 class CallOrNewEmitter;
 class ClassEmitter;
 class ElemOpEmitter;
 class EmitterScope;
+class FullParseHandler;
 class NestableControl;
+class PrivateOpEmitter;
 class PropertyEmitter;
 class PropOpEmitter;
 class OptionalEmitter;
+class SharedContext;
 class TDZCheckCache;
 class TryEmitter;
-class ScriptStencil;
+
+struct BCEParserHandle;
+struct TokenPos;
 
 enum class ValueIsOnStack { Yes, No };
 
@@ -395,17 +387,19 @@ struct MOZ_STACK_CLASS BytecodeEmitter {
   AbstractScopePtr innermostScope() const;
   ScopeIndex innermostScopeIndex() const;
 
-  [[nodiscard]] MOZ_ALWAYS_INLINE bool makeAtomIndex(TaggedParserAtomIndex atom,
-                                                     GCThingIndex* indexp) {
+  [[nodiscard]] MOZ_ALWAYS_INLINE bool makeAtomIndex(
+      TaggedParserAtomIndex atom, ParserAtom::Atomize atomize,
+      GCThingIndex* indexp) {
     MOZ_ASSERT(perScriptData().atomIndices());
     AtomIndexMap::AddPtr p = perScriptData().atomIndices()->lookupForAdd(atom);
     if (p) {
+      compilationState.parserAtoms.markAtomize(atom, atomize);
       *indexp = GCThingIndex(p->value());
       return true;
     }
 
     GCThingIndex index;
-    if (!perScriptData().gcThingList().append(atom, &index)) {
+    if (!perScriptData().gcThingList().append(atom, atomize, &index)) {
       return false;
     }
 
@@ -608,8 +602,12 @@ struct MOZ_STACK_CLASS BytecodeEmitter {
   [[nodiscard]] bool emitAtomOp(JSOp op, TaggedParserAtomIndex atom);
   [[nodiscard]] bool emitAtomOp(JSOp op, GCThingIndex atomIndex);
 
+  [[nodiscard]] bool emitStringOp(JSOp op, TaggedParserAtomIndex atom);
+  [[nodiscard]] bool emitStringOp(JSOp op, GCThingIndex atomIndex);
+
   [[nodiscard]] bool emitArrayLiteral(ListNode* array);
   [[nodiscard]] bool emitArray(ParseNode* arrayHead, uint32_t count);
+  [[nodiscard]] bool emitSpreadIntoArray(UnaryNode* elem);
 
   [[nodiscard]] bool emitInternedScopeOp(GCThingIndex index, JSOp op);
   [[nodiscard]] bool emitInternedObjectOp(GCThingIndex index, JSOp op);
@@ -907,8 +905,6 @@ struct MOZ_STACK_CLASS BytecodeEmitter {
   [[nodiscard]] bool emitConditionalExpression(
       ConditionalExpression& conditional,
       ValueUsage valueUsage = ValueUsage::WantValue);
-
-  bool isOptimizableSpreadArgument(ParseNode* expr);
 
   [[nodiscard]] ParseNode* getCoordNode(ParseNode* callNode,
                                         ParseNode* calleeNode, JSOp op,

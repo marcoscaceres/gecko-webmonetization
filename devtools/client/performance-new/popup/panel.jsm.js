@@ -72,9 +72,8 @@ function selectElementsInPanelview(panelview) {
     active: getElementById("PanelUI-profiler-active"),
     locked: getElementById("PanelUI-profiler-locked"),
     presetDescription: getElementById("PanelUI-profiler-content-description"),
-    presetCustom: getElementById("PanelUI-profiler-content-custom"),
-    presetsCustomButton: getElementById(
-      "PanelUI-profiler-content-custom-button"
+    presetsEditSettings: getElementById(
+      "PanelUI-profiler-content-edit-settings"
     ),
     presetsMenuList: /** @type {MenuListElement} */ (getElementById(
       "PanelUI-profiler-presets"
@@ -102,18 +101,11 @@ function selectElementsInPanelview(panelview) {
 function createViewControllers(state, elements) {
   return {
     updateInfoCollapse() {
-      const { header, info, infoButton, panelview } = elements;
+      const { header, info, infoButton } = elements;
       header.setAttribute(
         "isinfocollapsed",
         state.isInfoCollapsed ? "true" : "false"
       );
-      // @ts-ignore - Bug 1674368
-      panelview
-        .closest("panel")
-        .setAttribute(
-          "isinfoexpanded",
-          state.isInfoCollapsed ? "false" : "true"
-        );
       // @ts-ignore - Bug 1674368
       infoButton.checked = !state.isInfoCollapsed;
 
@@ -135,15 +127,18 @@ function createViewControllers(state, elements) {
       const preset = presets[presetName];
       if (preset) {
         elements.presetDescription.style.display = "block";
-        elements.presetCustom.style.display = "none";
-        elements.presetDescription.textContent = preset.description;
+        elements.document.l10n.setAttributes(
+          elements.presetDescription,
+          preset.l10nIds.popup.description
+        );
         elements.presetsMenuList.value = presetName;
         // This works around XULElement height issues.
         const { height } = elements.presetDescription.getBoundingClientRect();
         elements.presetDescription.style.height = `${height}px`;
       } else {
         elements.presetDescription.style.display = "none";
-        elements.presetCustom.style.display = "block";
+        // We don't remove the l10n-id attribute as the element is hidden anyway.
+        // It will be updated again when it's displayed next time.
         elements.presetsMenuList.value = "custom";
       }
       const { PanelMultiView } = lazy.PanelMultiView();
@@ -203,6 +198,7 @@ function createViewControllers(state, elements) {
         // The presets were already built.
         return;
       }
+
       const { Services } = lazy.Services();
       const { presets } = lazy.Background();
       const currentPreset = Services.prefs.getCharPref(
@@ -210,11 +206,12 @@ function createViewControllers(state, elements) {
       );
 
       const menuitems = Object.entries(presets).map(([id, preset]) => {
-        const menuitem = elements.document.createXULElement("menuitem");
-        menuitem.setAttribute("label", preset.label);
+        const { document, presetsMenuList } = elements;
+        const menuitem = document.createXULElement("menuitem");
+        document.l10n.setAttributes(menuitem, preset.l10nIds.popup.label);
         menuitem.setAttribute("value", id);
         if (id === currentPreset) {
-          elements.presetsMenuList.setAttribute("value", id);
+          presetsMenuList.setAttribute("value", id);
         }
         return menuitem;
       });
@@ -228,7 +225,6 @@ function createViewControllers(state, elements) {
       if (!panel) {
         throw new Error("Could not find the panel from the panelview.");
       }
-      panel.removeAttribute("isinfoexpanded");
       /** @type {any} */ (panel).hidePopup();
     },
   };
@@ -241,7 +237,7 @@ function createViewControllers(state, elements) {
  * @param {Elements} elements
  * @param {ViewController} view
  */
-function initializePopup(state, elements, view) {
+function initializeView(state, elements, view) {
   view.createPresetsList();
 
   state.cleanup.push(() => {
@@ -354,7 +350,7 @@ function addPopupEventHandlers(state, elements, view) {
     event.preventDefault();
   });
 
-  addHandler(elements.presetsCustomButton, "click", () => {
+  addHandler(elements.presetsEditSettings, "click", () => {
     elements.window.openTrustedLinkIn("about:profiling", "tab");
     view.hidePopup();
   });
@@ -377,13 +373,22 @@ function addPopupEventHandlers(state, elements, view) {
   }
 }
 
+/**
+ * Initialize everything needed for the popup to work fine.
+ * @param {State} panelState
+ * @param {XULElement} panelview
+ */
+function initializePopup(panelState, panelview) {
+  const panelElements = selectElementsInPanelview(panelview);
+  const panelviewControllers = createViewControllers(panelState, panelElements);
+  addPopupEventHandlers(panelState, panelElements, panelviewControllers);
+  initializeView(panelState, panelElements, panelviewControllers);
+}
+
 // Provide an exports object for the JSM to be properly read by TypeScript.
 /** @type {any} */ (this).module = {};
 
 module.exports = {
-  selectElementsInPanelview,
-  createViewControllers,
-  addPopupEventHandlers,
   initializePopup,
 };
 

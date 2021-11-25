@@ -212,7 +212,15 @@ struct ComputedStyleMap {
     ComputeMethod mGetter;
 
     bool IsEnabled() const {
-      return nsCSSProps::IsEnabled(mProperty, CSSEnabledState::ForAllContent);
+      if (!nsCSSProps::IsEnabled(mProperty, CSSEnabledState::ForAllContent)) {
+        return false;
+      }
+      if (nsCSSProps::IsShorthand(mProperty) &&
+          !StaticPrefs::layout_css_computed_style_shorthands()) {
+        return nsCSSProps::PropHasFlags(
+            mProperty, CSSPropFlags::ShorthandUnconditionallyExposedOnGetCS);
+      }
+      return true;
     }
   };
 
@@ -509,6 +517,23 @@ static bool MustReresolveStyle(const mozilla::ComputedStyle* aStyle) {
   return aStyle->HasPseudoElementData() && !aStyle->IsPseudoElement();
 }
 
+static bool IsInFlatTree(const Element& aElement) {
+  const auto* topmost = &aElement;
+  while (true) {
+    if (topmost->HasServoData()) {
+      // If we have styled this element then we know it's in the flat tree.
+      return true;
+    }
+    const Element* parent = topmost->GetFlattenedTreeParentElement();
+    if (!parent) {
+      break;
+    }
+    topmost = parent;
+  }
+  auto* root = topmost->GetFlattenedTreeParentNode();
+  return root && root->IsDocument();
+}
+
 already_AddRefed<ComputedStyle> nsComputedDOMStyle::DoGetComputedStyleNoFlush(
     const Element* aElement, PseudoStyleType aPseudo, PresShell* aPresShell,
     StyleType aStyleType) {
@@ -534,9 +559,11 @@ already_AddRefed<ComputedStyle> nsComputedDOMStyle::DoGetComputedStyleNoFlush(
   if (!aElement->IsInComposedDoc()) {
     // Don't return styles for disconnected elements, that makes no sense. This
     // can only happen with a non-null presShell for cross-document calls.
-    //
-    // FIXME(emilio, bug 1483798): This should also not return styles for
-    // elements outside of the flat tree, not just outside of the document.
+    return nullptr;
+  }
+
+  if (!StaticPrefs::layout_css_computed_style_styles_outside_flat_tree() &&
+      !IsInFlatTree(*aElement)) {
     return nullptr;
   }
 
@@ -666,7 +693,7 @@ static void CollectImageURLsForProperty(nsCSSPropertyID aProp,
 
   switch (aProp) {
     case eCSSProperty_cursor:
-      for (auto& image : aStyle.StyleUI()->mCursor.images.AsSpan()) {
+      for (auto& image : aStyle.StyleUI()->Cursor().images.AsSpan()) {
         AddImageURL(image.image, aURLs);
       }
       break;
@@ -1192,19 +1219,6 @@ already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetBottom() {
   return GetOffsetWidthFor(eSideBottom);
 }
 
-/* static */
-void nsComputedDOMStyle::SetToRGBAColor(nsROCSSPrimitiveValue* aValue,
-                                        nscolor aColor) {
-  nsAutoString string;
-  nsStyleUtil::GetSerializedColorValue(aColor, string);
-  aValue->SetString(string);
-}
-
-void nsComputedDOMStyle::SetValueFromComplexColor(
-    nsROCSSPrimitiveValue* aValue, const mozilla::StyleColor& aColor) {
-  SetToRGBAColor(aValue, aColor.CalcColor(*mComputedStyle));
-}
-
 already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetColumnRuleWidth() {
   RefPtr<nsROCSSPrimitiveValue> val = new nsROCSSPrimitiveValue;
   val->SetAppUnits(StyleColumn()->GetComputedColumnRuleWidth());
@@ -1330,7 +1344,7 @@ already_AddRefed<nsROCSSPrimitiveValue> nsComputedDOMStyle::MatrixToCSSValue(
   return val.forget();
 }
 
-already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetOsxFontSmoothing() {
+already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetMozOsxFontSmoothing() {
   if (nsContentUtils::ShouldResistFingerprinting(
           mPresShell->GetPresContext()->GetDocShell())) {
     return nullptr;
@@ -1807,20 +1821,20 @@ already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetBorderRightWidth() {
   return GetBorderWidthFor(eSideRight);
 }
 
-already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetMarginTopWidth() {
-  return GetMarginWidthFor(eSideTop);
+already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetMarginTop() {
+  return GetMarginFor(eSideTop);
 }
 
-already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetMarginBottomWidth() {
-  return GetMarginWidthFor(eSideBottom);
+already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetMarginBottom() {
+  return GetMarginFor(eSideBottom);
 }
 
-already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetMarginLeftWidth() {
-  return GetMarginWidthFor(eSideLeft);
+already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetMarginLeft() {
+  return GetMarginFor(eSideLeft);
 }
 
-already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetMarginRightWidth() {
-  return GetMarginWidthFor(eSideRight);
+already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetMarginRight() {
+  return GetMarginFor(eSideRight);
 }
 
 already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetLineHeight() {
@@ -1846,41 +1860,6 @@ already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetLineHeight() {
     val->SetString("normal");
   }
   return val.forget();
-}
-
-already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetTextDecoration() {
-  auto getPropertyValue = [&](nsCSSPropertyID aID) {
-    RefPtr<nsROCSSPrimitiveValue> value = new nsROCSSPrimitiveValue;
-    nsAutoCString string;
-    mComputedStyle->GetComputedPropertyValue(aID, string);
-    value->SetString(string);
-    return value.forget();
-  };
-
-  const nsStyleTextReset* textReset = StyleTextReset();
-  RefPtr<nsDOMCSSValueList> valueList = GetROCSSValueList(false);
-
-  if (textReset->mTextDecorationLine != StyleTextDecorationLine::NONE) {
-    valueList->AppendCSSValue(
-        getPropertyValue(eCSSProperty_text_decoration_line));
-  }
-
-  if (!textReset->mTextDecorationThickness.IsAuto()) {
-    valueList->AppendCSSValue(
-        getPropertyValue(eCSSProperty_text_decoration_thickness));
-  }
-
-  if (textReset->mTextDecorationStyle != NS_STYLE_TEXT_DECORATION_STYLE_SOLID) {
-    valueList->AppendCSSValue(
-        getPropertyValue(eCSSProperty_text_decoration_style));
-  }
-
-  // The resolved color shouldn't be currentColor, so we always serialize it.
-  RefPtr<nsROCSSPrimitiveValue> val = new nsROCSSPrimitiveValue;
-  SetValueFromComplexColor(val, StyleTextReset()->mTextDecorationColor);
-  valueList->AppendCSSValue(val.forget());
-
-  return valueList.forget();
 }
 
 already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetHeight() {
@@ -2222,8 +2201,7 @@ already_AddRefed<CSSValue> nsComputedDOMStyle::GetBorderWidthFor(
   return val.forget();
 }
 
-already_AddRefed<CSSValue> nsComputedDOMStyle::GetMarginWidthFor(
-    mozilla::Side aSide) {
+already_AddRefed<CSSValue> nsComputedDOMStyle::GetMarginFor(Side aSide) {
   RefPtr<nsROCSSPrimitiveValue> val = new nsROCSSPrimitiveValue;
 
   auto& margin = StyleMargin()->mMargin.Get(aSide);
@@ -2252,8 +2230,8 @@ static void SetValueToExtremumLength(nsROCSSPrimitiveValue* aValue,
       return aValue->SetString("min-content");
     case nsIFrame::ExtremumLength::MozAvailable:
       return aValue->SetString("-moz-available");
-    case nsIFrame::ExtremumLength::MozFitContent:
-      return aValue->SetString("-moz-fit-content");
+    case nsIFrame::ExtremumLength::FitContent:
+      return aValue->SetString("fit-content");
     case nsIFrame::ExtremumLength::FitContentFunction:
       MOZ_ASSERT_UNREACHABLE("fit-content() should be handled separately");
   }
@@ -2269,7 +2247,7 @@ void nsComputedDOMStyle::SetValueFromFitContentFunction(
   nsAutoString fitContentStr;
   fitContentStr.AppendLiteral("fit-content(");
   fitContentStr.Append(argumentStr);
-  fitContentStr.Append(char16_t(')'));
+  fitContentStr.Append(u')');
   aValue->SetString(fitContentStr);
 }
 
@@ -2482,32 +2460,6 @@ already_AddRefed<CSSValue> nsComputedDOMStyle::GetTransformValue(
   return MatrixToCSSValue(matrix);
 }
 
-already_AddRefed<CSSValue> nsComputedDOMStyle::DoGetMask() {
-  const nsStyleSVGReset* svg = StyleSVGReset();
-  const nsStyleImageLayers::Layer& firstLayer = svg->mMask.mLayers[0];
-
-  // Mask is now a shorthand, but it used to be a longhand, so that we
-  // need to support computed style for the cases where it used to be
-  // a longhand.
-  if (svg->mMask.mImageCount > 1 ||
-      firstLayer.mClip != StyleGeometryBox::BorderBox ||
-      firstLayer.mOrigin != StyleGeometryBox::BorderBox ||
-      firstLayer.mComposite != StyleMaskComposite::Add ||
-      firstLayer.mMaskMode != StyleMaskMode::MatchSource ||
-      firstLayer.mPosition != Position::FromPercentage(0.0f) ||
-      !firstLayer.mRepeat.IsInitialValue() ||
-      !firstLayer.mSize.IsInitialValue() ||
-      !(firstLayer.mImage.IsNone() || firstLayer.mImage.IsUrl())) {
-    return nullptr;
-  }
-
-  RefPtr<nsROCSSPrimitiveValue> val = new nsROCSSPrimitiveValue;
-
-  SetValueToURLValue(firstLayer.mImage.GetImageRequestURLValue(), val);
-
-  return val.forget();
-}
-
 already_AddRefed<CSSValue> nsComputedDOMStyle::DummyGetter() {
   MOZ_CRASH("DummyGetter is not supposed to be invoked");
 }
@@ -2555,6 +2507,10 @@ void nsComputedDOMStyle::RegisterPrefChangeCallbacks() {
       prefs.InsertElementSorted(p->mPref);
     }
   }
+
+  prefs.AppendElement(
+      StaticPrefs::GetPrefName_layout_css_computed_style_shorthands());
+
   prefs.AppendElement(nullptr);
 
   MOZ_ASSERT(!gCallbackPrefs);

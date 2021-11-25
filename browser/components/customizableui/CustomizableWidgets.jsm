@@ -135,7 +135,7 @@ const CustomizableWidgets = [
 
       PanelMultiView.getViewNode(
         document,
-        "appMenuRestoreSession"
+        "appMenu-restoreSession"
       ).hidden = !SessionStore.canRestoreLastSession;
 
       // We restrict the amount of results to 42. Not 50, but 42. Why? Because 42.
@@ -238,6 +238,50 @@ const CustomizableWidgets = [
     onCommand(aEvent) {
       let win = aEvent.target.ownerGlobal;
       win.saveBrowser(win.gBrowser.selectedBrowser);
+    },
+  },
+  {
+    id: "print-button",
+    l10nId:
+      !Services.prefs.getBoolPref("print.tab_modal.enabled") &&
+      AppConstants.platform !== "macosx"
+        ? "navbar-print-tab-modal-disabled"
+        : "navbar-print",
+    shortcutId: "printKb",
+    keepBroadcastAttributesWhenCustomizing: true,
+    onCreated(aNode) {
+      aNode.setAttribute("command", "cmd_printPreview");
+      Services.prefs.addObserver("print.tab_modal.enabled", this);
+      if (!this.printNodeMap) {
+        this.printNodeMap = new Map();
+      }
+      this.printNodeMap.set(aNode.ownerDocument, aNode);
+
+      let listener = {
+        onWidgetInstanceRemoved: (aWidgetId, aDoc) => {
+          if (!aDoc) {
+            return;
+          }
+          this.printNodeMap.delete(aDoc);
+          CustomizableUI.removeListener(listener);
+        },
+      };
+
+      CustomizableUI.addListener(listener);
+    },
+    observe() {
+      for (let [document, printBtn] of this.printNodeMap) {
+        let keyEl = document.getElementById(this.shortcutId);
+        let shortcut = ShortcutUtils.prettifyShortcut(keyEl);
+        document.l10n.setAttributes(
+          printBtn,
+          !Services.prefs.getBoolPref("print.tab_modal.enabled") &&
+            AppConstants.platform !== "macosx"
+            ? "navbar-print-tab-modal-disabled"
+            : "navbar-print",
+          { shortcut }
+        );
+      }
     },
   },
   {
@@ -481,6 +525,7 @@ if (Services.prefs.getBoolPref("identity.fxaccounts.enabled")) {
 if (!screenshotsDisabled) {
   CustomizableWidgets.push({
     id: "screenshot-button",
+    shortcutId: "key_screenshot",
     l10nId: "screenshot-toolbarbutton",
     onCommand(aEvent) {
       if (SCREENSHOT_BROWSER_COMPONENT) {
@@ -489,7 +534,11 @@ if (!screenshotsDisabled) {
           "menuitem-screenshot"
         );
       } else {
-        Services.obs.notifyObservers(null, "menuitem-screenshot-extension");
+        Services.obs.notifyObservers(
+          null,
+          "menuitem-screenshot-extension",
+          "toolbar"
+        );
       }
     },
     onCreated(aNode) {

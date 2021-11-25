@@ -68,6 +68,7 @@ where
             CssRule::CounterStyle(_) |
             CssRule::Viewport(_) |
             CssRule::Keyframes(_) |
+            CssRule::ScrollTimeline(_) |
             CssRule::Page(_) |
             CssRule::FontFeatureValues(_) => None,
             CssRule::Import(ref import_rule) => {
@@ -110,7 +111,7 @@ where
                     LayerRuleKind::Block { ref rules, .. } => Some(rules.read_with(guard).0.iter()),
                     LayerRuleKind::Statement { .. } => None,
                 }
-            }
+            },
         }
     }
 }
@@ -322,7 +323,8 @@ impl<'a, 'b> EffectiveRulesIterator<'a, 'b> {
         guard: &'a SharedRwLockReadGuard<'b>,
         rule: &'a CssRule,
     ) -> Self {
-        let children = RulesIterator::<AllRules>::children(rule, device, quirks_mode, guard, &mut false);
+        let children =
+            RulesIterator::<AllRules>::children(rule, device, quirks_mode, guard, &mut false);
         EffectiveRulesIterator::new(device, quirks_mode, guard, children.unwrap_or([].iter()))
     }
 }

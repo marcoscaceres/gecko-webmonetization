@@ -47,8 +47,7 @@ class SourceSurfaceSharedDataWrapper final : public DataSourceSurface {
         mCreatorRef(true) {}
 
   void Init(const IntSize& aSize, int32_t aStride, SurfaceFormat aFormat,
-            const SharedMemoryBasic::Handle& aHandle,
-            base::ProcessId aCreatorPid);
+            SharedMemoryBasic::Handle aHandle, base::ProcessId aCreatorPid);
 
   void Init(SourceSurfaceSharedData* aSurface);
 
@@ -56,7 +55,9 @@ class SourceSurfaceSharedDataWrapper final : public DataSourceSurface {
 
   int32_t Stride() override { return mStride; }
 
-  SurfaceType GetType() const override { return SurfaceType::DATA; }
+  SurfaceType GetType() const override {
+    return SurfaceType::DATA_SHARED_WRAPPER;
+  }
   IntSize GetSize() const override { return mSize; }
   SurfaceFormat GetFormat() const override { return mFormat; }
 
@@ -64,7 +65,7 @@ class SourceSurfaceSharedDataWrapper final : public DataSourceSurface {
 
   bool OnHeap() const override { return false; }
 
-  bool Map(MapType, MappedSurface* aMappedSurface) final;
+  bool Map(MapType aMapType, MappedSurface* aMappedSurface) final;
 
   void Unmap() final;
 
@@ -173,8 +174,12 @@ class SourceSurfaceSharedData : public DataSourceSurface {
    * the same data pointer by retaining the old shared buffer until
    * the last mapping is freed via Unmap.
    */
-  bool Map(MapType, MappedSurface* aMappedSurface) final {
+  bool Map(MapType aMapType, MappedSurface* aMappedSurface) final {
     MutexAutoLock lock(mMutex);
+    if (mFinalized && aMapType != MapType::READ) {
+      // Once finalized the data may be write-protected
+      return false;
+    }
     ++mMapCount;
     aMappedSurface->mData = GetDataInternal();
     aMappedSurface->mStride = mStride;

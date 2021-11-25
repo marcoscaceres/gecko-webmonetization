@@ -118,3 +118,25 @@ perftools-onboarding-reenable-old-panel = (For a limited time, you can access th
 
 perftools-onboarding-close-button =
   .aria-label = Close the onboarding message
+
+## Profiler presets
+
+# Presets and their l10n IDs are defined in the file
+# devtools/client/performance-new/popup/background.jsm.js
+# The same labels and descriptions are also defined in appmenu.ftl.
+
+perftools-presets-web-developer-label = Web Developer
+perftools-presets-web-developer-description = Recommended preset for most web app debugging, with low overhead.
+
+perftools-presets-firefox-label = { -brand-shorter-name }
+perftools-presets-firefox-description = Recommended preset for profiling { -brand-shorter-name }.
+
+perftools-presets-graphics-label = Graphics
+perftools-presets-graphics-description = Preset for investigating graphics bugs in { -brand-shorter-name }.
+
+perftools-presets-media-label = Media
+perftools-presets-media-description2 = Preset for investigating audio and video bugs in { -brand-shorter-name }.
+
+perftools-presets-custom-label = Custom
+
+##

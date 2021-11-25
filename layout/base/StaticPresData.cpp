@@ -6,14 +6,16 @@
 
 #include "mozilla/StaticPresData.h"
 
+#include "gfxFontFeatures.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/ServoBindings.h"
 #include "mozilla/ServoUtils.h"
+#include "mozilla/StaticPtr.h"
 #include "nsPresContext.h"
 
 namespace mozilla {
 
-static StaticPresData* sSingleton = nullptr;
+static StaticAutoPtr<StaticPresData> sSingleton;
 
 void StaticPresData::Init() {
   MOZ_ASSERT(!sSingleton);
@@ -22,7 +24,6 @@ void StaticPresData::Init() {
 
 void StaticPresData::Shutdown() {
   MOZ_ASSERT(sSingleton);
-  delete sSingleton;
   sSingleton = nullptr;
 }
 
@@ -149,10 +150,12 @@ void LangGroupFontPrefs::Initialize(nsStaticAtom* aLangGroupAtom) {
         auto defaultType = defaultVariableName.IsGeneric()
                                ? defaultVariableName.AsGeneric()
                                : StyleGenericFontFamily::None;
-        NS_ASSERTION(defaultType == StyleGenericFontFamily::Serif ||
-                         defaultType == StyleGenericFontFamily::SansSerif,
-                     "default type must be serif or sans-serif");
-        mDefaultVariableFont.family.families.fallback = defaultType;
+        if (defaultType == StyleGenericFontFamily::Serif ||
+            defaultType == StyleGenericFontFamily::SansSerif) {
+          mDefaultVariableFont.family = *Servo_FontFamily_Generic(defaultType);
+        } else {
+          NS_WARNING("default type must be serif or sans-serif");
+        }
       }
     } else {
       if (type != DefaultFont::Monospace) {

@@ -38,6 +38,7 @@
 #include "ProfilerCodeAddressService.h"
 #include "ProfilerIOInterposeObserver.h"
 #include "ProfilerParent.h"
+#include "ProfilerRustBindings.h"
 #include "shared-libraries.h"
 #include "VTuneProfiler.h"
 
@@ -63,7 +64,6 @@
 #include "mozilla/StaticPtr.h"
 #include "mozilla/ThreadLocal.h"
 #include "mozilla/TimeStamp.h"
-#include "mozilla/Tuple.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/Vector.h"
 #include "BaseProfiler.h"
@@ -93,6 +93,7 @@
 #include <ostream>
 #include <set>
 #include <sstream>
+#include <string_view>
 #include <type_traits>
 
 #if defined(GP_OS_android)
@@ -660,6 +661,10 @@ class ActivePS {
       aFeatures |= ProfilerFeature::MainThreadIO;
     }
 
+    if (aFeatures & ProfilerFeature::CPUAllThreads) {
+      aFeatures |= ProfilerFeature::CPUUtilization;
+    }
+
     return aFeatures;
   }
 
@@ -839,11 +844,25 @@ class ActivePS {
     return n;
   }
 
-  static bool ShouldProfileThread(PSLockRef aLock,
-                                  const ThreadRegistrationInfo& aInfo) {
+  static ThreadProfilingFeatures ProfilingFeaturesForThread(
+      PSLockRef aLock, const ThreadRegistrationInfo& aInfo) {
     MOZ_ASSERT(sInstance);
-    return ((aInfo.IsMainThread() || FeatureThreads(aLock)) &&
-            sInstance->ThreadSelected(aInfo.Name()));
+    if ((aInfo.IsMainThread() || FeatureThreads(aLock)) &&
+        sInstance->ThreadSelected(aInfo.Name())) {
+      // This thread was selected by the user, record everything.
+      return ThreadProfilingFeatures::Any;
+    }
+    ThreadProfilingFeatures features = ThreadProfilingFeatures::NotProfiled;
+    if (ActivePS::FeatureCPUAllThreads(aLock)) {
+      features = Combine(features, ThreadProfilingFeatures::CPUUtilization);
+    }
+    if (ActivePS::FeatureSamplingAllThreads(aLock)) {
+      features = Combine(features, ThreadProfilingFeatures::Sampling);
+    }
+    if (ActivePS::FeatureMarkersAllThreads(aLock)) {
+      features = Combine(features, ThreadProfilingFeatures::Markers);
+    }
+    return features;
   }
 
   [[nodiscard]] static bool AppendPostSamplingCallback(
@@ -2474,6 +2493,12 @@ static void StreamMarkerSchema(SpliceableJSONWriter& aWriter) {
       markerTypeFunctions.mMarkerSchemaFunction().Stream(aWriter, name);
     }
   }
+
+  // Now stream the Rust marker schemas. Passing the names set as a void pointer
+  // as well, so we can continue checking if the schemes are added already in
+  // the Rust side.
+  profiler::ffi::gecko_profiler_stream_marker_schemas(
+      &aWriter, static_cast<void*>(&names));
 }
 
 // Some meta information that is better recorded before streaming the profile.
@@ -2978,11 +3003,29 @@ static void locked_profiler_stream_json_for_this_process(
     ThreadRegistry::LockedRegistry lockedRegistry;
     ActivePS::ProfiledThreadList threads =
         ActivePS::ProfiledThreads(lockedRegistry, aLock);
+
+    // Prepare the streaming context for each thread.
+    ProcessStreamingContext processStreamingContext(
+        threads.length(), CorePS::ProcessStartTime(), aSinceTime);
     for (ActivePS::ProfiledThreadListElement& thread : threads) {
-      thread.mProfiledThreadData->StreamJSON(
-          buffer, thread.mJSContext, aWriter, CorePS::ProcessName(aLock),
-          CorePS::ETLDplus1(aLock), CorePS::ProcessStartTime(), aSinceTime,
-          ActivePS::FeatureJSTracer(aLock), aService);
+      MOZ_RELEASE_ASSERT(thread.mProfiledThreadData);
+      processStreamingContext.AddThreadStreamingContext(
+          *thread.mProfiledThreadData, buffer, thread.mJSContext, aService);
+    }
+
+    // Read the buffer once, and extract all samples and markers that the
+    // context expects.
+    buffer.StreamSamplesAndMarkersToJSON(processStreamingContext);
+
+    // Stream each thread from the pre-filled context.
+    for (ThreadStreamingContext& threadStreamingContext :
+         std::move(processStreamingContext)) {
+      threadStreamingContext.FinalizeWriter();
+      threadStreamingContext.mProfiledThreadData.StreamJSON(
+          std::move(threadStreamingContext), aWriter,
+          CorePS::ProcessName(aLock), CorePS::ETLDplus1(aLock),
+          CorePS::ProcessStartTime(), ActivePS::FeatureJSTracer(aLock),
+          aService);
     }
 
 #if defined(GP_OS_android)
@@ -3120,6 +3163,7 @@ static void PrintUsageThenExit(int aExitCode) {
       "  If unset, the platform default is used:\n"
       "  %u entries per process, or %u when MOZ_PROFILER_STARTUP is set.\n"
       "  (%u bytes per entry -> %u or %u total bytes per process)\n"
+      "  Optional units in bytes: KB, KiB, MB, MiB, GB, GiB\n"
       "\n"
       "  MOZ_PROFILER_STARTUP_DURATION=<1..>\n"
       "  If MOZ_PROFILER_STARTUP is set, specifies the maximum life time of\n"
@@ -3274,6 +3318,13 @@ class Sampler {
 static RunningTimes GetThreadRunningTimesDiff(
     PSLockRef aLock,
     ThreadRegistration::UnlockedRWForLockedProfiler& aThreadData);
+// Platform-specific function that *may* discard CPU measurements since the
+// previous call to GetThreadRunningTimesDiff, if the way to suspend threads on
+// this platform may add running times to that thread.
+// No-op otherwise, if suspending a thread doesn't make it work.
+static void DiscardSuspendedThreadRunningTimes(
+    PSLockRef aLock,
+    ThreadRegistration::UnlockedRWForLockedProfiler& aThreadData);
 
 // Template function to be used by `GetThreadRunningTimesDiff()` (unless some
 // platform has a better way to achieve this).
@@ -3321,15 +3372,35 @@ RunningTimes GetRunningTimesWithTightTimestamp(
   TimeStamp before = TimeStamp::Now();
   aGetCPURunningTimesFunction(runningTimes);
   TimeStamp after = TimeStamp::Now();
-  // In most cases, the above should be quick enough. But if not, repeat:
-  while (MOZ_UNLIKELY(after - before > scMaxRunningTimesReadDuration)) {
+  const TimeDuration duration = after - before;
+
+  // In most cases, the above should be quick enough. But if not (e.g., because
+  // of an OS context switch), repeat once:
+  if (MOZ_UNLIKELY(duration > scMaxRunningTimesReadDuration)) {
     AUTO_PROFILER_STATS(GetRunningTimes_REDO);
-    before = after;
-    aGetCPURunningTimesFunction(runningTimes);
-    after = TimeStamp::Now();
+    RunningTimes runningTimes2;
+    aGetCPURunningTimesFunction(runningTimes2);
+    TimeStamp after2 = TimeStamp::Now();
+    const TimeDuration duration2 = after2 - after;
+    if (duration2 < duration) {
+      // We did it faster, use the new results. (But it could still be slower
+      // than expected, see note below for why it's acceptable.)
+      // This must stay *after* the CPU measurements.
+      runningTimes2.SetPostMeasurementTimeStamp(after2);
+      return runningTimes2;
+    }
+    // Otherwise use the initial results, they were slow, but faster than the
+    // second attempt.
+    // This means that something bad happened twice in a row on the same thread!
+    // So trying more times would be unlikely to get much better, and would be
+    // more expensive than the precision is worth.
+    // At worst, it means that a spike of activity may be reported in the next
+    // time slice. But in the end, the cumulative work is conserved, so it
+    // should still be visible at about the correct time in the graph.
+    AUTO_PROFILER_STATS(GetRunningTimes_RedoWasWorse);
   }
-  // Finally, record the closest timestamp just after the final measurement was
-  // done. This must stay *after* the CPU measurements.
+
+  // This must stay *after* the CPU measurements.
   runningTimes.SetPostMeasurementTimeStamp(after);
 
   return runningTimes;
@@ -3600,11 +3671,27 @@ void SamplerThread::Run() {
               // This thread is not being profiled, continue with the next one.
               continue;
             }
+
+            const ThreadProfilingFeatures whatToProfile =
+                unlockedThreadData.ProfilingFeatures();
+            const bool threadCPUUtilization =
+                cpuUtilization &&
+                DoFeaturesIntersect(whatToProfile,
+                                    ThreadProfilingFeatures::CPUUtilization);
+            const bool threadStackSampling =
+                stackSampling &&
+                DoFeaturesIntersect(whatToProfile,
+                                    ThreadProfilingFeatures::Sampling);
+            if (!threadCPUUtilization && !threadStackSampling) {
+              // Nothing to profile on this thread, continue with the next one.
+              continue;
+            }
+
             const ProfilerThreadId threadId =
                 unlockedThreadData.Info().ThreadId();
 
             const RunningTimes runningTimesDiff = [&]() {
-              if (!cpuUtilization) {
+              if (!threadCPUUtilization) {
                 // If we don't need CPU measurements, we only need a timestamp.
                 return RunningTimes(TimeStamp::Now());
               }
@@ -3627,8 +3714,9 @@ void SamplerThread::Run() {
             //     could result in an unneeded sample.
             // However we're using current running times (instead of copying the
             // old ones) because some work could have happened.
-            if (unlockedThreadData.CanDuplicateLastSampleDueToSleep() ||
-                runningTimesDiff.GetThreadCPUDelta() == Some(uint64_t(0))) {
+            if (threadStackSampling &&
+                (unlockedThreadData.CanDuplicateLastSampleDueToSleep() ||
+                 runningTimesDiff.GetThreadCPUDelta() == Some(uint64_t(0)))) {
               const bool dup_ok = ActivePS::Buffer(lock).DuplicateLastSample(
                   threadId, threadSampleDeltaMs,
                   profiledThreadData->LastSample(), runningTimesDiff);
@@ -3664,7 +3752,7 @@ void SamplerThread::Run() {
                   ProfileBufferEntry::Kind::RunningTimes, runningTimesDiff);
             }
 
-            if (stackSampling) {
+            if (threadStackSampling) {
               ThreadRegistry::OffThreadRef::RWFromAnyThreadWithLock
                   lockedThreadData = offThreadRef.LockedRWFromAnyThread();
               // Suspend the thread and collect its stack data in the local
@@ -3864,6 +3952,13 @@ void SamplerThread::Run() {
                         Some(currentEventDelay.ToMilliseconds() +
                              currentEventRunning.ToMilliseconds());
                   });
+
+              if (cpuUtilization) {
+                // Suspending the thread for sampling could have added some
+                // running time to it, discard any since the call to
+                // GetThreadRunningTimesDiff above.
+                DiscardSuspendedThreadRunningTimes(lock, unlockedThreadData);
+              }
 
               // If we got eventDelay data, store it before the CompactStack.
               // Note: It is not stored inside the CompactStack so that it
@@ -4077,33 +4172,36 @@ static ProfilingStack* locked_register_thread(
 
   VTUNE_REGISTER_THREAD(aOffThreadRef.UnlockedConstReaderCRef().Info().Name());
 
-  if (ActivePS::Exists(aLock) &&
-      ActivePS::ShouldProfileThread(
-          aLock, aOffThreadRef.UnlockedConstReaderCRef().Info())) {
-    ThreadRegistry::OffThreadRef::RWFromAnyThreadWithLock
-        lockedRWFromAnyThread = aOffThreadRef.LockedRWFromAnyThread();
+  if (ActivePS::Exists(aLock)) {
+    ThreadProfilingFeatures threadProfilingFeatures =
+        ActivePS::ProfilingFeaturesForThread(
+            aLock, aOffThreadRef.UnlockedConstReaderCRef().Info());
+    if (threadProfilingFeatures != ThreadProfilingFeatures::NotProfiled) {
+      ThreadRegistry::OffThreadRef::RWFromAnyThreadWithLock
+          lockedRWFromAnyThread = aOffThreadRef.LockedRWFromAnyThread();
 
-    nsCOMPtr<nsIEventTarget> eventTarget =
-        lockedRWFromAnyThread->GetEventTarget();
-    ProfiledThreadData* profiledThreadData = ActivePS::AddLiveProfiledThread(
-        aLock,
-        MakeUnique<ProfiledThreadData>(
-            aOffThreadRef.UnlockedConstReaderCRef().Info(), eventTarget));
-    lockedRWFromAnyThread->SetIsBeingProfiledWithProfiledThreadData(
-        profiledThreadData, aLock);
+      nsCOMPtr<nsIEventTarget> eventTarget =
+          lockedRWFromAnyThread->GetEventTarget();
+      ProfiledThreadData* profiledThreadData = ActivePS::AddLiveProfiledThread(
+          aLock,
+          MakeUnique<ProfiledThreadData>(
+              aOffThreadRef.UnlockedConstReaderCRef().Info(), eventTarget));
+      lockedRWFromAnyThread->SetProfilingFeaturesAndData(
+          threadProfilingFeatures, profiledThreadData, aLock);
 
-    if (ActivePS::FeatureJS(aLock)) {
-      lockedRWFromAnyThread->StartJSSampling(ActivePS::JSFlags(aLock));
-      if (ThreadRegistration::LockedRWOnThread* lockedRWOnThread =
-              lockedRWFromAnyThread.GetLockedRWOnThread();
-          lockedRWOnThread) {
-        // We can manually poll the current thread so it starts sampling
-        // immediately.
-        lockedRWOnThread->PollJSSampling();
-      }
-      if (lockedRWFromAnyThread->GetJSContext()) {
-        profiledThreadData->NotifyReceivedJSContext(
-            ActivePS::Buffer(aLock).BufferRangeEnd());
+      if (ActivePS::FeatureJS(aLock)) {
+        lockedRWFromAnyThread->StartJSSampling(ActivePS::JSFlags(aLock));
+        if (ThreadRegistration::LockedRWOnThread* lockedRWOnThread =
+                lockedRWFromAnyThread.GetLockedRWOnThread();
+            lockedRWOnThread) {
+          // We can manually poll the current thread so it starts sampling
+          // immediately.
+          lockedRWOnThread->PollJSSampling();
+        }
+        if (lockedRWFromAnyThread->GetJSContext()) {
+          profiledThreadData->NotifyReceivedJSContext(
+              ActivePS::Buffer(aLock).BufferRangeEnd());
+        }
       }
     }
   }
@@ -4214,6 +4312,16 @@ void profiler_init_threadmanager() {
       });
 }
 
+static const char* get_size_suffix(const char* str) {
+  const char* ptr = str;
+
+  while (isdigit(*ptr)) {
+    ptr++;
+  }
+
+  return ptr;
+}
+
 void profiler_init(void* aStackTop) {
   LOG("profiler_init");
 
@@ -4294,6 +4402,26 @@ void profiler_init(void* aStackTop) {
     if (startupCapacity && startupCapacity[0] != '\0') {
       errno = 0;
       long capacityLong = strtol(startupCapacity, nullptr, 10);
+      std::string_view sizeSuffix = get_size_suffix(startupCapacity);
+
+      if (sizeSuffix == "KB") {
+        capacityLong *= 1000 / scBytesPerEntry;
+      } else if (sizeSuffix == "KiB") {
+        capacityLong *= 1024 / scBytesPerEntry;
+      } else if (sizeSuffix == "MB") {
+        capacityLong *= (1000 * 1000) / scBytesPerEntry;
+      } else if (sizeSuffix == "MiB") {
+        capacityLong *= (1024 * 1024) / scBytesPerEntry;
+      } else if (sizeSuffix == "GB") {
+        capacityLong *= (1000 * 1000 * 1000) / scBytesPerEntry;
+      } else if (sizeSuffix == "GiB") {
+        capacityLong *= (1024 * 1024 * 1024) / scBytesPerEntry;
+      } else if (!sizeSuffix.empty()) {
+        LOG("- MOZ_PROFILER_STARTUP_ENTRIES unit must be one of the "
+            "following: KB, KiB, MB, MiB, GB, GiB");
+        PrintUsageThenExit(1);
+      }
+
       // `long` could be 32 or 64 bits, so we force a 64-bit comparison with
       // the maximum 32-bit signed number (as more than that is clamped down to
       // 2^31 anyway).
@@ -4440,7 +4568,7 @@ void profiler_shutdown(IsFastShutdown aIsFastShutdown) {
     // Save the profile on shutdown if requested.
     if (ActivePS::Exists(lock)) {
       const char* filename = getenv("MOZ_PROFILER_SHUTDOWN");
-      if (filename) {
+      if (filename && filename[0] != '\0') {
         locked_profiler_save_profile_to_file(lock, filename,
                                              preRecordedMetaInformation,
                                              /* aIsShuttingDown */ true);
@@ -4595,6 +4723,12 @@ void GetProfilerEnvVarsForChildProcess(
   }
 
   aSetEnv("MOZ_PROFILER_STARTUP", "1");
+
+  // If MOZ_PROFILER_SHUTDOWN is defined, make sure it's empty in children, so
+  // that they don't attempt to write over that file.
+  if (getenv("MOZ_PROFILER_SHUTDOWN")) {
+    aSetEnv("MOZ_PROFILER_SHUTDOWN", "");
+  }
 
   // Hidden option to stop Base Profiler, mostly due to Talos intermittents,
   // see https://bugzilla.mozilla.org/show_bug.cgi?id=1638851#c3
@@ -4861,14 +4995,16 @@ static void locked_profiler_start(PSLockRef aLock, PowerOfTwo32 aCapacity,
     const ThreadRegistrationInfo& info =
         offThreadRef.UnlockedConstReaderCRef().Info();
 
-    if (ActivePS::ShouldProfileThread(aLock, info)) {
+    ThreadProfilingFeatures threadProfilingFeatures =
+        ActivePS::ProfilingFeaturesForThread(aLock, info);
+    if (threadProfilingFeatures != ThreadProfilingFeatures::NotProfiled) {
       ThreadRegistry::OffThreadRef::RWFromAnyThreadWithLock lockedThreadData =
           offThreadRef.LockedRWFromAnyThread();
       nsCOMPtr<nsIEventTarget> eventTarget = lockedThreadData->GetEventTarget();
       ProfiledThreadData* profiledThreadData = ActivePS::AddLiveProfiledThread(
           aLock, MakeUnique<ProfiledThreadData>(info, eventTarget));
-      lockedThreadData->SetIsBeingProfiledWithProfiledThreadData(
-          profiledThreadData, aLock);
+      lockedThreadData->SetProfilingFeaturesAndData(threadProfilingFeatures,
+                                                    profiledThreadData, aLock);
       if (ActivePS::FeatureJS(aLock)) {
         lockedThreadData->StartJSSampling(ActivePS::JSFlags(aLock));
         if (ThreadRegistration::LockedRWOnThread* lockedRWOnThread =
@@ -4890,7 +5026,7 @@ static void locked_profiler_start(PSLockRef aLock, PowerOfTwo32 aCapacity,
       }
 #endif
       lockedThreadData->ReinitializeOnResume();
-      if (lockedThreadData->GetJSContext()) {
+      if (ActivePS::FeatureJS(aLock) && lockedThreadData->GetJSContext()) {
         profiledThreadData->NotifyReceivedJSContext(0);
       }
     }
@@ -5065,14 +5201,15 @@ void profiler_ensure_started(PowerOfTwo32 aCapacity, double aInterval,
   // Stop sampling live threads.
   ThreadRegistry::LockedRegistry lockedRegistry;
   for (ThreadRegistry::OffThreadRef offThreadRef : lockedRegistry) {
-    if (!offThreadRef.UnlockedRWForLockedProfilerRef().IsBeingProfiled(aLock)) {
+    if (offThreadRef.UnlockedRWForLockedProfilerRef().ProfilingFeatures() ==
+        ThreadProfilingFeatures::NotProfiled) {
       continue;
     }
 
     ThreadRegistry::OffThreadRef::RWFromAnyThreadWithLock lockedThreadData =
         offThreadRef.LockedRWFromAnyThread();
 
-    lockedThreadData->ClearIsBeingProfiledAndProfiledThreadData(aLock);
+    lockedThreadData->ClearProfilingFeaturesAndData(aLock);
 
     if (ActivePS::FeatureJS(aLock)) {
       lockedThreadData->StopJSSampling();
@@ -5397,7 +5534,7 @@ static void locked_unregister_thread(
 
   ProfiledThreadData* profiledThreadData =
       lockedThreadData->GetProfiledThreadData(lock);
-  lockedThreadData->ClearIsBeingProfiledAndProfiledThreadData(lock);
+  lockedThreadData->ClearProfilingFeaturesAndData(lock);
 
   MOZ_RELEASE_ASSERT(
       lockedThreadData->Info().ThreadId() == profiler_current_thread_id(),
@@ -5616,6 +5753,8 @@ bool profiler_is_locked_on_current_thread() {
   // - The ProfilerParent or ProfilerChild mutex, used to store and process
   //   buffer chunk updates.
   return PSAutoLock::IsLockedOnCurrentThread() ||
+         ThreadRegistry::IsRegistryMutexLockedOnCurrentThread() ||
+         ThreadRegistration::IsDataMutexLockedOnCurrentThread() ||
          CorePS::CoreBuffer().IsThreadSafeAndLockedOnCurrentThread() ||
          ProfilerParent::IsLockedOnCurrentThread() ||
          ProfilerChild::IsLockedOnCurrentThread();
@@ -5630,6 +5769,10 @@ void profiler_set_js_context(JSContext* aCx) {
         aOnThreadRef.WithLockedRWOnThread(
             [&](ThreadRegistration::LockedRWOnThread& aThreadData) {
               aThreadData.SetJSContext(aCx);
+
+              if (!ActivePS::Exists(lock) || !ActivePS::FeatureJS(lock)) {
+                return;
+              }
 
               // This call is on-thread, so we can call PollJSSampling() to
               // start JS sampling immediately.

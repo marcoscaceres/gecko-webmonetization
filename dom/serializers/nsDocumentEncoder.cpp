@@ -9,17 +9,14 @@
  * to strings in a gazillion different ways.
  */
 
-#include "nsIDocumentEncoder.h"
-
 #include <utility>
 
 #include "nscore.h"
 #include "nsISupports.h"
-#include "mozilla/dom/Document.h"
 #include "nsCOMPtr.h"
 #include "nsCRT.h"
 #include "nsIContentSerializer.h"
-#include "mozilla/Encoding.h"
+#include "nsIDocumentEncoder.h"
 #include "nsComponentManagerUtils.h"
 #include "nsIOutputStream.h"
 #include "nsRange.h"
@@ -36,15 +33,17 @@
 #include "nsReadableUtils.h"
 #include "nsTArray.h"
 #include "nsIFrame.h"
+#include "nsLayoutUtils.h"
 #include "nsStringBuffer.h"
 #include "mozilla/dom/Comment.h"
+#include "mozilla/dom/Document.h"
 #include "mozilla/dom/DocumentType.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/HTMLBRElement.h"
 #include "mozilla/dom/ProcessingInstruction.h"
 #include "mozilla/dom/ShadowRoot.h"
 #include "mozilla/dom/Text.h"
-#include "nsLayoutUtils.h"
+#include "mozilla/Encoding.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/UniquePtr.h"
@@ -124,9 +123,8 @@ nsresult TextStreamer::EncodeAndWrite() {
     uint32_t result;
     size_t read;
     size_t written;
-    bool hadErrors;
     if (mIsPlainText) {
-      Tie(result, read, written) =
+      std::tie(result, read, written) =
           mUnicodeEncoder->EncodeFromUTF16WithoutReplacement(src, dst, false);
       if (result != kInputEmpty && result != kOutputFull) {
         // There's always room for one byte in the case of
@@ -135,10 +133,9 @@ nsresult TextStreamer::EncodeAndWrite() {
         dst[written++] = '?';
       }
     } else {
-      Tie(result, read, written, hadErrors) =
+      std::tie(result, read, written, std::ignore) =
           mUnicodeEncoder->EncodeFromUTF16(src, dst, false);
     }
-    Unused << hadErrors;
     src = src.From(read);
     // Sadly, we still have test cases that implement nsIOutputStream in JS, so
     // the buffer needs to be zero-terminated for XPConnect to do its thing.

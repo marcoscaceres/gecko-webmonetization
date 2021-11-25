@@ -10,26 +10,60 @@
 #include "mozilla/DebugOnly.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/Result.h"
+#include "mozilla/Span.h"
 #include "mozilla/Utf8.h"
 #include "mozilla/Vector.h"
 #include "mozilla/intl/ICUError.h"
 
+// When building standalone js shell, it will include headers from
+// intl/components if JS_HAS_INTL_API is true (the default value), but js shell
+// won't include headers from XPCOM, so don't include nsTArray.h when building
+// standalone js shell.
+#ifndef JS_STANDALONE
+#  include "nsTArray.h"
+#endif
+
+#include <cstring>
+#include <iterator>
+#include <stddef.h>
+#include <stdint.h>
+#include <string_view>
+
+struct UFormattedValue;
 namespace mozilla::intl {
 
 static inline const char* IcuLocale(const char* aLocale) {
+  // Return the empty string if the input is exactly equal to the string "und".
   const char* locale = aLocale;
-  if (!strncmp(locale, "und", 3)) {
-    locale = "";
+  if (!std::strcmp(locale, "und")) {
+    locale = "";  // ICU root locale
   }
   return locale;
 }
 
-using ICUResult = Result<Ok, ICUError>;
+static inline const char* AssertNullTerminatedString(Span<const char> aSpan) {
+  // Intentionally check one past the last character, because we expect that the
+  // NUL character isn't part of the string.
+  MOZ_ASSERT(*(aSpan.data() + aSpan.size()) == '\0');
 
-/**
- * Convert a UErrorCode to ICUResult.
- */
-ICUError ToICUError(UErrorCode status);
+  // Also ensure there aren't any other NUL characters within the string.
+  MOZ_ASSERT(std::strlen(aSpan.data()) == aSpan.size());
+
+  return aSpan.data();
+}
+
+static inline const char* AssertNullTerminatedString(std::string_view aView) {
+  // Intentionally check one past the last character, because we expect that the
+  // NUL character isn't part of the string.
+  MOZ_ASSERT(*(aView.data() + aView.size()) == '\0');
+
+  // Also ensure there aren't any other NUL characters within the string.
+  MOZ_ASSERT(std::strlen(aView.data()) == aView.size());
+
+  return aView.data();
+}
+
+using ICUResult = Result<Ok, ICUError>;
 
 /**
  * Convert a UErrorCode to ICUError. This will correctly apply the OutOfMemory
@@ -105,7 +139,8 @@ template <typename ICUStringFunction, typename Buffer>
 static ICUResult FillBufferWithICUCall(Buffer& buffer,
                                        const ICUStringFunction& strFn) {
   static_assert(std::is_same_v<typename Buffer::CharType, char16_t> ||
-                std::is_same_v<typename Buffer::CharType, char>);
+                std::is_same_v<typename Buffer::CharType, char> ||
+                std::is_same_v<typename Buffer::CharType, uint8_t>);
 
   UErrorCode status = U_ZERO_ERROR;
   int32_t length = strFn(buffer.data(), buffer.capacity(), &status);
@@ -155,15 +190,93 @@ class VectorToBufferAdaptor {
 };
 
 /**
- * A variant of FillBufferWithICUCall that accepts a mozilla::Vector rather than
- * a Buffer.
+ * An overload of FillBufferWithICUCall that accepts a mozilla::Vector rather
+ * than a Buffer.
  */
 template <typename ICUStringFunction, size_t InlineSize, typename CharType>
-static ICUResult FillVectorWithICUCall(Vector<CharType, InlineSize>& vector,
+static ICUResult FillBufferWithICUCall(Vector<CharType, InlineSize>& vector,
                                        const ICUStringFunction& strFn) {
   VectorToBufferAdaptor buffer(vector);
   return FillBufferWithICUCall(buffer, strFn);
 }
+
+#ifndef JS_STANDALONE
+/**
+ * mozilla::intl APIs require sizeable buffers. This class abstracts over
+ * the nsTArray.
+ */
+template <typename T>
+class nsTArrayToBufferAdapter {
+ public:
+  using CharType = T;
+
+  // Do not allow copy or move. Move could be added in the future if needed.
+  nsTArrayToBufferAdapter(const nsTArrayToBufferAdapter&) = delete;
+  nsTArrayToBufferAdapter& operator=(const nsTArrayToBufferAdapter&) = delete;
+
+  explicit nsTArrayToBufferAdapter(nsTArray<CharType>& aArray)
+      : mArray(aArray) {}
+
+  /**
+   * Ensures the buffer has enough space to accommodate |size| elements.
+   */
+  [[nodiscard]] bool reserve(size_t size) {
+    // Use faillible behavior here.
+    return mArray.SetCapacity(size, fallible);
+  }
+
+  /**
+   * Returns the raw data inside the buffer.
+   */
+  CharType* data() { return mArray.Elements(); }
+
+  /**
+   * Returns the count of elements written into the buffer.
+   */
+  size_t length() const { return mArray.Length(); }
+
+  /**
+   * Returns the buffer's overall capacity.
+   */
+  size_t capacity() const { return mArray.Capacity(); }
+
+  /**
+   * Resizes the buffer to the given amount of written elements.
+   */
+  void written(size_t amount) {
+    MOZ_ASSERT(amount <= mArray.Capacity());
+    // This sets |mArray|'s internal size so that it matches how much was
+    // written. This is necessary because the write happens across FFI
+    // boundaries.
+    mArray.SetLengthAndRetainStorage(amount);
+  }
+
+ private:
+  nsTArray<CharType>& mArray;
+};
+
+template <typename T, size_t N>
+class AutoTArrayToBufferAdapter : public nsTArrayToBufferAdapter<T> {
+  using nsTArrayToBufferAdapter<T>::nsTArrayToBufferAdapter;
+};
+
+/**
+ * An overload of FillBufferWithICUCall that accepts a nsTArray.
+ */
+template <typename ICUStringFunction, typename CharType>
+static ICUResult FillBufferWithICUCall(nsTArray<CharType>& array,
+                                       const ICUStringFunction& strFn) {
+  nsTArrayToBufferAdapter<CharType> buffer(array);
+  return FillBufferWithICUCall(buffer, strFn);
+}
+
+template <typename ICUStringFunction, typename CharType, size_t N>
+static ICUResult FillBufferWithICUCall(AutoTArray<CharType, N>& array,
+                                       const ICUStringFunction& strFn) {
+  AutoTArrayToBufferAdapter<CharType, N> buffer(array);
+  return FillBufferWithICUCall(buffer, strFn);
+}
+#endif
 
 /**
  * ICU4C works with UTF-16 strings, but consumers of mozilla::intl may require
@@ -266,15 +379,7 @@ class Enumeration {
     return *this;
   }
 
-  // TODO(#1715800) - Extending from std::iterator was deprecated in C++17.
-  // Instead define the iterator traits directly in the class.
-  class Iterator
-      : public std::iterator<std::input_iterator_tag,
-                             const CharType*,  // "value_type"
-                             void,             // "difference_type" (unused)
-                             void,             // "pointer" (unused)
-                             T  // "reference" - Value returned in iterator
-                             > {
+  class Iterator {
     Enumeration& mEnumeration;
     // `Nothing` signifies that no enumeration has been loaded through ICU yet.
     Maybe<int32_t> mIteration = Nothing{};
@@ -282,6 +387,10 @@ class Enumeration {
     int32_t mNextLength = 0;
 
    public:
+    using value_type = const CharType*;
+    using reference = T;
+    using iterator_category = std::input_iterator_tag;
+
     explicit Iterator(Enumeration& aEnumeration, bool aIsBegin)
         : mEnumeration(aEnumeration) {
       if (aIsBegin) {
@@ -372,6 +481,170 @@ using SpanResult = Result<Span<const CharType>, InternalError>;
 template <typename CharType>
 using SpanEnumeration = Enumeration<CharType, SpanResult<CharType>, SpanMapper>;
 
+/**
+ * An iterable class that wraps calls to ICU's available locales API.
+ */
+template <int32_t(CountAvailable)(), const char*(GetAvailable)(int32_t)>
+class AvailableLocalesEnumeration final {
+  // The overall count of available locales.
+  int32_t mLocalesCount = 0;
+
+ public:
+  AvailableLocalesEnumeration() { mLocalesCount = CountAvailable(); }
+
+  class Iterator {
+   public:
+    // std::iterator traits.
+    using iterator_category = std::input_iterator_tag;
+    using value_type = const char*;
+    using difference_type = ptrdiff_t;
+    using pointer = value_type*;
+    using reference = value_type&;
+
+   private:
+    // The current position in the list of available locales.
+    int32_t mLocalesPos = 0;
+
+   public:
+    explicit Iterator(int32_t aLocalesPos) : mLocalesPos(aLocalesPos) {}
+
+    Iterator& operator++() {
+      mLocalesPos++;
+      return *this;
+    }
+
+    Iterator operator++(int) {
+      Iterator result = *this;
+      ++(*this);
+      return result;
+    }
+
+    bool operator==(const Iterator& aOther) const {
+      return mLocalesPos == aOther.mLocalesPos;
+    }
+
+    bool operator!=(const Iterator& aOther) const { return !(*this == aOther); }
+
+    value_type operator*() const { return GetAvailable(mLocalesPos); }
+  };
+
+  // std::iterator begin() and end() methods.
+
+  /**
+   * Return an iterator pointing to the first available locale.
+   */
+  Iterator begin() const { return Iterator(0); }
+
+  /**
+   * Return an iterator pointing to one past the last available locale.
+   */
+  Iterator end() const { return Iterator(mLocalesCount); }
+};
+
+/**
+ * A helper class to wrap calling ICU function in cpp file so we don't have to
+ * include the ICU header here.
+ */
+class FormattedResult {
+ protected:
+  static Result<Span<const char16_t>, ICUError> ToSpanImpl(
+      const UFormattedValue* value);
+};
+
+/**
+ * A RAII class to hold the formatted value of format result.
+ *
+ * The caller will need to create this AutoFormattedResult on the stack, with
+ * the following parameters:
+ * 1. Native ICU type.
+ * 2. An ICU function which opens the result.
+ * 3. An ICU function which can get the result as UFormattedValue.
+ * 4. An ICU function which closes the result.
+ *
+ * After the object is created, caller needs to call IsValid() method to check
+ * if the native object has been created properly, and then passes this
+ * object to other format interfaces.
+ * The format result will be stored in this object, the caller can use ToSpan()
+ * method to get the formatted string.
+ *
+ * The methods GetFormatted() and Value() are private methods since they expose
+ * native ICU types. If the caller wants to call these methods, the caller needs
+ * to register itself as a friend class in AutoFormattedResult.
+ *
+ * The formatted value and the native ICU object will be released once this
+ * class is destructed.
+ */
+template <typename T, T*(Open)(UErrorCode*),
+          const UFormattedValue*(GetValue)(const T*, UErrorCode*),
+          void(Close)(T*)>
+class MOZ_RAII AutoFormattedResult : FormattedResult {
+ public:
+  AutoFormattedResult() {
+    mFormatted = Open(&mError);
+    if (U_FAILURE(mError)) {
+      mFormatted = nullptr;
+    }
+  }
+  ~AutoFormattedResult() {
+    if (mFormatted) {
+      Close(mFormatted);
+    }
+  }
+
+  AutoFormattedResult(const AutoFormattedResult& other) = delete;
+  AutoFormattedResult& operator=(const AutoFormattedResult& other) = delete;
+
+  AutoFormattedResult(AutoFormattedResult&& other) = delete;
+  AutoFormattedResult& operator=(AutoFormattedResult&& other) = delete;
+
+  /**
+   * Check if the native UFormattedDateInterval was created successfully.
+   */
+  bool IsValid() const { return !!mFormatted; }
+
+  /**
+   *  Get error code if IsValid() returns false.
+   */
+  ICUError GetError() const { return ToICUError(mError); }
+
+  /**
+   * Get the formatted result.
+   */
+  Result<Span<const char16_t>, ICUError> ToSpan() const {
+    if (!IsValid()) {
+      return Err(GetError());
+    }
+
+    const UFormattedValue* value = Value();
+    if (!value) {
+      return Err(ICUError::InternalError);
+    }
+
+    return ToSpanImpl(value);
+  }
+
+ private:
+  friend class DateIntervalFormat;
+  friend class ListFormat;
+  T* GetFormatted() const { return mFormatted; }
+
+  const UFormattedValue* Value() const {
+    if (!IsValid()) {
+      return nullptr;
+    }
+
+    UErrorCode status = U_ZERO_ERROR;
+    const UFormattedValue* value = GetValue(mFormatted, &status);
+    if (U_FAILURE(status)) {
+      return nullptr;
+    }
+
+    return value;
+  };
+
+  T* mFormatted = nullptr;
+  UErrorCode mError = U_ZERO_ERROR;
+};
 }  // namespace mozilla::intl
 
 #endif /* intl_components_ICUUtils_h */

@@ -440,8 +440,6 @@ class DocAccessibleChild : public DocAccessibleChildBase {
   virtual mozilla::ipc::IPCResult RecvStep(const uint64_t& aID,
                                            double* aStep) override;
 
-  virtual mozilla::ipc::IPCResult RecvTakeFocus(const uint64_t& aID) override;
-
   virtual mozilla::ipc::IPCResult RecvFocusedChild(
       const uint64_t& aID, PDocAccessibleChild** aResultDoc,
       uint64_t* aResultID) override;
@@ -485,7 +483,6 @@ class DocAccessibleChild : public DocAccessibleChildBase {
   DocAccessiblePlatformExtChild* GetPlatformExtension();
 
  private:
-  LocalAccessible* IdToAccessible(const uint64_t& aID) const;
   LocalAccessible* IdToAccessibleLink(const uint64_t& aID) const;
   LocalAccessible* IdToAccessibleSelect(const uint64_t& aID) const;
   HyperTextAccessible* IdToHyperTextAccessible(const uint64_t& aID) const;

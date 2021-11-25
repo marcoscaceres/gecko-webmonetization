@@ -204,16 +204,16 @@ already_AddRefed<DMABufSurface> DMABufSurface::CreateDMABufSurface(
 }
 
 void DMABufSurface::FenceDelete() {
+  if (mSyncFd > 0) {
+    close(mSyncFd);
+    mSyncFd = -1;
+  }
+
   if (!mGL) {
     return;
   }
   const auto& gle = gl::GLContextEGL::Cast(mGL);
   const auto& egl = gle->mEgl;
-
-  if (mSyncFd > 0) {
-    close(mSyncFd);
-    mSyncFd = -1;
-  }
 
   if (mSync) {
     egl->fDestroySync(mSync);
@@ -563,12 +563,13 @@ bool DMABufSurfaceRGBA::CreateTexture(GLContext* aGLContext, int aPlane) {
   mEGLImage =
       egl->fCreateImage(LOCAL_EGL_NO_CONTEXT, LOCAL_EGL_LINUX_DMA_BUF_EXT,
                         nullptr, attribs.Elements());
+
+  CloseFileDescriptors(lockFD);
+
   if (mEGLImage == LOCAL_EGL_NO_IMAGE) {
     LOGDMABUF(("EGLImageKHR creation failed"));
     return false;
   }
-
-  CloseFileDescriptors(lockFD);
 
   aGLContext->MakeCurrent();
   aGLContext->fGenTextures(1, &mTexture);
@@ -623,6 +624,7 @@ bool DMABufSurfaceRGBA::CreateWlBuffer() {
 
   RefPtr<nsWaylandDisplay> waylandDisplay = widget::WaylandDisplayGet();
   if (!waylandDisplay->GetDmabuf()) {
+    CloseFileDescriptors(lockFD);
     return false;
   }
 
@@ -1150,7 +1152,15 @@ bool DMABufSurfaceYUV::CreateTexture(GLContext* aGLContext, int aPlane) {
   attribs.AppendElement(LOCAL_EGL_DMA_BUF_PLANE##plane_idx##_OFFSET_EXT); \
   attribs.AppendElement((int)mOffsets[aPlane]);                           \
   attribs.AppendElement(LOCAL_EGL_DMA_BUF_PLANE##plane_idx##_PITCH_EXT);  \
-  attribs.AppendElement((int)mStrides[aPlane]);
+  attribs.AppendElement((int)mStrides[aPlane]);                           \
+  if (mBufferModifier != DRM_FORMAT_MOD_INVALID) {                        \
+    attribs.AppendElement(                                                \
+        LOCAL_EGL_DMA_BUF_PLANE##plane_idx##_MODIFIER_LO_EXT);            \
+    attribs.AppendElement(mBufferModifier & 0xFFFFFFFF);                  \
+    attribs.AppendElement(                                                \
+        LOCAL_EGL_DMA_BUF_PLANE##plane_idx##_MODIFIER_HI_EXT);            \
+    attribs.AppendElement(mBufferModifier >> 32);                         \
+  }
   ADD_PLANE_ATTRIBS_NV12(0);
 #undef ADD_PLANE_ATTRIBS_NV12
   attribs.AppendElement(LOCAL_EGL_NONE);

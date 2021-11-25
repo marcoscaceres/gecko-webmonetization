@@ -115,8 +115,8 @@ class HTMLInputElement final : public TextControlElement,
   friend class InputType;
 
  public:
-  using nsGenericHTMLFormElementWithState::GetForm;
-  using nsGenericHTMLFormElementWithState::GetFormAction;
+  using nsGenericHTMLFormControlElementWithState::GetForm;
+  using nsGenericHTMLFormControlElementWithState::GetFormAction;
   using nsIConstraintValidation::GetValidationMessage;
   using ValueSetterOption = TextControlState::ValueSetterOption;
   using ValueSetterOptions = TextControlState::ValueSetterOptions;
@@ -134,9 +134,6 @@ class HTMLInputElement final : public TextControlElement,
 
   int32_t TabIndexDefault() override;
   using nsGenericHTMLElement::Focus;
-  void Blur(ErrorResult& aError) override;
-  void Focus(const FocusOptions& aOptions, CallerType aCallerType,
-             ErrorResult& aError) override;
 
   // nsINode
 #if !defined(ANDROID) && !defined(XP_MACOSX)
@@ -617,7 +614,7 @@ class HTMLInputElement final : public TextControlElement,
     SetHTMLAttr(nsGkAtoms::step, aValue, aRv);
   }
 
-  void GetType(nsAString& aValue);
+  void GetType(nsAString& aValue) const;
   void SetType(const nsAString& aValue, ErrorResult& aRv) {
     SetHTMLAttr(nsGkAtoms::type, aValue, aRv);
   }
@@ -847,7 +844,7 @@ class HTMLInputElement final : public TextControlElement,
    */
   bool IsRequired() const { return State().HasState(NS_EVENT_STATE_REQUIRED); }
 
-  bool HasBeenTypePassword() { return mHasBeenTypePassword; }
+  bool HasBeenTypePassword() const { return mHasBeenTypePassword; }
 
   /**
    * Returns whether the current value is the empty string.  This only makes
@@ -865,7 +862,7 @@ class HTMLInputElement final : public TextControlElement,
 
   // Pull IsSingleLineTextControl into our scope, otherwise it'd be hidden
   // by the TextControlElement version.
-  using nsGenericHTMLFormElementWithState::IsSingleLineTextControl;
+  using nsGenericHTMLFormControlElementWithState::IsSingleLineTextControl;
 
   /**
    * The ValueModeType specifies how the value IDL attribute should behave.

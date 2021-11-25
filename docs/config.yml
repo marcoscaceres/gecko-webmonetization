@@ -8,6 +8,8 @@ categories:
     contributing_doc:
         - contributing
         - bug-mgmt
+    user_guide:
+        - devtools-user
     source_doc:
         - browser
         - dom
@@ -25,6 +27,7 @@ categories:
         - services
         - uriloader
         - widget/cocoa
+        - accessible
         - code-quality
         - writing-rust-code
         - tools/profiler
@@ -43,6 +46,7 @@ categories:
         - testing/marionette
         - testing/geckodriver
         - web-platform
+        - gtest
         - tools/fuzzing
         - tools/sanitizer
         - testing/perfdocs

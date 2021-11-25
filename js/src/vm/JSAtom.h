@@ -30,12 +30,10 @@ class PropertyName;
 
 namespace js {
 
-class AutoAccessAtomsZone;
-
 /*
  * Atom tracing and garbage collection hooks.
  */
-void TraceAtoms(JSTracer* trc, const AutoAccessAtomsZone& access);
+void TraceAtoms(JSTracer* trc);
 
 void TraceWellKnownSymbols(JSTracer* trc);
 
@@ -74,16 +72,6 @@ extern JSAtom* AtomizeString(JSContext* cx, JSString* str,
 template <AllowGC allowGC>
 extern JSAtom* ToAtom(JSContext* cx,
                       typename MaybeRooted<JS::Value, allowGC>::HandleType v);
-
-// These functions are declared in vm/Xdr.h
-//
-// template<XDRMode mode>
-// XDRResult
-// XDRAtom(XDRState<mode>* xdr, js::MutableHandleAtom atomp);
-
-// template<XDRMode mode>
-// XDRResult
-// XDRAtomOrNull(XDRState<mode>* xdr, js::MutableHandleAtom atomp);
 
 extern JS::Handle<PropertyName*> ClassName(JSProtoKey key, JSContext* cx);
 

@@ -33,7 +33,6 @@ headers = [
     "mozilla/ServoTraversalStatistics.h",
     "mozilla/SizeOfState.h",
     "nsCSSProps.h",
-    "nsContentUtils.h",
     "nsMappedAttributes.h",
     "nsNameSpaceManager.h",
 ]
@@ -72,6 +71,7 @@ rusty-enums = [
     "mozilla::dom::Document_DocumentTheme",
     "mozilla::dom::Document_Type",
     "mozilla::LookAndFeel_IntID",
+    "mozilla::LookAndFeel_FloatID",
     "nsCSSUnit",
     "nsCSSFontDesc",
     "nsCSSPropertyID",
@@ -179,7 +179,7 @@ whitelist-vars = [
     "kNameSpaceID_.*",
     "kGenericFont_.*",
     "kPresContext_.*",
-    "nsContentUtils_.*",
+    "nsNameSpaceManager_.*",
     "GECKO_IS_NIGHTLY",
     "NS_SAME_AS_FOREGROUND_COLOR",
     "mozilla::detail::gGkAtoms",
@@ -406,6 +406,7 @@ opaque-types = [
 # All cbindgen-types are in mod "structs::root::mozilla".
 # FIXME(emilio): We probably want to automate this somehow...
 cbindgen-types = [
+    { gecko = "StyleAnimationTimeline", servo = "crate::values::computed::box_::AnimationTimeline" },
     { gecko = "StyleAppearance", servo = "crate::values::specified::Appearance" },
     { gecko = "StyleAspectRatio", servo = "crate::values::computed::position::AspectRatio" },
     { gecko = "StyleComputedFontStretchRange", servo = "crate::font_face::ComputedFontStretchRange" },
@@ -497,7 +498,6 @@ cbindgen-types = [
     { gecko = "StyleTextDecorationLine", servo = "crate::values::computed::TextDecorationLine" },
     { gecko = "StyleTextTransform", servo = "crate::values::computed::TextTransform" },
     { gecko = "StyleTextUnderlinePosition", servo = "crate::values::computed::TextUnderlinePosition" },
-    { gecko = "StyleMozListReversed", servo = "crate::values::computed::MozListReversed" },
     { gecko = "StyleOwned", servo = "crate::gecko_bindings::sugar::ownership::Owned" },
     { gecko = "StyleOwnedOrNull", servo = "crate::gecko_bindings::sugar::ownership::OwnedOrNull" },
     { gecko = "StyleStrong", servo = "crate::gecko_bindings::sugar::ownership::Strong" },
@@ -507,7 +507,6 @@ cbindgen-types = [
     { gecko = "StyleFontFamilyNameSyntax", servo = "crate::values::computed::font::FontFamilyNameSyntax" },
     { gecko = "StyleGenericColor", servo = "crate::values::generics::color::Color" },
     { gecko = "StyleSystemColor", servo = "crate::values::specified::color::SystemColor" },
-    { gecko = "StyleSystemColorScheme", servo = "crate::values::specified::color::SystemColorScheme" },
     { gecko = "StyleSystemFont", servo = "crate::values::specified::font::SystemFont" },
     { gecko = "StyleGenericColorOrAuto", servo = "crate::values::generics::color::ColorOrAuto" },
     { gecko = "StyleGenericScrollbarColor", servo = "crate::values::generics::ui::ScrollbarColor" },
@@ -557,7 +556,8 @@ cbindgen-types = [
     { gecko = "StyleVariantAlternatesList", servo = "crate::values::specified::font::VariantAlternatesList" },
     { gecko = "StyleSVGPaintOrder", servo = "crate::values::specified::svg::SVGPaintOrder" },
     { gecko = "StyleClipRectOrAuto", servo = "crate::values::computed::ClipRectOrAuto" },
-    { gecko = "StyleCounterSetOrReset", servo = "crate::values::computed::CounterSetOrReset" },
+    { gecko = "StyleCounterReset", servo = "crate::values::computed::CounterReset" },
+    { gecko = "StyleCounterSet", servo = "crate::values::computed::CounterSet" },
     { gecko = "StyleCounterIncrement", servo = "crate::values::computed::CounterIncrement" },
     { gecko = "StyleContent", servo = "crate::values::computed::counters::Content" },
     { gecko = "StyleSymbolsType", servo = "crate::values::generics::SymbolsType" },
@@ -586,6 +586,7 @@ cbindgen-types = [
     { gecko = "StylePageSize", servo = "crate::values::computed::page::PageSize" },
     { gecko = "StyleDProperty", servo = "crate::values::specified::svg::DProperty" },
     { gecko = "StyleImageRendering", servo = "crate::values::computed::ImageRendering" },
+    { gecko = "StyleScrollbarGutter", servo = "crate::values::computed::ScrollbarGutter" },
 ]
 
 mapped-generic-types = [

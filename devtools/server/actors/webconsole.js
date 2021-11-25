@@ -21,6 +21,7 @@ const {
 } = require("devtools/server/actors/object/utils");
 const DevToolsUtils = require("devtools/shared/DevToolsUtils");
 const ErrorDocs = require("devtools/server/actors/errordocs");
+const Targets = require("devtools/server/actors/targets/index");
 
 loader.lazyRequireGetter(
   this,
@@ -198,11 +199,6 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
         "last-pb-context-exited"
       );
     }
-
-    this.traits = {
-      // Supports retrieving blocked urls
-      blockedUrls: true,
-    };
   },
   /**
    * Debugger instance.
@@ -240,12 +236,6 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
   conn: null,
 
   /**
-   * List of supported features by the console actor.
-   * @type object
-   */
-  traits: null,
-
-  /**
    * The global we work with (this can be a Window, a Worker global or even a Sandbox
    * for processes and addons).
    *
@@ -261,6 +251,9 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
   /**
    * Get a window to use for the browser console.
    *
+   * (note that is is also used for browser toolbox and webextension
+   *  i.e. all targets flagged with isRootActor=true)
+   *
    * @private
    * @return nsIDOMWindow
    *         The window to use, or null if no window could be found.
@@ -269,7 +262,9 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
     // Check if our last used chrome window is still live.
     let window = this._lastChromeWindow && this._lastChromeWindow.get();
     // If not, look for a new one.
-    if (!window || window.closed) {
+    // In case of WebExtension reload of the background page, the last
+    // chrome window might be a dead wrapper, from which we can't check for window.closed.
+    if (!window || Cu.isDeadWrapper(window) || window.closed) {
       window = this.parentActor.window;
       if (!window) {
         // Try to find the Browser Console window to use instead.
@@ -615,6 +610,8 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
   startListeners: async function(listeners) {
     const startedListeners = [];
     const global = !this.parentActor.isRootActor ? this.global : null;
+    const isTargetActorContentProcess =
+      this.parentActor.targetType === Targets.TYPES.PROCESS;
 
     for (const event of listeners) {
       switch (event) {
@@ -626,7 +623,10 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
           if (!this.consoleServiceListener) {
             this.consoleServiceListener = new ConsoleServiceListener(
               global,
-              this.onConsoleServiceMessage
+              this.onConsoleServiceMessage,
+              {
+                matchExactWindow: this.parentActor.ignoreSubFrames,
+              }
             );
             this.consoleServiceListener.init();
           }
@@ -639,7 +639,10 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
             this.consoleAPIListener = new ConsoleAPIListener(
               global,
               this.onConsoleAPICall,
-              this.parentActor.consoleAPIListenerOptions
+              {
+                matchExactWindow: this.parentActor.ignoreSubFrames,
+                ...(this.parentActor.consoleAPIListenerOptions || {}),
+              }
             );
             this.consoleAPIListener.init();
           }
@@ -696,7 +699,10 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
             // service workers requests)
             new NetworkMonitorActor(
               this.conn,
-              { window: global },
+              {
+                window: global,
+                matchExactWindow: this.parentActor.ignoreSubFrames,
+              },
               this.actorID,
               mmMockParent
             );
@@ -711,7 +717,10 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
             // requests, as well with the NetworkMonitorActor running in the parent
             // process. It will communicate via message manager for this one.
             this.stackTraceCollector = new StackTraceCollector(
-              { window: global },
+              {
+                window: global,
+                matchExactWindow: this.parentActor.ignoreSubFrames,
+              },
               this.netmonitors
             );
             this.stackTraceCollector.init();
@@ -761,7 +770,7 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
           break;
         case "DocumentEvents":
           // Workers don't support this message type
-          if (isWorker) {
+          if (isWorker || isTargetActorContentProcess) {
             break;
           }
           if (!this.documentEventsListener) {
@@ -782,7 +791,6 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
     return {
       startedListeners: startedListeners,
       nativeConsoleAPI: this.hasNativeConsoleAPI(this.global),
-      traits: this.traits,
     };
   },
 
@@ -1503,6 +1511,8 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
       // If were dealing with the root actor (e.g. the browser console), we want
       // to remove all cached messages, not only the ones specific to a window.
       Services.console.reset();
+    } else if (this.parentActor.ignoreSubFrames) {
+      Services.console.resetWindow(windowId);
     } else {
       WebConsoleUtils.getInnerWindowIDsForFrames(this.global).forEach(id =>
         Services.console.resetWindow(id)

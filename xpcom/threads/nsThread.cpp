@@ -30,6 +30,7 @@
 #include "mozilla/ipc/MessageChannel.h"
 #include "mozilla/ipc/BackgroundChild.h"
 #include "mozilla/Preferences.h"
+#include "mozilla/ProfilerRunnable.h"
 #include "mozilla/SchedulerGroup.h"
 #include "mozilla/Services.h"
 #include "mozilla/SpinEventLoopUntil.h"
@@ -427,11 +428,19 @@ void nsThread::ThreadFunc(void* aArg) {
   MOZ_ASSERT(context->mTerminatingThread == self);
   nsCOMPtr<nsIRunnable> event =
       do_QueryObject(new nsThreadShutdownAckEvent(context));
+  nsresult dispatch_ack_rv;
   if (context->mIsMainThreadJoining) {
-    SchedulerGroup::Dispatch(TaskCategory::Other, event.forget());
+    dispatch_ack_rv =
+        SchedulerGroup::Dispatch(TaskCategory::Other, event.forget());
   } else {
-    context->mJoiningThread->Dispatch(event, NS_DISPATCH_NORMAL);
+    dispatch_ack_rv =
+        context->mJoiningThread->Dispatch(event, NS_DISPATCH_NORMAL);
   }
+  // We do not expect this to ever happen, but If we cannot dispatch
+  // the ack event, someone probably blocks waiting on us and will
+  // crash with a hang later anyways. The best we can do is to tell
+  // the world what happened right here.
+  MOZ_RELEASE_ASSERT(NS_SUCCEEDED(dispatch_ack_rv));
 
   // Release any observer of the thread here.
   self->SetObserver(nullptr);
@@ -529,6 +538,7 @@ nsThread::nsThread(NotNull<SynchronizedEventQueue*> aQueue,
           new ThreadEventTarget(mEvents.get(), aMainThread == MAIN_THREAD)),
       mShutdownContext(nullptr),
       mScriptObserver(nullptr),
+      mThreadName("<uninitialized>"),
       mStackSize(aStackSize),
       mNestedEventLoopDepth(0),
       mShutdownRequired(false),
@@ -552,6 +562,7 @@ nsThread::nsThread()
       mEventTarget(nullptr),
       mShutdownContext(nullptr),
       mScriptObserver(nullptr),
+      mThreadName("<uninitialized>"),
       mStackSize(0),
       mNestedEventLoopDepth(0),
       mShutdownRequired(false),
@@ -592,6 +603,8 @@ nsresult nsThread::Init(const nsACString& aName) {
 
   NS_ADDREF_THIS();
 
+  SetThreadNameInternal(aName);
+
   mShutdownRequired = true;
 
   UniquePtr<ThreadInitData> initData(
@@ -626,6 +639,16 @@ nsresult nsThread::InitCurrentThread() {
 
   nsThreadManager::get().RegisterCurrentThread(*this);
   return NS_OK;
+}
+
+void nsThread::GetThreadName(nsACString& aNameBuffer) {
+  auto lock = mThreadName.Lock();
+  aNameBuffer = lock.ref();
+}
+
+void nsThread::SetThreadNameInternal(const nsACString& aName) {
+  auto lock = mThreadName.Lock();
+  lock->Assign(aName);
 }
 
 //-----------------------------------------------------------------------------
@@ -778,8 +801,13 @@ nsThreadShutdownContext* nsThread::ShutdownInternal(bool aSync) {
   // events to process.
   nsCOMPtr<nsIRunnable> event =
       new nsThreadShutdownEvent(WrapNotNull(this), WrapNotNull(context));
-  // XXXroc What if posting the event fails due to OOM?
-  mEvents->PutEvent(event.forget(), EventQueuePriority::Normal);
+  if (!mEvents->PutEvent(event.forget(), EventQueuePriority::Normal)) {
+    // We do not expect this to happen. Let's collect some diagnostics.
+    nsAutoCString threadName;
+    currentThread->GetThreadName(threadName);
+    MOZ_CRASH_UNSAFE_PRINTF("Attempt to shutdown an already dead thread: %s",
+                            threadName.get());
+  }
 
   // We could still end up with other events being added after the shutdown
   // task, but that's okay because we process pending events in ThreadFunc
@@ -818,9 +846,10 @@ void nsThread::ShutdownComplete(NotNull<nsThreadShutdownContext*> aContext) {
 }
 
 void nsThread::WaitForAllAsynchronousShutdowns() {
-  // This is the motivating example for why SpinEventLoop has the template
-  // parameter we are providing here.
+  // This is the motivating example for why SpinEventLoopUntil
+  // has the template parameter we are providing here.
   SpinEventLoopUntil<ProcessFailureBehavior::IgnoreAndContinue>(
+      "nsThread::WaitForAllAsynchronousShutdowns"_ns,
       [&]() { return mRequestedShutdownContexts.IsEmpty(); }, this);
 }
 
@@ -835,10 +864,16 @@ nsThread::Shutdown() {
 
   NotNull<nsThreadShutdownContext*> context = WrapNotNull(maybeContext);
 
+  // If we are going to hang here we want to see the thread's name
+  nsAutoCString threadName;
+  GetThreadName(threadName);
+
   // Process events on the current thread until we receive a shutdown ACK.
   // Allows waiting; ensure no locks are held that would deadlock us!
-  SpinEventLoopUntil([&, context]() { return !context->mAwaitingShutdownAck; },
-                     context->mJoiningThread);
+  SpinEventLoopUntil(
+      "nsThread::Shutdown: "_ns + threadName,
+      [&, context]() { return !context->mAwaitingShutdownAck; },
+      context->mJoiningThread);
 
   ShutdownComplete(context);
 
@@ -1472,7 +1507,7 @@ void PerformanceCounterState::MaybeReportAccumulatedTime(TimeStamp aNow) {
     }
     mLastLongTaskEnd = aNow;
 
-    if (profiler_thread_is_being_profiled()) {
+    if (profiler_thread_is_being_profiled_for_markers()) {
       struct LongTaskMarker {
         static constexpr Span<const char> MarkerTypeName() {
           return MakeStringSpan("MainThreadLongTask");

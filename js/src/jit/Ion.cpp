@@ -56,7 +56,7 @@
 #include "js/Printf.h"
 #include "js/UniquePtr.h"
 #include "util/Memory.h"
-#include "util/Windows.h"
+#include "util/WindowsWrapper.h"
 #include "vm/HelperThreads.h"
 #include "vm/Realm.h"
 #include "vm/TraceLogging.h"
@@ -393,8 +393,7 @@ uint8_t* jit::LazyLinkTopActivation(JSContext* cx,
 }
 
 /* static */
-void JitRuntime::TraceAtomZoneRoots(JSTracer* trc,
-                                    const AutoAccessAtomsZone& access) {
+void JitRuntime::TraceAtomZoneRoots(JSTracer* trc) {
   MOZ_ASSERT(!JS::RuntimeHeapIsMinorCollecting());
 
   // Shared stubs are allocated in the atoms zone, so do not iterate
@@ -403,7 +402,7 @@ void JitRuntime::TraceAtomZoneRoots(JSTracer* trc,
     return;
   }
 
-  Zone* zone = trc->runtime()->atomsZone(access);
+  Zone* zone = trc->runtime()->atomsZone();
   for (auto i = zone->cellIterUnsafe<JitCode>(); !i.done(); i.next()) {
     JitCode* code = i;
     TraceRoot(trc, &code, "wrapper");
@@ -1618,7 +1617,7 @@ static AbortReason IonCompile(JSContext* cx, HandleScript script,
   auto alloc =
       cx->make_unique<LifoAlloc>(TempAllocator::PreferredLifoChunkSize);
   if (!alloc) {
-    return AbortReason::Alloc;
+    return AbortReason::Error;
   }
 
   TempAllocator* temp = alloc->new_<TempAllocator>(alloc.get());
@@ -1629,11 +1628,11 @@ static AbortReason IonCompile(JSContext* cx, HandleScript script,
   JitContext jctx(cx, temp);
 
   if (!cx->realm()->ensureJitRealmExists(cx)) {
-    return AbortReason::Alloc;
+    return AbortReason::Error;
   }
 
   if (!cx->realm()->jitRealm()->ensureIonStubsExist(cx)) {
-    return AbortReason::Alloc;
+    return AbortReason::Error;
   }
 
   MIRGraph* graph = alloc->new_<MIRGraph>(temp);
@@ -1686,7 +1685,7 @@ static AbortReason IonCompile(JSContext* cx, HandleScript script,
             ". (Compiled on background thread.)",
             script->filename(), script->lineno(), script->column());
 
-    IonCompileTask* task = alloc->new_<IonCompileTask>(*mirGen, snapshot);
+    IonCompileTask* task = alloc->new_<IonCompileTask>(cx, *mirGen, snapshot);
     if (!task) {
       return AbortReason::Alloc;
     }

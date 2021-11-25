@@ -69,11 +69,6 @@ using mozilla::FilePreferences::kPathSeparator;
     if (mWorkingPath.IsEmpty()) return NS_ERROR_NOT_INITIALIZED; \
   } while (0)
 
-// CopyFileEx only supports unbuffered I/O in Windows Vista and above
-#ifndef COPY_FILE_NO_BUFFERING
-#  define COPY_FILE_NO_BUFFERING 0x00001000
-#endif
-
 #ifndef FILE_ATTRIBUTE_NOT_CONTENT_INDEXED
 #  define FILE_ATTRIBUTE_NOT_CONTENT_INDEXED 0x00002000
 #endif
@@ -257,13 +252,13 @@ static nsresult ConvertWinError(DWORD aWinErr) {
     case ERROR_PATH_NOT_FOUND:
       [[fallthrough]];  // to NS_ERROR_FILE_NOT_FOUND
     case ERROR_INVALID_DRIVE:
-      [[fallthrough]];  // to NS_ERROR_FILE_NOT_FOUND
-    case ERROR_NOT_READY:
       rv = NS_ERROR_FILE_NOT_FOUND;
       break;
     case ERROR_ACCESS_DENIED:
       [[fallthrough]];  // to NS_ERROR_FILE_ACCESS_DENIED
     case ERROR_NOT_SAME_DEVICE:
+      [[fallthrough]];  // to NS_ERROR_FILE_ACCESS_DENIED
+    case ERROR_CANNOT_MAKE:
       rv = NS_ERROR_FILE_ACCESS_DENIED;
       break;
     case ERROR_SHARING_VIOLATION:  // CreateFile without sharing flags
@@ -272,12 +267,6 @@ static nsresult ConvertWinError(DWORD aWinErr) {
       rv = NS_ERROR_FILE_IS_LOCKED;
       break;
     case ERROR_NOT_ENOUGH_MEMORY:
-      [[fallthrough]];  // to NS_ERROR_OUT_OF_MEMORY
-    case ERROR_INVALID_BLOCK:
-      [[fallthrough]];  // to NS_ERROR_OUT_OF_MEMORY
-    case ERROR_INVALID_HANDLE:
-      [[fallthrough]];  // to NS_ERROR_OUT_OF_MEMORY
-    case ERROR_ARENA_TRASHED:
       rv = NS_ERROR_OUT_OF_MEMORY;
       break;
     case ERROR_DIR_NOT_EMPTY:
@@ -296,8 +285,6 @@ static nsresult ConvertWinError(DWORD aWinErr) {
     case ERROR_FILE_EXISTS:
       [[fallthrough]];  // to NS_ERROR_FILE_ALREADY_EXISTS
     case ERROR_ALREADY_EXISTS:
-      [[fallthrough]];  // to NS_ERROR_FILE_ALREADY_EXISTS
-    case ERROR_CANNOT_MAKE:
       rv = NS_ERROR_FILE_ALREADY_EXISTS;
       break;
     case ERROR_FILENAME_EXCED_RANGE:
@@ -316,8 +303,18 @@ static nsresult ConvertWinError(DWORD aWinErr) {
     case ERROR_IO_DEVICE:
       rv = NS_ERROR_FILE_DEVICE_FAILURE;
       break;
+    case ERROR_NOT_READY:
+      rv = NS_ERROR_FILE_DEVICE_TEMPORARY_FAILURE;
+      break;
     case ERROR_INVALID_NAME:
       rv = NS_ERROR_FILE_INVALID_PATH;
+      break;
+    case ERROR_INVALID_BLOCK:
+      [[fallthrough]];  // to NS_ERROR_FILE_INVALID_HANDLE
+    case ERROR_INVALID_HANDLE:
+      [[fallthrough]];  // to NS_ERROR_FILE_INVALID_HANDLE
+    case ERROR_ARENA_TRASHED:
+      rv = NS_ERROR_FILE_INVALID_HANDLE;
       break;
     case 0:
       rv = NS_OK;
@@ -1809,6 +1806,14 @@ nsresult nsLocalFile::CopySingleFile(nsIFile* aSourceFile, nsIFile* aDestParent,
 
     copyOK = ::CopyFileExW(filePath.get(), destPath.get(), nullptr, nullptr,
                            nullptr, dwCopyFlags);
+    // On Windows 10, copying without buffering has started failing, so try
+    // with buffering...
+    if (!copyOK && (dwCopyFlags & COPY_FILE_NO_BUFFERING) &&
+        GetLastError() == ERROR_INVALID_PARAMETER) {
+      dwCopyFlags &= ~COPY_FILE_NO_BUFFERING;
+      copyOK = ::CopyFileExW(filePath.get(), destPath.get(), nullptr, nullptr,
+                             nullptr, dwCopyFlags);
+    }
 
     if (move && copyOK) {
       DeleteFileW(filePath.get());

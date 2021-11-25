@@ -1009,7 +1009,7 @@ impl LengthPercentage {
                 return Ok(LengthPercentage::Percentage(computed::Percentage(
                     unit_value,
                 )));
-            }
+            },
             Token::Number { value, .. } if num_context.is_ok(context.parsing_mode, value) => {
                 if value != 0. &&
                     !context.parsing_mode.allows_unitless_lengths() &&
@@ -1226,7 +1226,7 @@ macro_rules! parse_size_non_length {
                 #[cfg(feature = "gecko")]
                 "max-content" | "-moz-max-content" => $size::MaxContent,
                 #[cfg(feature = "gecko")]
-                "-moz-fit-content" => $size::MozFitContent,
+                "fit-content" | "-moz-fit-content" => $size::FitContent,
                 #[cfg(feature = "gecko")]
                 "-moz-available" => $size::MozAvailable,
                 $auto_or_none => $size::$auto_or_none_ident,

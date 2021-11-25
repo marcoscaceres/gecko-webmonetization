@@ -11,13 +11,14 @@ const PAGE_SIZE_MAX_JUMPS = 30;
 const SEARCH_ACTION_MAX_DELAY = 300; // ms
 const ITEM_FLASH_DURATION = 300; // ms
 
-const { require } = ChromeUtils.import("resource://devtools/shared/Loader.jsm");
+const { require } = ChromeUtils.import(
+  "resource://devtools/shared/loader/Loader.jsm"
+);
 const { XPCOMUtils } = require("resource://gre/modules/XPCOMUtils.jsm");
 const EventEmitter = require("devtools/shared/event-emitter");
 const DevToolsUtils = require("devtools/shared/DevToolsUtils");
 const Services = require("Services");
 const { getSourceNames } = require("devtools/client/shared/source-utils");
-const promise = require("promise");
 const { extend } = require("devtools/shared/extend");
 const {
   ViewHelpers,
@@ -2896,7 +2897,7 @@ Variable.prototype = extend(Scope.prototype, {
    */
   openNodeInInspector: function(event) {
     if (!this.toolbox) {
-      return promise.reject(new Error("Toolbox not available"));
+      return Promise.reject(new Error("Toolbox not available"));
     }
 
     event && event.stopPropagation();

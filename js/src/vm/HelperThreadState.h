@@ -15,11 +15,14 @@
 
 #include "mozilla/Attributes.h"
 #include "mozilla/EnumeratedArray.h"
+#include "mozilla/RefPtr.h"  // RefPtr
 #include "mozilla/TimeStamp.h"
+#include "mozilla/Vector.h"  // mozilla::Vector
 
 #include "ds/Fifo.h"
 #include "frontend/CompilationStencil.h"  // CompilationStencil, ExtensibleCompilationStencil, CompilationGCOutput
 #include "js/CompileOptions.h"
+#include "js/experimental/JSStencil.h"
 #include "js/HelperThreadAPI.h"
 #include "js/TypeDecls.h"
 #include "threading/ConditionVariable.h"
@@ -60,8 +63,8 @@ enum class ParseTaskKind {
   // The output is JSScript.
   ScriptDecode,
 
-  // The output is an array of JSScript.
-  MultiScriptsDecode,
+  // The output is an array of CompilationStencil.
+  MultiStencilsDecode,
 };
 enum class StartEncoding { No, Yes };
 
@@ -146,9 +149,6 @@ class GlobalHelperThreadState {
   // Script parsing/emitting worklist and finished jobs.
   ParseTaskVector parseWorklist_;
   ParseTaskList parseFinishedList_;
-
-  // Parse tasks waiting for an atoms-zone GC to complete.
-  ParseTaskVector parseWaitingOnGC_;
 
   // Source compression worklist of tasks that we do not yet know can start.
   SourceCompressionTaskVector compressionPendingList_;
@@ -302,9 +302,6 @@ class GlobalHelperThreadState {
   ParseTaskList& parseFinishedList(const AutoLockHelperThreadState&) {
     return parseFinishedList_;
   }
-  ParseTaskVector& parseWaitingOnGC(const AutoLockHelperThreadState&) {
-    return parseWaitingOnGC_;
-  }
 
   SourceCompressionTaskVector& compressionPendingList(
       const AutoLockHelperThreadState&) {
@@ -362,6 +359,8 @@ class GlobalHelperThreadState {
       const AutoLockHelperThreadState& lock);
   HelperThreadTask* maybeGetIonCompileTask(
       const AutoLockHelperThreadState& lock);
+  HelperThreadTask* maybeGetLowPrioIonCompileTask(
+      const AutoLockHelperThreadState& lock);
   HelperThreadTask* maybeGetIonFreeTask(const AutoLockHelperThreadState& lock);
   HelperThreadTask* maybeGetParseTask(const AutoLockHelperThreadState& lock);
   HelperThreadTask* maybeGetCompressionTask(
@@ -377,7 +376,7 @@ class GlobalHelperThreadState {
                                      const AutoLockHelperThreadState& lock);
 
   jit::IonCompileTask* highestPriorityPendingIonCompile(
-      const AutoLockHelperThreadState& lock);
+      const AutoLockHelperThreadState& lock, bool checkExecutionStatus);
 
  private:
   UniquePtr<ParseTask> finishParseTaskCommon(JSContext* cx, ParseTaskKind kind,
@@ -388,13 +387,9 @@ class GlobalHelperThreadState {
       StartEncoding startEncoding = StartEncoding::No);
   UniquePtr<frontend::CompilationStencil> finishCompileToStencilTask(
       JSContext* cx, ParseTaskKind kind, JS::OffThreadToken* token);
-  bool generateLCovSources(JSContext* cx, ParseTask* parseTask);
   bool finishMultiParseTask(JSContext* cx, ParseTaskKind kind,
                             JS::OffThreadToken* token,
-                            MutableHandle<ScriptVector> scripts);
-
-  void mergeParseTaskRealm(JSContext* cx, ParseTask* parseTask,
-                           JS::Realm* dest);
+                            mozilla::Vector<RefPtr<JS::Stencil>>* stencils);
 
  public:
   void cancelParseTask(JSRuntime* rt, ParseTaskKind kind,
@@ -409,8 +404,9 @@ class GlobalHelperThreadState {
   UniquePtr<frontend::CompilationStencil> finishCompileToStencilTask(
       JSContext* cx, JS::OffThreadToken* token);
   JSScript* finishScriptDecodeTask(JSContext* cx, JS::OffThreadToken* token);
-  bool finishMultiScriptsDecodeTask(JSContext* cx, JS::OffThreadToken* token,
-                                    MutableHandle<ScriptVector> scripts);
+  bool finishMultiStencilsDecodeTask(
+      JSContext* cx, JS::OffThreadToken* token,
+      mozilla::Vector<RefPtr<JS::Stencil>>* stencils);
   JSObject* finishModuleParseTask(JSContext* cx, JS::OffThreadToken* token);
 
   frontend::CompilationStencil* finishStencilParseTask(
@@ -489,6 +485,15 @@ struct MOZ_RAII AutoSetContextRuntime {
   ~AutoSetContextRuntime() { TlsContext.get()->setRuntime(nullptr); }
 };
 
+struct OffThreadFrontendErrors {
+  OffThreadFrontendErrors() : overRecursed(false), outOfMemory(false) {}
+  // Any errors or warnings produced during compilation. These are reported
+  // when finishing the script.
+  Vector<UniquePtr<CompileError>, 0, SystemAllocPolicy> errors;
+  bool overRecursed;
+  bool outOfMemory;
+};
+
 struct ParseTask : public mozilla::LinkedListElement<ParseTask>,
                    public JS::OffThreadToken,
                    public HelperThreadTask {
@@ -499,20 +504,13 @@ struct ParseTask : public mozilla::LinkedListElement<ParseTask>,
   // track which one we are associated with.
   JSRuntime* runtime = nullptr;
 
-  // The global object to use while parsing.
-  JSObject* parseGlobal;
-
   // Callback invoked off thread when the parse finishes.
   JS::OffThreadCompileCallback callback;
   void* callbackData;
 
-  // Holds the final scripts between the invocation of the callback and the
-  // point where FinishOffThreadScript is called, which will destroy the
-  // ParseTask.
-  GCVector<JSScript*, 1, SystemAllocPolicy> scripts;
-
-  // Holds the ScriptSourceObjects generated for the script compilation.
-  GCVector<ScriptSourceObject*, 1, SystemAllocPolicy> sourceObjects;
+  // For the multi-decode stencil case, holds onto the set of stencils produced
+  // offthread
+  mozilla::Vector<RefPtr<JS::Stencil>> stencils;
 
   // The input of the compilation.
   UniquePtr<frontend::CompilationInput> stencilInput_;
@@ -525,20 +523,18 @@ struct ParseTask : public mozilla::LinkedListElement<ParseTask>,
 
   frontend::CompilationGCOutput gcOutput_;
 
-  // Any errors or warnings produced during compilation. These are reported
-  // when finishing the script.
-  Vector<UniquePtr<CompileError>, 0, SystemAllocPolicy> errors;
-  bool overRecursed;
-  bool outOfMemory;
+  // Record any errors happening while parsing or generating bytecode.
+  OffThreadFrontendErrors errors;
 
   ParseTask(ParseTaskKind kind, JSContext* cx,
             JS::OffThreadCompileCallback callback, void* callbackData);
   virtual ~ParseTask();
 
-  bool init(JSContext* cx, const JS::ReadOnlyCompileOptions& options,
-            JSObject* global);
+  bool init(JSContext* cx, const JS::ReadOnlyCompileOptions& options);
 
   void activate(JSRuntime* rt);
+  void deactivate(JSRuntime* rt);
+
   virtual void parse(JSContext* cx) = 0;
   bool instantiateStencils(JSContext* cx);
 
@@ -564,12 +560,12 @@ struct ScriptDecodeTask : public ParseTask {
   void parse(JSContext* cx) override;
 };
 
-struct MultiScriptsDecodeTask : public ParseTask {
+struct MultiStencilsDecodeTask : public ParseTask {
   JS::TranscodeSources* sources;
 
-  MultiScriptsDecodeTask(JSContext* cx, JS::TranscodeSources& sources,
-                         JS::OffThreadCompileCallback callback,
-                         void* callbackData);
+  MultiStencilsDecodeTask(JSContext* cx, JS::TranscodeSources& sources,
+                          JS::OffThreadCompileCallback callback,
+                          void* callbackData);
   void parse(JSContext* cx) override;
 };
 

@@ -108,11 +108,8 @@ ChromeProfileMigrator.prototype.getResources = async function Chrome_getResource
   if (chromeUserDataPath) {
     let profileFolder = OS.Path.join(chromeUserDataPath, aProfile.id);
     if (await OS.File.exists(profileFolder)) {
-      let localePropertySuffix = MigrationUtils._getLocalePropertyForBrowser(
-        this.getBrowserKey()
-      ).replace(/^source-name-/, "");
       let possibleResourcePromises = [
-        GetBookmarksResource(profileFolder, localePropertySuffix),
+        GetBookmarksResource(profileFolder),
         GetHistoryResource(profileFolder),
         GetCookiesResource(profileFolder),
       ];
@@ -214,7 +211,7 @@ Object.defineProperty(ChromeProfileMigrator.prototype, "sourceLocked", {
   },
 });
 
-async function GetBookmarksResource(aProfileFolder, aLocalePropertySuffix) {
+async function GetBookmarksResource(aProfileFolder) {
   let bookmarksPath = OS.Path.join(aProfileFolder, "Bookmarks");
   if (!(await OS.File.exists(bookmarksPath))) {
     return null;
@@ -243,18 +240,6 @@ async function GetBookmarksResource(aProfileFolder, aLocalePropertySuffix) {
             roots.bookmark_bar.children,
             errorGatherer
           );
-          if (
-            !Services.prefs.getBoolPref("browser.toolbars.bookmarks.2h2020") &&
-            !MigrationUtils.isStartupMigration &&
-            PlacesUtils.getChildCountForFolder(
-              PlacesUtils.bookmarks.toolbarGuid
-            ) > PlacesUIUtils.NUM_TOOLBAR_BOOKMARKS_TO_UNHIDE
-          ) {
-            parentGuid = await MigrationUtils.createImportedBookmarksFolder(
-              aLocalePropertySuffix,
-              parentGuid
-            );
-          }
           await MigrationUtils.insertManyBookmarksWrapper(
             bookmarks,
             parentGuid
@@ -267,17 +252,6 @@ async function GetBookmarksResource(aProfileFolder, aLocalePropertySuffix) {
           // Bookmark menu
           let parentGuid = PlacesUtils.bookmarks.menuGuid;
           let bookmarks = convertBookmarks(roots.other.children, errorGatherer);
-          if (
-            !Services.prefs.getBoolPref("browser.toolbars.bookmarks.2h2020") &&
-            !MigrationUtils.isStartupMigration &&
-            PlacesUtils.getChildCountForFolder(PlacesUtils.bookmarks.menuGuid) >
-              PlacesUIUtils.NUM_TOOLBAR_BOOKMARKS_TO_UNHIDE
-          ) {
-            parentGuid = await MigrationUtils.createImportedBookmarksFolder(
-              aLocalePropertySuffix,
-              parentGuid
-            );
-          }
           await MigrationUtils.insertManyBookmarksWrapper(
             bookmarks,
             parentGuid
@@ -649,7 +623,11 @@ ChromiumProfileMigrator.prototype.classID = Components.ID(
   "{8cece922-9720-42de-b7db-7cef88cb07ca}"
 );
 
-var EXPORTED_SYMBOLS = ["ChromeProfileMigrator", "ChromiumProfileMigrator"];
+var EXPORTED_SYMBOLS = [
+  "ChromeProfileMigrator",
+  "ChromiumProfileMigrator",
+  "BraveProfileMigrator",
+];
 
 /**
  * Chrome Canary
@@ -705,6 +683,19 @@ ChromeBetaMigrator.prototype.classID = Components.ID(
 if (AppConstants.platform != "macosx") {
   EXPORTED_SYMBOLS.push("ChromeBetaMigrator");
 }
+
+function BraveProfileMigrator() {
+  this._chromeUserDataPathSuffix = "Brave";
+  this._keychainServiceName = "Brave Browser Safe Storage";
+  this._keychainAccountName = "Brave Browser";
+}
+BraveProfileMigrator.prototype = Object.create(ChromeProfileMigrator.prototype);
+BraveProfileMigrator.prototype.classDescription = "Brave Browser Migrator";
+BraveProfileMigrator.prototype.contractID =
+  "@mozilla.org/profile/migrator;1?app=browser&type=brave";
+BraveProfileMigrator.prototype.classID = Components.ID(
+  "{4071880a-69e4-4c83-88b4-6c589a62801d}"
+);
 
 function ChromiumEdgeMigrator() {
   this._chromeUserDataPathSuffix = "Edge";

@@ -88,6 +88,16 @@ TRRServiceParent::Observe(nsISupports* aSubject, const char* aTopic,
   return NS_OK;
 }
 
+mozilla::ipc::IPCResult
+TRRServiceParent::RecvNotifyNetworkConnectivityServiceObservers(
+    const nsCString& aTopic) {
+  nsCOMPtr<nsIObserverService> obs = mozilla::services::GetObserverService();
+  if (obs) {
+    obs->NotifyObservers(nullptr, aTopic.get(), nullptr);
+  }
+  return IPC_OK();
+}
+
 bool TRRServiceParent::MaybeSetPrivateURI(const nsACString& aURI) {
   nsAutoCString newURI(aURI);
   ProcessURITemplate(newURI);
@@ -106,15 +116,15 @@ bool TRRServiceParent::MaybeSetPrivateURI(const nsACString& aURI) {
 }
 
 void TRRServiceParent::SetDetectedTrrURI(const nsACString& aURI) {
-  if (mURIPrefHasUserValue) {
+  if (!mURIPref.IsEmpty()) {
     return;
   }
 
   mURISetByDetection = MaybeSetPrivateURI(aURI);
-  RefPtr<TRRServiceParent> self = this;
-  nsCString uri(aURI);
   gIOService->CallOrWaitForSocketProcess(
-      [self, uri]() { Unused << self->SendSetDetectedTrrURI(uri); });
+      [self = RefPtr{this}, uri = nsAutoCString(aURI)]() {
+        Unused << self->SendSetDetectedTrrURI(uri);
+      });
 }
 
 void TRRServiceParent::GetTrrURI(nsACString& aURI) { aURI = mPrivateURI; }

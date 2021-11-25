@@ -779,6 +779,10 @@ void nsChildView::Resize(double aX, double aY, double aWidth, double aHeight, bo
     SuspendAsyncCATransactions();
     mBounds.width = width;
     mBounds.height = height;
+
+    CALayer* layer = [mView rootCALayer];
+    double scale = BackingScaleFactor();
+    layer.bounds = CGRectMake(0, 0, width / scale, height / scale);
   }
 
   ManipulateViewWithoutNeedingDisplay(mView, ^{
@@ -852,6 +856,18 @@ void nsChildView::UnsuspendAsyncCATransactions() {
     // display, because this will schedule a main thread CATransaction, during
     // which HandleMainThreadCATransaction will call CommitToScreen().
     [mView markLayerForDisplay];
+  }
+}
+
+void nsChildView::UpdateFullscreen(bool aFullscreen) {
+  if (mNativeLayerRoot) {
+    mNativeLayerRoot->SetWindowIsFullscreen(aFullscreen);
+  }
+}
+
+void nsChildView::NoteMouseMoveAtTime(const mozilla::TimeStamp& aTime) {
+  if (mNativeLayerRoot) {
+    mNativeLayerRoot->NoteMouseMoveAtTime(aTime);
   }
 }
 
@@ -1201,7 +1217,7 @@ void nsChildView::Invalidate(const LayoutDeviceIntRect& aRect) {
 
   if (!mView || !mVisible) return;
 
-  NS_ASSERTION(GetWindowRenderer()->GetBackendType() != LayersBackend::LAYERS_CLIENT,
+  NS_ASSERTION(GetWindowRenderer()->GetBackendType() != LayersBackend::LAYERS_WR,
                "Shouldn't need to invalidate with accelerated OMTC layers!");
 
   EnsureContentLayerForMainThreadPainting();
@@ -1239,10 +1255,6 @@ bool nsChildView::ShouldUseOffMainThreadCompositing() {
 }
 
 #pragma mark -
-
-nsresult nsChildView::ConfigureChildren(const nsTArray<Configuration>& aConfigurations) {
-  return NS_OK;
-}
 
 // Invokes callback and ProcessEvent methods on Event Listener object
 nsresult nsChildView::DispatchEvent(WidgetGUIEvent* event, nsEventStatus& aStatus) {
@@ -1346,14 +1358,9 @@ bool nsChildView::PaintWindowInDrawTarget(gfx::DrawTarget* aDT,
   targetContext->Clip();
 
   nsAutoRetainCocoaObject kungFuDeathGrip(mView);
-  if (GetWindowRenderer()->GetBackendType() == LayersBackend::LAYERS_NONE ||
-      GetWindowRenderer()->GetBackendType() == LayersBackend::LAYERS_BASIC) {
+  if (GetWindowRenderer()->GetBackendType() == LayersBackend::LAYERS_NONE) {
     nsBaseWidget::AutoLayerManagerSetup setupLayerManager(this, targetContext,
                                                           BufferMode::BUFFER_NONE);
-    return PaintWindow(aRegion);
-  }
-  if (GetWindowRenderer()->GetBackendType() == LayersBackend::LAYERS_CLIENT) {
-    // We only need this so that we actually get DidPaintWindow fired
     return PaintWindow(aRegion);
   }
   return false;
@@ -1398,8 +1405,7 @@ void nsChildView::PaintWindowInContentLayer() {
 void nsChildView::HandleMainThreadCATransaction() {
   WillPaintWindow();
 
-  if (GetWindowRenderer()->GetBackendType() == LayersBackend::LAYERS_NONE ||
-      GetWindowRenderer()->GetBackendType() == LayersBackend::LAYERS_BASIC) {
+  if (GetWindowRenderer()->GetBackendType() == LayersBackend::LAYERS_NONE) {
     // We're in BasicLayers mode, i.e. main thread software compositing.
     // Composite the window into our layer's surface.
     PaintWindowInContentLayer();
@@ -3076,6 +3082,7 @@ NSEvent* gLastDragMouseDownEvent = nil;  // [strong]
   WidgetMouseEvent geckoEvent(true, eMouseMove, mGeckoChild, WidgetMouseEvent::eReal);
   [self convertCocoaMouseEvent:theEvent toGeckoEvent:&geckoEvent];
 
+  mGeckoChild->NoteMouseMoveAtTime(geckoEvent.mTimeStamp);
   mGeckoChild->DispatchInputEvent(&geckoEvent);
 
   NS_OBJC_END_TRY_IGNORE_BLOCK;

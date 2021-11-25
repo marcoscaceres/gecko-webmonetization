@@ -130,6 +130,7 @@ EXPORTS.mozilla += [
     "nsMemoryInfoDumper.h",
     "NSPRLogModulesParser.h",
     "OwningNonNull.h",
+    "RLBoxSandboxPool.h",
     "ShutdownPhase.h",
     "SizeOfState.h",
     "StaticLocalPtr.h",
@@ -196,6 +197,7 @@ UNIFIED_SOURCES += [
     "nsVersionComparator.cpp",
     "nsVersionComparatorImpl.cpp",
     "nsWeakReference.cpp",
+    "RLBoxSandboxPool.cpp",
 ]
 
 if CONFIG["OS_TARGET"] in ("Linux", "Android"):
@@ -257,5 +259,3 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
 
 if CONFIG["MOZ_BACKGROUNDTASKS"]:
     DEFINES["MOZ_BACKGROUNDTASKS"] = True
-
-REQUIRES_UNIFIED_BUILD = True

@@ -154,6 +154,7 @@ EXPORTS.mozilla += [
 ]
 
 EXPORTS.mozilla.net += [
+    "CacheInfoIPCTypes.h",
     "CaptivePortalService.h",
     "Dashboard.h",
     "DashboardTypes.h",
@@ -310,6 +311,7 @@ FINAL_LIBRARY = "xul"
 LOCAL_INCLUDES += [
     "/docshell/base",
     "/dom/base",
+    "/netwerk/dns",
     "/netwerk/protocol/http",
     "/netwerk/socket",
     "/netwerk/url-classifier",

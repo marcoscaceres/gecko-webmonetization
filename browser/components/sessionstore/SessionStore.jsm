@@ -318,8 +318,8 @@ var SessionStore = {
     return SessionStoreInternal.getClosedTabCount(aWindow);
   },
 
-  getClosedTabData: function ss_getClosedTabData(aWindow, aAsString = true) {
-    return SessionStoreInternal.getClosedTabData(aWindow, aAsString);
+  getClosedTabData: function ss_getClosedTabData(aWindow) {
+    return SessionStoreInternal.getClosedTabData(aWindow);
   },
 
   undoCloseTab: function ss_undoCloseTab(aWindow, aIndex) {
@@ -334,14 +334,12 @@ var SessionStore = {
     return SessionStoreInternal.getClosedWindowCount();
   },
 
-  getClosedWindowData: function ss_getClosedWindowData(aAsString = true) {
-    return SessionStoreInternal.getClosedWindowData(aAsString);
+  getClosedWindowData: function ss_getClosedWindowData() {
+    return SessionStoreInternal.getClosedWindowData();
   },
 
   maybeDontSaveTabs(aWindow) {
-    if (this.willAutoRestore) {
-      aWindow._dontSaveTabs = true;
-    }
+    SessionStoreInternal.maybeDontSaveTabs(aWindow);
   },
 
   undoCloseWindow: function ss_undoCloseWindow(aIndex) {
@@ -1853,9 +1851,7 @@ var SessionStoreInternal = {
       // with tabs we deem not worth saving then we might end up with a
       // random closed or even a pop-up window re-opened. To prevent that
       // we explicitly allow saving an "empty" window state.
-      let isLastWindow =
-        Object.keys(this._windows).length == 1 &&
-        !this._closedWindows.some(win => win._shouldRestore || false);
+      let isLastWindow = this.isLastRestorableWindow();
 
       // clear this window from the list, since it has definitely been closed.
       delete this._windows[aWindow.__SSi];
@@ -2726,8 +2722,7 @@ var SessionStoreInternal = {
       if (TAB_STATE_FOR_BROWSER.get(browser) == TAB_STATE_NEEDS_RESTORE) {
         // If BROWSER_STATE is still available for the browser and it is
         // If __SS_restoreState is still on the browser and it is
-        // TAB_STATE_NEEDS_RESTORE, then then we haven't restored
-        // this tab yet.
+        // TAB_STATE_NEEDS_RESTORE, then we haven't restored this tab yet.
         //
         // It's possible that this tab was recently revived, and that
         // we've deferred showing the tab crashed page for it (if the
@@ -3157,11 +3152,9 @@ var SessionStoreInternal = {
     return DyingWindowCache.get(aWindow)._closedTabs.length;
   },
 
-  getClosedTabData: function ssi_getClosedTabData(aWindow, aAsString = true) {
+  getClosedTabData: function ssi_getClosedTabData(aWindow) {
     if ("__SSi" in aWindow) {
-      return aAsString
-        ? JSON.stringify(this._windows[aWindow.__SSi]._closedTabs)
-        : Cu.cloneInto(this._windows[aWindow.__SSi]._closedTabs, {});
+      return Cu.cloneInto(this._windows[aWindow.__SSi]._closedTabs, {});
     }
 
     if (!DyingWindowCache.has(aWindow)) {
@@ -3172,9 +3165,7 @@ var SessionStoreInternal = {
     }
 
     let data = DyingWindowCache.get(aWindow);
-    return aAsString
-      ? JSON.stringify(data._closedTabs)
-      : Cu.cloneInto(data._closedTabs, {});
+    return Cu.cloneInto(data._closedTabs, {});
   },
 
   undoCloseTab: function ssi_undoCloseTab(aWindow, aIndex) {
@@ -3250,10 +3241,22 @@ var SessionStoreInternal = {
     return this._closedWindows.length;
   },
 
-  getClosedWindowData: function ssi_getClosedWindowData(aAsString = true) {
-    return aAsString
-      ? JSON.stringify(this._closedWindows)
-      : Cu.cloneInto(this._closedWindows, {});
+  getClosedWindowData: function ssi_getClosedWindowData() {
+    return Cu.cloneInto(this._closedWindows, {});
+  },
+
+  maybeDontSaveTabs(aWindow) {
+    if (this.willAutoRestore && this.isLastRestorableWindow()) {
+      aWindow._dontSaveTabs = true;
+    }
+  },
+
+  isLastRestorableWindow() {
+    return (
+      Object.values(this._windows).filter(winData => !winData.isPrivate)
+        .length == 1 &&
+      !this._closedWindows.some(win => win._shouldRestore || false)
+    );
   },
 
   undoCloseWindow: function ssi_undoCloseWindow(aIndex) {
@@ -4087,6 +4090,7 @@ var SessionStoreInternal = {
 
     // We're not returning from this before we end up calling restoreTabs
     // for this window, so make sure we send the SSWindowStateBusy event.
+    this._sendWindowRestoringNotification(aWindow);
     this._setWindowStateBusy(aWindow);
 
     if (winData.workspaceID) {
@@ -4210,6 +4214,13 @@ var SessionStoreInternal = {
     this._windows[
       aWindow.__SSi
     ]._lastClosedTabGroupCount = newLastClosedTabGroupCount;
+
+    if (!this._isWindowLoaded(aWindow)) {
+      // from now on, the data will come from the actual window
+      delete this._statesToRestore[WINDOW_RESTORE_IDS.get(aWindow)];
+      WINDOW_RESTORE_IDS.delete(aWindow);
+      delete this._windows[aWindow.__SSi]._restoring;
+    }
 
     // Restore tabs, if any.
     if (winData.tabs.length) {
@@ -4404,13 +4415,6 @@ var SessionStoreInternal = {
    */
   restoreTabs(aWindow, aTabs, aTabData, aSelectTab) {
     var tabbrowser = aWindow.gBrowser;
-
-    if (!this._isWindowLoaded(aWindow)) {
-      // from now on, the data will come from the actual window
-      delete this._statesToRestore[WINDOW_RESTORE_IDS.get(aWindow)];
-      WINDOW_RESTORE_IDS.delete(aWindow);
-      delete this._windows[aWindow.__SSi]._restoring;
-    }
 
     let numTabsToRestore = aTabs.length;
     let numTabsInWindow = tabbrowser.tabs.length;
@@ -5563,6 +5567,17 @@ var SessionStoreInternal = {
   _sendWindowStateEvent: function ssi_sendWindowStateEvent(aWindow, aType) {
     let event = aWindow.document.createEvent("Events");
     event.initEvent("SSWindowState" + aType, true, false);
+    aWindow.dispatchEvent(event);
+  },
+
+  /**
+   * Dispatch the SSWindowRestoring event for the given window.
+   * @param aWindow
+   *        The window which is going to be restored
+   */
+  _sendWindowRestoringNotification(aWindow) {
+    let event = aWindow.document.createEvent("Events");
+    event.initEvent("SSWindowRestoring", true, false);
     aWindow.dispatchEvent(event);
   },
 

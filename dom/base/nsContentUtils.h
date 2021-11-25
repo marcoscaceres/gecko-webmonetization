@@ -113,7 +113,6 @@ class nsIURI;
 class nsIUUIDGenerator;
 class nsIWidget;
 class nsIXPConnect;
-class nsNameSpaceManager;
 class nsNodeInfoManager;
 class nsPIWindowRoot;
 class nsPresContext;
@@ -183,19 +182,14 @@ class HTMLInputElement;
 class IPCDataTransfer;
 class IPCDataTransferItem;
 struct LifecycleCallbackArgs;
-struct LifecycleAdoptedCallbackArgs;
 class MessageBroadcaster;
 class NodeInfo;
 class Selection;
+struct StructuredSerializeOptions;
 class WorkerPrivate;
 enum class ElementCallbackType;
 enum class ReferrerPolicy : uint8_t;
 }  // namespace dom
-
-namespace intl {
-class LineBreaker;
-class WordBreaker;
-}  // namespace intl
 
 namespace ipc {
 class Shmem;
@@ -352,10 +346,9 @@ class nsContentUtils {
   // Check whether we should avoid leaking distinguishing information to JS/CSS.
   // This function can be called both in the main thread and worker threads.
   static bool ShouldResistFingerprinting();
+  static bool ShouldResistFingerprinting(nsIGlobalObject* aGlobalObject);
   static bool ShouldResistFingerprinting(nsIDocShell* aDocShell);
   static bool ShouldResistFingerprinting(nsIPrincipal* aPrincipal);
-  static bool ShouldResistFingerprinting(
-      mozilla::dom::WorkerPrivate* aWorkerPrivate);
   static bool ShouldResistFingerprinting(const Document* aDoc);
   static bool ShouldResistFingerprinting(nsIChannel* aChannel);
 
@@ -757,8 +750,6 @@ class nsContentUtils {
   // element.
   static bool InProlog(nsINode* aNode);
 
-  static nsNameSpaceManager* NameSpaceManager() { return sNameSpaceManager; }
-
   static nsIIOService* GetIOService() { return sIOService; }
 
   static nsIBidiKeyboard* GetBidiKeyboard();
@@ -859,14 +850,6 @@ class nsContentUtils {
 
   // Returns true if aDoc1 and aDoc2 have equal NodePrincipal()s.
   static bool HaveEqualPrincipals(Document* aDoc1, Document* aDoc2);
-
-  static mozilla::intl::LineBreaker* LineBreaker() {
-    return sLineBreaker.get();
-  }
-
-  static mozilla::intl::WordBreaker* WordBreaker() {
-    return sWordBreaker.get();
-  }
 
   /**
    * Regster aObserver as a shutdown observer. A strong reference is held
@@ -2703,7 +2686,7 @@ class nsContentUtils {
    * `aAnonymousContent` hasn't been created yet.
    */
   static mozilla::TextEditor* GetTextEditorFromAnonymousNodeWithoutCreation(
-      nsIContent* aAnonymousContent);
+      const nsIContent* aAnonymousContent);
 
   /**
    * Returns whether a node has an editable ancestor.
@@ -3020,9 +3003,7 @@ class nsContentUtils {
 
   static void EnqueueLifecycleCallback(
       mozilla::dom::ElementCallbackType aType, Element* aCustomElement,
-      mozilla::dom::LifecycleCallbackArgs* aArgs = nullptr,
-      mozilla::dom::LifecycleAdoptedCallbackArgs* aAdoptedCallbackArgs =
-          nullptr,
+      const mozilla::dom::LifecycleCallbackArgs& aArgs,
       mozilla::dom::CustomElementDefinition* aDefinition = nullptr);
 
   /**
@@ -3084,6 +3065,15 @@ class nsContentUtils {
   static nsresult CreateJSValueFromSequenceOfObject(
       JSContext* aCx, const mozilla::dom::Sequence<JSObject*>& aTransfer,
       JS::MutableHandle<JS::Value> aValue);
+
+  /**
+   * This implements the structured cloning algorithm as described by
+   * https://html.spec.whatwg.org/#structured-cloning.
+   */
+  static void StructuredClone(
+      JSContext* aCx, nsIGlobalObject* aGlobal, JS::Handle<JS::Value> aValue,
+      const mozilla::dom::StructuredSerializeOptions& aOptions,
+      JS::MutableHandle<JS::Value> aRetval, mozilla::ErrorResult& aError);
 
   /**
    * Returns true if reserved key events should be prevented from being sent
@@ -3339,8 +3329,6 @@ class nsContentUtils {
   static nsIPrincipal* sSystemPrincipal;
   static nsIPrincipal* sNullSubjectPrincipal;
 
-  static nsNameSpaceManager* sNameSpaceManager;
-
   static nsIIOService* sIOService;
   static nsIUUIDGenerator* sUUIDGenerator;
 
@@ -3356,9 +3344,6 @@ class nsContentUtils {
 
   static nsIContentPolicy* sContentPolicyService;
   static bool sTriedToGetContentPolicy;
-
-  static RefPtr<mozilla::intl::LineBreaker> sLineBreaker;
-  static RefPtr<mozilla::intl::WordBreaker> sWordBreaker;
 
   static mozilla::StaticRefPtr<nsIBidiKeyboard> sBidiKeyboard;
 

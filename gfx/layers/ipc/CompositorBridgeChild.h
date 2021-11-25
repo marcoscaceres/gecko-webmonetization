@@ -93,7 +93,7 @@ class CompositorBridgeChild final : public PCompositorBridgeChild,
       const LayersId& aLayersId, nsTArray<uint64_t>&& aJankedAnimations);
 
   PTextureChild* AllocPTextureChild(
-      const SurfaceDescriptor& aSharedData, const ReadLockDescriptor& aReadLock,
+      const SurfaceDescriptor& aSharedData, ReadLockDescriptor& aReadLock,
       const LayersBackend& aLayersBackend, const TextureFlags& aFlags,
       const LayersId& aId, const uint64_t& aSerial,
       const wr::MaybeExternalImageId& aExternalImageId);
@@ -103,7 +103,7 @@ class CompositorBridgeChild final : public PCompositorBridgeChild,
   mozilla::ipc::IPCResult RecvParentAsyncMessages(
       nsTArray<AsyncParentMessageData>&& aMessages);
   PTextureChild* CreateTexture(const SurfaceDescriptor& aSharedData,
-                               const ReadLockDescriptor& aReadLock,
+                               ReadLockDescriptor&& aReadLock,
                                LayersBackend aLayersBackend,
                                TextureFlags aFlags, uint64_t aSerial,
                                wr::MaybeExternalImageId& aExternalImageId,
@@ -126,7 +126,7 @@ class CompositorBridgeChild final : public PCompositorBridgeChild,
   bool SendResume();
   bool SendResumeAsync();
   bool SendAdoptChild(const LayersId& id);
-  bool SendFlushRendering();
+  bool SendFlushRendering(const wr::RenderReasons& aReasons);
   bool SendStartFrameTimeRecording(const int32_t& bufferSize,
                                    uint32_t* startIndex);
   bool SendStopFrameTimeRecording(const uint32_t& startIndex,

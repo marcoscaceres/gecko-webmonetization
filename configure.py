@@ -13,17 +13,16 @@ import os
 import sys
 import textwrap
 
-
-try:
-    from collections.abc import Iterable
-except ImportError:
-    from collections import Iterable
-
+from collections.abc import Iterable
 
 base_dir = os.path.abspath(os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(base_dir, "python", "mach"))
 sys.path.insert(0, os.path.join(base_dir, "python", "mozboot"))
 sys.path.insert(0, os.path.join(base_dir, "python", "mozbuild"))
+sys.path.insert(0, os.path.join(base_dir, "third_party", "python", "packaging"))
+sys.path.insert(0, os.path.join(base_dir, "third_party", "python", "pyparsing"))
 sys.path.insert(0, os.path.join(base_dir, "third_party", "python", "six"))
+from mach.site import CommandSiteManager
 from mozbuild.configure import (
     ConfigureSandbox,
     TRACE,
@@ -36,6 +35,7 @@ import six
 
 
 def main(argv):
+    _activate_build_virtualenv()
     config = {}
 
     if "OLD_CONFIGURE" not in os.environ:
@@ -223,6 +223,23 @@ def config_status(config, execute=True):
 
         return config_status(args=[], **sanitized_config)
     return 0
+
+
+def _activate_build_virtualenv():
+    version = ".".join(str(i) for i in sys.version_info[0:3])
+    print(f"Using Python {version} from {sys.executable}")
+
+    topobjdir = os.path.realpath(".")
+    topsrcdir = os.path.realpath(os.path.dirname(__file__))
+
+    build_site = CommandSiteManager(
+        topsrcdir,
+        os.path.join(topobjdir, "_virtualenvs"),
+        "build",
+    )
+    if not build_site.ensure():
+        print("Created Python 3 virtualenv")
+    build_site.activate()
 
 
 if __name__ == "__main__":

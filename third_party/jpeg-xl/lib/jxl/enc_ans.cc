@@ -421,11 +421,9 @@ size_t BuildAndStoreANSEncodingData(
   if (use_prefix_code) {
     if (alphabet_size <= 1) return 0;
     std::vector<uint32_t> histo(alphabet_size);
-    size_t total = 0;
     for (size_t i = 0; i < alphabet_size; i++) {
       histo[i] = histogram[i];
       JXL_CHECK(histogram[i] >= 0);
-      total += histo[i];
     }
     size_t cost = 0;
     {
@@ -543,6 +541,7 @@ void ChooseUintConfigs(const HistogramParams& params,
                        std::vector<Histogram>* clustered_histograms,
                        EntropyEncodingData* codes, size_t* log_alpha_size) {
   codes->uint_config.resize(clustered_histograms->size());
+
   if (params.uint_method == HistogramParams::HybridUintMethod::kNone) return;
   if (params.uint_method == HistogramParams::HybridUintMethod::kContextMap) {
     codes->uint_config.clear();
@@ -624,6 +623,9 @@ void ChooseUintConfigs(const HistogramParams& params,
     for (size_t i = 0; i < clustered_histograms->size(); i++) {
       if (!is_valid[i]) continue;
       float cost = (*clustered_histograms)[i].PopulationCost() + extra_bits[i];
+      // add signaling cost of the hybriduintconfig itself
+      cost += CeilLog2Nonzero(cfg.split_exponent + 1);
+      cost += CeilLog2Nonzero(cfg.split_exponent - cfg.msb_in_token + 1);
       if (cost < costs[i]) {
         codes->uint_config[i] = cfg;
         costs[i] = cost;
@@ -1297,7 +1299,6 @@ void ApplyLZ77_Optimal(const HistogramParams& params, size_t num_contexts,
   if (!lz77.enabled) return;
   SymbolCostEstimator sce(num_contexts + 1, params.force_huffman,
                           tokens_for_cost_estimate, lz77);
-  size_t total_symbols = 0;
   tokens_lz77.resize(tokens.size());
   HybridUintConfig uint_config;
   std::vector<float> sym_cost;
@@ -1307,7 +1308,6 @@ void ApplyLZ77_Optimal(const HistogramParams& params, size_t num_contexts,
         params.image_widths.size() > stream ? params.image_widths[stream] : 0;
     const auto& in = tokens[stream];
     auto& out = tokens_lz77[stream];
-    total_symbols += in.size();
     // Cumulative sum of bit costs.
     sym_cost.resize(in.size() + 1);
     for (size_t i = 0; i < in.size(); i++) {
@@ -1619,7 +1619,7 @@ void WriteTokens(const std::vector<Token>& tokens,
 }
 
 void SetANSFuzzerFriendly(bool ans_fuzzer_friendly) {
-#if JXL_IS_DEBUG_BUILD  // Guard against accidential / malicious changes.
+#if JXL_IS_DEBUG_BUILD  // Guard against accidental / malicious changes.
   ans_fuzzer_friendly_ = ans_fuzzer_friendly;
 #endif
 }

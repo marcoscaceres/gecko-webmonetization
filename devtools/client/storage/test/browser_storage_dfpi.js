@@ -14,7 +14,7 @@ const { SiteDataTestUtils } = ChromeUtils.import(
 );
 
 // Ensure iframe.src in storage-dfpi.html starts with PREFIX.
-const PREFIX = "http://sub1.test1.example";
+const PREFIX = "https://sub1.test1.example";
 const ORIGIN = `${PREFIX}.org`;
 const ORIGIN_THIRD_PARTY = `${PREFIX}.com`;
 const TEST_URL = `${ORIGIN}/${PATH}storage-dfpi.html`;
@@ -92,6 +92,8 @@ async function testPartitionedStorage(
     "network.cookie.cookieBehavior",
     Ci.nsICookieService.BEHAVIOR_REJECT_TRACKER_AND_PARTITION_FOREIGN
   );
+  // Bug 1617611: Fix all the tests broken by "cookies SameSite=lax by default"
+  await pushPref("network.cookie.sameSite.laxByDefault", false);
 
   info(
     "Open the test url in a new tab and add storage entries *before* opening the storage panel."

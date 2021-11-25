@@ -14,7 +14,7 @@ const { l10n } = require("devtools/client/webconsole/utils/messages");
 
 var ChromeUtils = require("ChromeUtils");
 const { BrowserLoader } = ChromeUtils.import(
-  "resource://devtools/client/shared/browser-loader.js"
+  "resource://devtools/shared/loader/browser-loader.js"
 );
 const {
   getAdHocFrontOrPrimitiveGrip,
@@ -62,7 +62,7 @@ class WebConsoleUI {
     this.isBrowserConsole = this.hud.isBrowserConsole;
 
     this.isBrowserToolboxConsole =
-      this.hud.commands.descriptorFront.isParentProcessDescriptor &&
+      this.hud.commands.descriptorFront.isBrowserProcessDescriptor &&
       !this.isBrowserConsole;
     this.fissionSupport = Services.prefs.getBoolPref(
       constants.PREFS.FEATURES.BROWSER_TOOLBOX_FISSION
@@ -208,11 +208,11 @@ class WebConsoleUI {
     }
 
     // Stop listening for targets
-    this.hud.commands.targetCommand.unwatchTargets(
-      this.hud.commands.targetCommand.ALL_TYPES,
-      this._onTargetAvailable,
-      this._onTargetDestroy
-    );
+    this.hud.commands.targetCommand.unwatchTargets({
+      types: this.hud.commands.targetCommand.ALL_TYPES,
+      onAvailable: this._onTargetAvailable,
+      onDestroyed: this._onTargetDestroy,
+    });
 
     const resourceCommand = this.hud.resourceCommand;
     resourceCommand.unwatchResources(
@@ -239,6 +239,9 @@ class WebConsoleUI {
     }
     this.proxy = null;
     this.additionalProxies = null;
+
+    this.networkDataProvider.destroy();
+    this.networkDataProvider = null;
 
     // Nullify `hud` last as it nullify also target which is used on destroy
     this.window = this.hud = this.wrapper = null;
@@ -341,11 +344,11 @@ class WebConsoleUI {
     // - workers, for similar reason. When we open a toolbox
     // for just a worker, the top level target is a worker target.
     // - processes, as we want to spawn additional proxies for them.
-    await commands.targetCommand.watchTargets(
-      commands.targetCommand.ALL_TYPES,
-      this._onTargetAvailable,
-      this._onTargetDestroy
-    );
+    await commands.targetCommand.watchTargets({
+      types: this.hud.commands.targetCommand.ALL_TYPES,
+      onAvailable: this._onTargetAvailable,
+      onDestroyed: this._onTargetDestroy,
+    });
 
     const resourceCommand = commands.resourceCommand;
     await resourceCommand.watchResources(
@@ -364,17 +367,12 @@ class WebConsoleUI {
       }
     );
 
-    // @backward-compat { version 93 } Starts supporting setSaveRequestAndResponseBodies.
-    //                                 But until we enable NETWORK_EVENT server watcher in the browser toolbox
-    //                                 we still have to support the console actor codepath.
-    //                                 We will be able to remove the trait check via hasTargetWatcherSupport
-    //                                 once we drop support for 92.
+    // Until we enable NETWORK_EVENT server watcher in the browser toolbox
+    // we still have to support the console actor codepath.
     const hasNetworkResourceCommandSupport = resourceCommand.hasResourceCommandSupport(
       resourceCommand.TYPES.NETWORK_EVENT
     );
-    const supportsWatcherRequest = commands.targetCommand.hasTargetWatcherSupport(
-      "saveRequestAndResponseBodies"
-    );
+    const supportsWatcherRequest = commands.targetCommand.hasTargetWatcherSupport();
     if (hasNetworkResourceCommandSupport && supportsWatcherRequest) {
       const networkFront = await commands.watcherFront.getNetworkParentActor();
       //
@@ -506,7 +504,7 @@ class WebConsoleUI {
    * @param Front targetFront
    *        The Front of the target that is available.
    *        This Front inherits from TargetMixin and is typically
-   *        composed of a BrowsingContextTargetFront or ContentProcessTargetFront.
+   *        composed of a WindowGlobalTargetFront or ContentProcessTargetFront.
    */
   async _onTargetAvailable({ targetFront }) {
     const dispatchTargetAvailable = () => {

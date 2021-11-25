@@ -8,6 +8,7 @@
 
 interface nsIInterfaceRequestor;
 interface nsIX509Cert;
+interface nsITlsHandshakeCallbackListener;
 
 %{C++
 #include "nsStringFwd.h"
@@ -158,11 +159,6 @@ interface nsISSLSocketControl : nsISupports {
     attribute ACString echConfig;
 
     /**
-     * The id used to uniquely identify the connection to the peer.
-     */
-    readonly attribute ACString peerId;
-
-    /**
      * The echConfig that should be used to retry for the connection setup.
      */
     readonly attribute ACString retryEchConfig;
@@ -171,5 +167,6 @@ interface nsISSLSocketControl : nsISupports {
      * Disable early data.
      */
     [noscript] void disableEarlyData();
-};
 
+    [noscript] void setHandshakeCallbackListener(in nsITlsHandshakeCallbackListener callback);
+};

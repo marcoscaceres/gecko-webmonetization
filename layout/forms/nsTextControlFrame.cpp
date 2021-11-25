@@ -735,6 +735,11 @@ void nsTextControlFrame::ReflowTextControlChild(
   // or percentage, if we're not the button box.
   auto overridePadding =
       isButtonBox ? Nothing() : Some(aReflowInput.ComputedLogicalPadding(wm));
+  if (!isButtonBox && aButtonBoxISize) {
+    // Button box respects inline-end-padding, so we don't need to.
+    overridePadding->IEnd(outerWM) = 0;
+  }
+
   // We want to let our button box fill the frame in the block axis, up to the
   // edge of the control's border. So, we use the control's padding-box as the
   // containing block size for our button box.
@@ -743,8 +748,6 @@ void nsTextControlFrame::ReflowTextControlChild(
   kidReflowInput.Init(aPresContext, overrideCBSize, Nothing(), overridePadding);
 
   LogicalPoint position(wm);
-  const auto& bp = aReflowInput.ComputedLogicalBorderPadding(outerWM);
-
   if (!isButtonBox) {
     MOZ_ASSERT(wm == outerWM,
                "Shouldn't have to care about orthogonal "
@@ -752,10 +755,13 @@ void nsTextControlFrame::ReflowTextControlChild(
                "except for the number spin-box which forces "
                "horizontal-tb");
 
-    // Offset the frame by the size of the parent's border
-    const auto& padding = aReflowInput.ComputedLogicalPadding(wm);
-    position.B(wm) = bp.BStart(wm) - padding.BStart(wm);
-    position.I(wm) = bp.IStart(wm) - padding.IStart(wm);
+    const auto& border = aReflowInput.ComputedLogicalBorder(wm);
+
+    // Offset the frame by the size of the parent's border. Note that we don't
+    // have to account for the parent's padding here, because this child
+    // actually "inherits" that padding and manages it on behalf of the parent.
+    position.B(wm) = border.BStart(wm);
+    position.I(wm) = border.IStart(wm);
 
     // Set computed width and computed height for the child (the button box is
     // the only exception, which has an auto size).
@@ -773,17 +779,21 @@ void nsTextControlFrame::ReflowTextControlChild(
               containerSize, ReflowChildFlags::Default, aStatus);
 
   if (isButtonBox) {
+    const auto& bp = aReflowInput.ComputedLogicalBorderPadding(outerWM);
     auto size = desiredSize.Size(outerWM);
     // Center button in the block axis of our content box. We do this
     // computation in terms of outerWM for simplicity.
-    position = LogicalPoint(outerWM);
-    position.B(outerWM) =
+    LogicalRect buttonRect(outerWM);
+    buttonRect.BSize(outerWM) = size.BSize(outerWM);
+    buttonRect.ISize(outerWM) = size.ISize(outerWM);
+    buttonRect.BStart(outerWM) =
         bp.BStart(outerWM) +
         (aReflowInput.ComputedBSize() - size.BSize(outerWM)) / 2;
     // Align to the inline-end of the content box.
-    position.I(outerWM) =
+    buttonRect.IStart(outerWM) =
         bp.IStart(outerWM) + aReflowInput.ComputedISize() - size.ISize(outerWM);
-    position = position.ConvertTo(wm, outerWM, containerSize);
+    buttonRect = buttonRect.ConvertTo(wm, outerWM, containerSize);
+    position = buttonRect.Origin(wm);
     aButtonBoxISize = size.ISize(outerWM);
   }
 
@@ -1181,16 +1191,17 @@ void nsTextControlFrame::SetInitialChildList(ChildListID aListID,
     MOZ_ASSERT(textControlElement);
     textControlElement->InitializeKeyboardEventListeners();
 
-    if (nsPoint* contentScrollPos = TakeProperty(ContentScrollPos())) {
+    bool hasProperty;
+    nsPoint contentScrollPos = TakeProperty(ContentScrollPos(), &hasProperty);
+    if (hasProperty) {
       // If we have a scroll pos stored to be passed to our anonymous
       // div, do it here!
       nsIStatefulFrame* statefulFrame = do_QueryFrame(frame);
       NS_ASSERTION(statefulFrame,
                    "unexpected type of frame for the anonymous div");
       UniquePtr<PresState> fakePresState = NewPresState();
-      fakePresState->scrollState() = *contentScrollPos;
+      fakePresState->scrollState() = contentScrollPos;
       statefulFrame->RestoreState(fakePresState.get());
-      delete contentScrollPos;
     }
   } else {
     MOZ_ASSERT(!mRootNode || PrincipalChildList().IsEmpty());
@@ -1285,7 +1296,7 @@ nsTextControlFrame::RestoreState(PresState* aState) {
   // Most likely, we don't have our anonymous content constructed yet, which
   // would cause us to end up here.  In this case, we'll just store the scroll
   // pos ourselves, and forward it to the scroll frame later when it's created.
-  SetProperty(ContentScrollPos(), new nsPoint(aState->scrollState()));
+  SetProperty(ContentScrollPos(), aState->scrollState());
   return NS_OK;
 }
 

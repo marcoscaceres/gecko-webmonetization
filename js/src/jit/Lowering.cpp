@@ -257,12 +257,6 @@ void LIRGenerator::visitInitPropGetterSetter(MInitPropGetterSetter* ins) {
   assignSafepoint(lir, ins);
 }
 
-void LIRGenerator::visitCreateThisWithTemplate(MCreateThisWithTemplate* ins) {
-  LCreateThisWithTemplate* lir = new (alloc()) LCreateThisWithTemplate(temp());
-  define(lir, ins);
-  assignSafepoint(lir, ins);
-}
-
 void LIRGenerator::visitCreateThis(MCreateThis* ins) {
   LCreateThis* lir =
       new (alloc()) LCreateThis(useRegisterOrConstantAtStart(ins->callee()),
@@ -344,6 +338,41 @@ void LIRGenerator::visitGetInlinedArgument(MGetInlinedArgument* ins) {
   defineBox(lir, ins);
 }
 
+void LIRGenerator::visitGetInlinedArgumentHole(MGetInlinedArgumentHole* ins) {
+#if defined(JS_CODEGEN_X64) || defined(JS_CODEGEN_MIPS64)
+  // On some 64-bit architectures, we don't support boxing a typed
+  // register in-place without using a scratch register, so the result
+  // register can't be the same as any of the inputs. Fortunately,
+  // those architectures have registers to spare.
+  const bool useAtStart = false;
+#else
+  const bool useAtStart = true;
+#endif
+
+  LAllocation index =
+      useAtStart ? useRegisterAtStart(ins->index()) : useRegister(ins->index());
+  uint32_t numActuals = ins->numActuals();
+  uint32_t numOperands =
+      numActuals * BOX_PIECES + LGetInlinedArgumentHole::NumNonArgumentOperands;
+
+  auto* lir = allocateVariadic<LGetInlinedArgumentHole>(numOperands);
+  if (!lir) {
+    abort(AbortReason::Alloc, "OOM: LIRGenerator::visitGetInlinedArgumentHole");
+    return;
+  }
+
+  lir->setOperand(LGetInlinedArgumentHole::Index, index);
+  for (uint32_t i = 0; i < numActuals; i++) {
+    MDefinition* arg = ins->getArg(i);
+    uint32_t index = LGetInlinedArgumentHole::ArgIndex(i);
+    lir->setBoxOperand(
+        index, useBoxOrTypedOrConstant(arg,
+                                       /*useConstant = */ true, useAtStart));
+  }
+  assignSnapshot(lir, ins->bailoutKind());
+  defineBox(lir, ins);
+}
+
 void LIRGenerator::visitGetArgumentsObjectArg(MGetArgumentsObjectArg* ins) {
   LAllocation argsObj = useRegister(ins->argsObject());
   LGetArgumentsObjectArg* lir =
@@ -371,6 +400,33 @@ void LIRGenerator::visitLoadArgumentsObjectArg(MLoadArgumentsObjectArg* ins) {
   defineBox(lir, ins);
 }
 
+void LIRGenerator::visitLoadArgumentsObjectArgHole(
+    MLoadArgumentsObjectArgHole* ins) {
+  MDefinition* argsObj = ins->argsObject();
+  MOZ_ASSERT(argsObj->type() == MIRType::Object);
+
+  MDefinition* index = ins->index();
+  MOZ_ASSERT(index->type() == MIRType::Int32);
+
+  auto* lir = new (alloc()) LLoadArgumentsObjectArgHole(
+      useRegister(argsObj), useRegister(index), temp());
+  assignSnapshot(lir, ins->bailoutKind());
+  defineBox(lir, ins);
+}
+
+void LIRGenerator::visitInArgumentsObjectArg(MInArgumentsObjectArg* ins) {
+  MDefinition* argsObj = ins->argsObject();
+  MOZ_ASSERT(argsObj->type() == MIRType::Object);
+
+  MDefinition* index = ins->index();
+  MOZ_ASSERT(index->type() == MIRType::Int32);
+
+  auto* lir = new (alloc())
+      LInArgumentsObjectArg(useRegister(argsObj), useRegister(index), temp());
+  assignSnapshot(lir, ins->bailoutKind());
+  define(lir, ins);
+}
+
 void LIRGenerator::visitArgumentsObjectLength(MArgumentsObjectLength* ins) {
   MDefinition* argsObj = ins->argsObject();
   MOZ_ASSERT(argsObj->type() == MIRType::Object);
@@ -378,6 +434,17 @@ void LIRGenerator::visitArgumentsObjectLength(MArgumentsObjectLength* ins) {
   auto* lir = new (alloc()) LArgumentsObjectLength(useRegister(argsObj));
   assignSnapshot(lir, ins->bailoutKind());
   define(lir, ins);
+}
+
+void LIRGenerator::visitArrayFromArgumentsObject(
+    MArrayFromArgumentsObject* ins) {
+  MDefinition* argsObj = ins->argsObject();
+  MOZ_ASSERT(argsObj->type() == MIRType::Object);
+
+  auto* lir =
+      new (alloc()) LArrayFromArgumentsObject(useRegisterAtStart(argsObj));
+  defineReturn(lir, ins);
+  assignSafepoint(lir, ins);
 }
 
 void LIRGenerator::visitGuardArgumentsObjectFlags(
@@ -582,6 +649,30 @@ void LIRGenerator::visitApplyArray(MApplyArray* apply) {
   assignSafepoint(lir, apply);
 }
 
+void LIRGenerator::visitConstructArgs(MConstructArgs* mir) {
+  MOZ_ASSERT(mir->getFunction()->type() == MIRType::Object);
+  MOZ_ASSERT(mir->getArgc()->type() == MIRType::Int32);
+  MOZ_ASSERT(mir->getNewTarget()->type() == MIRType::Object);
+  MOZ_ASSERT(mir->getThis()->type() == MIRType::Value);
+
+  // Assert if the return value is already erased.
+  static_assert(CallTempReg2 != JSReturnReg_Type);
+  static_assert(CallTempReg2 != JSReturnReg_Data);
+
+  auto* lir = new (alloc()) LConstructArgsGeneric(
+      useFixedAtStart(mir->getFunction(), CallTempReg3),
+      useFixedAtStart(mir->getArgc(), CallTempReg0),
+      useFixedAtStart(mir->getNewTarget(), CallTempReg1),
+      useBoxFixedAtStart(mir->getThis(), CallTempReg4, CallTempReg5),
+      tempFixed(CallTempReg2));
+
+  // Bailout is needed in the case of too many values in the arguments array.
+  assignSnapshot(lir, mir->bailoutKind());
+
+  defineReturn(lir, mir);
+  assignSafepoint(lir, mir);
+}
+
 void LIRGenerator::visitConstructArray(MConstructArray* mir) {
   MOZ_ASSERT(mir->getFunction()->type() == MIRType::Object);
   MOZ_ASSERT(mir->getElements()->type() == MIRType::Elements);
@@ -715,7 +806,10 @@ void LIRGenerator::visitTest(MTest* test) {
          comp->compareType() == MCompare::Compare_UInt32) &&
         comp->getOperand(1)->isConstant() &&
         comp->getOperand(1)->toConstant()->isInt32(0) &&
-        comp->getOperand(0)->isBitAnd() &&
+        (comp->getOperand(0)->isBitAnd() ||
+         (comp->getOperand(0)->isWasmBinaryBitwise() &&
+          comp->getOperand(0)->toWasmBinaryBitwise()->subOpcode() ==
+              MWasmBinaryBitwise::SubOpcode::And)) &&
         comp->getOperand(0)->isEmittedAtUses()) {
       MDefinition* bitAnd = opd->getOperand(0);
       MDefinition* lhs = bitAnd->getOperand(0);
@@ -961,6 +1055,39 @@ void LIRGenerator::visitCompare(MCompare* comp) {
   // LCompareSAndBranch. Doing this now wouldn't be wrong, but doesn't
   // make sense and avoids confusion.
   if (comp->compareType() == MCompare::Compare_String) {
+    if (IsEqualityOp(comp->jsop())) {
+      MConstant* constant = nullptr;
+      if (left->isConstant()) {
+        constant = left->toConstant();
+      } else if (right->isConstant()) {
+        constant = right->toConstant();
+      }
+
+      if (constant) {
+        JSLinearString* linear = &constant->toString()->asLinear();
+        size_t length = linear->length();
+
+        // Limit the number of inline instructions used for character
+        // comparisons. Use the same instruction limit for both encodings, i.e.
+        // two-byte uses half the limit of Latin-1 strings.
+        constexpr size_t Latin1StringCompareCutoff = 32;
+        constexpr size_t TwoByteStringCompareCutoff = 16;
+
+        bool canCompareInline =
+            length > 0 &&
+            (linear->hasLatin1Chars() ? length <= Latin1StringCompareCutoff
+                                      : length <= TwoByteStringCompareCutoff);
+        if (canCompareInline) {
+          MDefinition* input = left->isConstant() ? right : left;
+
+          auto* lir = new (alloc()) LCompareSInline(useRegister(input), linear);
+          define(lir, comp);
+          assignSafepoint(lir, comp);
+          return;
+        }
+      }
+    }
+
     LCompareS* lir =
         new (alloc()) LCompareS(useRegister(left), useRegister(right));
     define(lir, comp);
@@ -1097,7 +1224,7 @@ void LIRGenerator::visitSameValue(MSameValue* ins) {
   assignSafepoint(lir, ins);
 }
 
-void LIRGenerator::lowerBitOp(JSOp op, MBinaryBitwiseInstruction* ins) {
+void LIRGenerator::lowerBitOp(JSOp op, MBinaryInstruction* ins) {
   MDefinition* lhs = ins->getOperand(0);
   MDefinition* rhs = ins->getOperand(1);
   MOZ_ASSERT(IsIntType(ins->type()));
@@ -1134,6 +1261,53 @@ void LIRGenerator::visitTypeOf(MTypeOf* ins) {
 
   LTypeOfV* lir = new (alloc()) LTypeOfV(useBox(opd), tempToUnbox());
   define(lir, ins);
+}
+
+void LIRGenerator::visitTypeOfName(MTypeOfName* ins) {
+  MDefinition* input = ins->input();
+  MOZ_ASSERT(input->type() == MIRType::Int32);
+
+  auto* lir = new (alloc()) LTypeOfName(useRegister(input));
+  define(lir, ins);
+}
+
+void LIRGenerator::visitTypeOfIs(MTypeOfIs* ins) {
+  MDefinition* input = ins->input();
+
+  MOZ_ASSERT(input->type() == MIRType::Object ||
+             input->type() == MIRType::Value);
+
+  switch (ins->jstype()) {
+    case JSTYPE_UNDEFINED:
+    case JSTYPE_OBJECT:
+    case JSTYPE_FUNCTION: {
+      if (input->type() == MIRType::Object) {
+        auto* lir = new (alloc()) LTypeOfIsNonPrimitiveO(useRegister(input));
+        define(lir, ins);
+      } else {
+        auto* lir =
+            new (alloc()) LTypeOfIsNonPrimitiveV(useBox(input), tempToUnbox());
+        define(lir, ins);
+      }
+      return;
+    }
+
+    case JSTYPE_STRING:
+    case JSTYPE_NUMBER:
+    case JSTYPE_BOOLEAN:
+    case JSTYPE_SYMBOL:
+    case JSTYPE_BIGINT: {
+      MOZ_ASSERT(input->type() == MIRType::Value);
+
+      auto* lir = new (alloc()) LTypeOfIsPrimitive(useBoxAtStart(input));
+      define(lir, ins);
+      return;
+    }
+
+    case JSTYPE_LIMIT:
+      break;
+  }
+  MOZ_CRASH("Unhandled JSType");
 }
 
 void LIRGenerator::visitToAsyncIter(MToAsyncIter* ins) {
@@ -1208,6 +1382,26 @@ void LIRGenerator::visitBitAnd(MBitAnd* ins) {
 void LIRGenerator::visitBitOr(MBitOr* ins) { lowerBitOp(JSOp::BitOr, ins); }
 
 void LIRGenerator::visitBitXor(MBitXor* ins) { lowerBitOp(JSOp::BitXor, ins); }
+
+void LIRGenerator::visitWasmBinaryBitwise(MWasmBinaryBitwise* ins) {
+  switch (ins->subOpcode()) {
+    case MWasmBinaryBitwise::SubOpcode::And:
+      if (CanEmitBitAndAtUses(ins)) {
+        emitAtUses(ins);
+      } else {
+        lowerBitOp(JSOp::BitAnd, ins);
+      }
+      break;
+    case MWasmBinaryBitwise::SubOpcode::Or:
+      lowerBitOp(JSOp::BitOr, ins);
+      break;
+    case MWasmBinaryBitwise::SubOpcode::Xor:
+      lowerBitOp(JSOp::BitXor, ins);
+      break;
+    default:
+      MOZ_CRASH();
+  }
+}
 
 void LIRGenerator::lowerShiftOp(JSOp op, MShiftInstruction* ins) {
   MDefinition* lhs = ins->getOperand(0);
@@ -2419,6 +2613,9 @@ void LIRGenerator::visitNonNegativeIntPtrToInt32(
 
 void LIRGenerator::visitWasmExtendU32Index(MWasmExtendU32Index* ins) {
 #ifdef JS_64BIT
+  // Technically this produces an Int64 register and I guess we could clean that
+  // up, but it's a 64-bit only operation, so it doesn't actually matter.
+
   MDefinition* input = ins->input();
   MOZ_ASSERT(input->type() == MIRType::Int32);
   MOZ_ASSERT(ins->type() == MIRType::Int64);
@@ -2433,18 +2630,22 @@ void LIRGenerator::visitWasmExtendU32Index(MWasmExtendU32Index* ins) {
 }
 
 void LIRGenerator::visitWasmWrapU32Index(MWasmWrapU32Index* ins) {
-#ifdef JS_64BIT
   MDefinition* input = ins->input();
   MOZ_ASSERT(input->type() == MIRType::Int64);
   MOZ_ASSERT(ins->type() == MIRType::Int32);
 
-  // Input reuse is OK even on ARM64 because this node *must* reuse its input in
-  // order not to generate any code at all, as is the intent.
+  // Tricky: On 64-bit, this just returns its input (except on MIPS64 there may
+  // be a sign/zero extension).  On 32-bit, it returns the low register of the
+  // input, and should generate no code.
+
+  // If this assertion does not hold then using "input" unadorned as an alias
+  // for the low register will not work.
+#if defined(JS_NUNBOX32)
+  static_assert(INT64LOW_INDEX == 0);
+#endif
+
   auto* lir = new (alloc()) LWasmWrapU32Index(useRegisterAtStart(input));
   defineReuseInput(lir, ins, 0);
-#else
-  MOZ_CRASH("64-bit only");
-#endif
 }
 
 void LIRGenerator::visitIntPtrToDouble(MIntPtrToDouble* ins) {
@@ -3339,9 +3540,7 @@ void LIRGenerator::visitLoadElement(MLoadElement* ins) {
 
   auto* lir = new (alloc()) LLoadElementV(useRegister(ins->elements()),
                                           useRegisterOrConstant(ins->index()));
-  if (ins->fallible()) {
-    assignSnapshot(lir, ins->bailoutKind());
-  }
+  assignSnapshot(lir, ins->bailoutKind());
   defineBox(lir, ins);
 }
 
@@ -4268,6 +4467,14 @@ void LIRGenerator::visitGuardNullOrUndefined(MGuardNullOrUndefined* ins) {
   redefine(ins, ins->value());
 }
 
+void LIRGenerator::visitGuardIsNotObject(MGuardIsNotObject* ins) {
+  MOZ_ASSERT(ins->value()->type() == MIRType::Value);
+  auto* lir = new (alloc()) LGuardIsNotObject(useBox(ins->value()));
+  assignSnapshot(lir, ins->bailoutKind());
+  add(lir, ins);
+  redefine(ins, ins->value());
+}
+
 void LIRGenerator::visitGuardFunctionFlags(MGuardFunctionFlags* ins) {
   MOZ_ASSERT(ins->function()->type() == MIRType::Object);
 
@@ -4366,6 +4573,12 @@ void LIRGenerator::visitDeleteElement(MDeleteElement* ins) {
   assignSafepoint(lir, ins);
 }
 
+void LIRGenerator::visitValueToIterator(MValueToIterator* ins) {
+  auto* lir = new (alloc()) LValueToIterator(useBoxAtStart(ins->value()));
+  defineReturn(lir, ins);
+  assignSafepoint(lir, ins);
+}
+
 void LIRGenerator::visitSetPropertyCache(MSetPropertyCache* ins) {
   MOZ_ASSERT(ins->object()->type() == MIRType::Object);
 
@@ -4421,7 +4634,7 @@ void LIRGenerator::visitOptimizeSpreadCallCache(MOptimizeSpreadCallCache* ins) {
   MOZ_ASSERT(value->type() == MIRType::Value);
 
   auto* lir = new (alloc()) LOptimizeSpreadCallCache(useBox(value), temp());
-  define(lir, ins);
+  defineBox(lir, ins);
   assignSafepoint(lir, ins);
 }
 
@@ -4454,6 +4667,16 @@ void LIRGenerator::visitArgumentsLength(MArgumentsLength* ins) {
 void LIRGenerator::visitGetFrameArgument(MGetFrameArgument* ins) {
   LGetFrameArgument* lir =
       new (alloc()) LGetFrameArgument(useRegisterOrConstant(ins->index()));
+  defineBox(lir, ins);
+}
+
+void LIRGenerator::visitGetFrameArgumentHole(MGetFrameArgumentHole* ins) {
+  LDefinition spectreTemp =
+      BoundsCheckNeedsSpectreTemp() ? temp() : LDefinition::BogusTemp();
+
+  auto* lir = new (alloc()) LGetFrameArgumentHole(
+      useRegister(ins->index()), useRegister(ins->length()), spectreTemp);
+  assignSnapshot(lir, ins->bailoutKind());
   defineBox(lir, ins);
 }
 
@@ -4703,15 +4926,41 @@ void LIRGenerator::visitObjectClassToString(MObjectClassToString* ins) {
 }
 
 void LIRGenerator::visitWasmAddOffset(MWasmAddOffset* ins) {
-  MOZ_ASSERT(ins->base()->type() == MIRType::Int32);
-  MOZ_ASSERT(ins->type() == MIRType::Int32);
   MOZ_ASSERT(ins->offset());
-  define(new (alloc()) LWasmAddOffset(useRegisterAtStart(ins->base())), ins);
+  if (ins->base()->type() == MIRType::Int32) {
+    MOZ_ASSERT(ins->type() == MIRType::Int32);
+    MOZ_ASSERT(ins->offset() <= UINT32_MAX);  // Because memory32
+    define(new (alloc()) LWasmAddOffset(useRegisterAtStart(ins->base())), ins);
+  } else {
+    MOZ_ASSERT(ins->type() == MIRType::Int64);
+#ifdef JS_64BIT
+    defineInt64(new (alloc())
+                    LWasmAddOffset64(useInt64RegisterAtStart(ins->base())),
+                ins);
+#else
+    // Avoid situation where the input is (a,b) and the output is (b,a).
+    defineInt64ReuseInput(
+        new (alloc()) LWasmAddOffset64(useInt64RegisterAtStart(ins->base())),
+        ins, 0);
+#endif
+  }
 }
 
 void LIRGenerator::visitWasmLoadTls(MWasmLoadTls* ins) {
-  auto* lir = new (alloc()) LWasmLoadTls(useRegisterAtStart(ins->tlsPtr()));
-  define(lir, ins);
+  if (ins->type() == MIRType::Int64) {
+#ifdef JS_PUNBOX64
+    LAllocation tlsPtr = useRegisterAtStart(ins->tlsPtr());
+#else
+    // Avoid reusing tlsPtr for a 64-bit output pair as the load clobbers the
+    // first half of that pair before loading the second half.
+    LAllocation tlsPtr = useRegister(ins->tlsPtr());
+#endif
+    auto* lir = new (alloc()) LWasmLoadTls64(tlsPtr);
+    defineInt64(lir, ins);
+  } else {
+    auto* lir = new (alloc()) LWasmLoadTls(useRegisterAtStart(ins->tlsPtr()));
+    define(lir, ins);
+  }
 }
 
 void LIRGenerator::visitWasmBoundsCheck(MWasmBoundsCheck* ins) {
@@ -4750,10 +4999,14 @@ void LIRGenerator::visitWasmBoundsCheck(MWasmBoundsCheck* ins) {
 
 void LIRGenerator::visitWasmAlignmentCheck(MWasmAlignmentCheck* ins) {
   MDefinition* index = ins->index();
-  MOZ_ASSERT(index->type() == MIRType::Int32);
-
-  auto* lir = new (alloc()) LWasmAlignmentCheck(useRegisterAtStart(index));
-  add(lir, ins);
+  if (index->type() == MIRType::Int64) {
+    auto* lir =
+        new (alloc()) LWasmAlignmentCheck64(useInt64RegisterAtStart(index));
+    add(lir, ins);
+  } else {
+    auto* lir = new (alloc()) LWasmAlignmentCheck(useRegisterAtStart(index));
+    add(lir, ins);
+  }
 }
 
 void LIRGenerator::visitWasmLoadGlobalVar(MWasmLoadGlobalVar* ins) {
@@ -4762,6 +5015,8 @@ void LIRGenerator::visitWasmLoadGlobalVar(MWasmLoadGlobalVar* ins) {
 #ifdef JS_PUNBOX64
     LAllocation tlsPtr = useRegisterAtStart(ins->tlsPtr());
 #else
+    // Avoid reusing tlsPtr for the output pair as the load clobbers the first
+    // half of that pair before loading the second half.
     LAllocation tlsPtr = useRegister(ins->tlsPtr());
 #endif
     defineInt64(new (alloc()) LWasmLoadSlotI64(tlsPtr, offs), ins);
@@ -4776,6 +5031,8 @@ void LIRGenerator::visitWasmLoadGlobalCell(MWasmLoadGlobalCell* ins) {
 #ifdef JS_PUNBOX64
     LAllocation cellPtr = useRegisterAtStart(ins->cellPtr());
 #else
+    // Avoid reusing cellPtr for the output pair as the load clobbers the first
+    // half of that pair before loading the second half.
     LAllocation cellPtr = useRegister(ins->cellPtr());
 #endif
     defineInt64(new (alloc()) LWasmLoadSlotI64(cellPtr, /*offs=*/0), ins);

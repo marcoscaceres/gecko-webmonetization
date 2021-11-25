@@ -30,7 +30,7 @@ loader.lazyRequireGetter(
  * - close: The target window has been closed. All tools attached to this
  *          target should close. This event is not currently cancelable.
  *
- * Optional events only dispatched by BrowsingContextTarget:
+ * Optional events only dispatched by WindowGlobalTarget:
  * - will-navigate: The target window will navigate to a different URL
  * - navigate: The target window has navigated to a different URL
  */
@@ -38,6 +38,12 @@ function TargetMixin(parentClass) {
   class Target extends parentClass {
     constructor(client, targetFront, parentFront) {
       super(client, targetFront, parentFront);
+
+      // TargetCommand._onTargetAvailable will set this public attribute.
+      // This is a reference to the related `commands` object and helps all fronts
+      // easily call any command method. Without this bit of magic, Fronts wouldn't
+      // be able to interact with any commands while it is frequently useful.
+      this.commands = null;
 
       this._forceChrome = false;
 
@@ -200,28 +206,27 @@ function TargetMixin(parentClass) {
      * @return {TargetMixin} the parent target.
      */
     async getParentTarget() {
-      // We now support frames watching via watchTargets for Tab and Process descriptors.
-      const watcherFront = await this.getWatcherFront();
-      if (watcherFront) {
-        // Safety check, in theory all watcher should support frames. We should be able
-        // to remove this as part of Bug 1680280.
-        if (watcherFront.traits.frame) {
-          // Retrieve the Watcher, which manage all the targets and should already have a reference to
-          // to the parent target.
-          return watcherFront.getParentBrowsingContextTarget(
-            this.browsingContextID
-          );
-        }
-        return null;
+      return this.commands.targetCommand.getParentTarget(this);
+    }
+
+    /**
+     * Returns a Promise that resolves to a boolean indicating if the provided target is
+     * an ancestor of this instance.
+     *
+     * @param {TargetFront} target: The possible ancestor target.
+     * @returns Promise<Boolean>
+     */
+    async isTargetAnAncestor(target) {
+      const parentTargetFront = await this.getParentTarget();
+      if (!parentTargetFront) {
+        return false;
       }
 
-      if (this.parentFront.getParentTarget) {
-        return this.parentFront.getParentTarget();
+      if (parentTargetFront == target) {
+        return true;
       }
 
-      // Other targets, like WebExtensions, don't have a Watcher yet, nor do expose `getParentTarget`.
-      // We can't fetch parent target yet for these targets.
-      return null;
+      return parentTargetFront.isTargetAnAncestor(target);
     }
 
     /**
@@ -229,14 +234,14 @@ function TargetMixin(parentClass) {
      *
      * @return {TargetMixin} the requested target.
      */
-    async getBrowsingContextTarget(browsingContextID) {
+    async getWindowGlobalTarget(browsingContextID) {
       // Tab and Process Descriptors expose a Watcher, which is creating the
       // targets and should be used to fetch any.
       const watcherFront = await this.getWatcherFront();
       if (watcherFront) {
         // Safety check, in theory all watcher should support frames.
         if (watcherFront.traits.frame) {
-          return watcherFront.getBrowsingContextTarget(browsingContextID);
+          return watcherFront.getWindowGlobalTarget(browsingContextID);
         }
         return null;
       }
@@ -246,7 +251,7 @@ function TargetMixin(parentClass) {
       // removed in FF77.
       // Support for watcher in WebExtension descriptors is Bug 1644341.
       throw new Error(
-        `Unable to call getBrowsingContextTarget for ${this.actorID}`
+        `Unable to call getWindowGlobalTarget for ${this.actorID}`
       );
     }
 
@@ -272,12 +277,6 @@ function TargetMixin(parentClass) {
      * @return {Mixed}
      */
     getTrait(traitName) {
-      // @backward-compat { version 93 } All traits should be on the `targetForm`, remove
-      // this backward compatibility code.
-      if (this.traits && this.traits[traitName]) {
-        return this.traits[traitName];
-      }
-
       // If the targeted actor exposes traits and has a defined value for this
       // traits, override the root actor traits
       if (this.targetForm.traits && traitName in this.targetForm.traits) {
@@ -369,11 +368,11 @@ function TargetMixin(parentClass) {
       this._forceChrome = true;
     }
 
-    // Tells us if the related actor implements BrowsingContextTargetActor
+    // Tells us if the related actor implements WindowGlobalTargetActor
     // interface and requires to call `attach` request before being used and
     // `detach` during cleanup.
     get isBrowsingContext() {
-      return this.typeName === "browsingContextTarget";
+      return this.typeName === "windowGlobalTarget";
     }
 
     get name() {
@@ -464,25 +463,6 @@ function TargetMixin(parentClass) {
       }
     }
 
-    // Attach the console actor
-    async attachConsole() {
-      const consoleFront = await this.getFront("console");
-
-      if (this.isDestroyedOrBeingDestroyed()) {
-        return;
-      }
-
-      // Calling startListeners will populate the traits as it's the first request we
-      // make to the front.
-      await consoleFront.startListeners([]);
-
-      this._onInspectObject = packet => this.emit("inspect-object", packet);
-      this.removeOnInspectObjectListener = consoleFront.on(
-        "inspectObject",
-        this._onInspectObject
-      );
-    }
-
     /**
      * This method attaches the target and then attaches its related thread, sending it
      * the options it needs (e.g. breakpoints, pause on exception setting, …).
@@ -516,14 +496,25 @@ function TargetMixin(parentClass) {
         return;
       }
 
-      // WorkerTargetFront don't have an attach function as the related console and thread
-      // actors are created right away (from devtools/server/startup/worker.js)
-      if (this.attach) {
+      // We still need to attach workers.
+      // The current class we have is actually the WorkerDescriptorFront,
+      // which will morph into a target by fetching the underlying target's form.
+      // Ideally, worker targets would be spawn by the server, and we would no longer
+      // have the hybrid descriptor/target class which brings lots of complexity and confusion.
+      // By doing so, the "attach" would be done on the server side and would simply be
+      // part of the target actor instantiation.
+      //
+      // @backward-compat { version 96 } Fx 96 dropped the attach method on all but worker targets
+      //                  Once Fx95 support is dropped, we can remove:
+      //                  - the trait
+      //                  - "attach" methods from fronts and specs for all but worker targets
+      //                  - here, we will still have to call attach for worker targets (`if (this.attach) await this.attach()`)
+      if (this.attach && !this.getTrait("isAutoAttached")) {
         await this.attach();
       }
 
       const isBrowserToolbox =
-        targetCommand.descriptorFront.isParentProcessDescriptor;
+        targetCommand.descriptorFront.isBrowserProcessDescriptor;
       const isNonTopLevelFrameTarget =
         !this.isTopLevel && this.targetType === targetCommand.TYPES.FRAME;
 
@@ -643,12 +634,7 @@ function TargetMixin(parentClass) {
           console.warn("Error while destroying front:", name, e);
         }
       }
-
-      // Remove listeners set in attachConsole
-      if (this.removeOnInspectObjectListener) {
-        this.removeOnInspectObjectListener();
-        this.removeOnInspectObjectListener = null;
-      }
+      this.fronts.clear();
 
       this.threadFront = null;
       this._offResourceEvent = null;
@@ -713,10 +699,6 @@ function TargetMixin(parentClass) {
     _cleanup() {
       this.threadFront = null;
       this._client = null;
-
-      // All target front subclasses set this variable in their `attach` method.
-      // None of them overload destroy, so clean this up from here.
-      this._attach = null;
 
       this._title = null;
       this._url = null;

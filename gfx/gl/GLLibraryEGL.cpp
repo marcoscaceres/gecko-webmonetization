@@ -18,7 +18,6 @@
 #include "mozilla/StaticPrefs_gfx.h"
 #include "mozilla/StaticPrefs_webgl.h"
 #include "mozilla/Unused.h"
-#include "mozilla/webrender/RenderThread.h"
 #include "nsDirectoryServiceDefs.h"
 #include "nsDirectoryServiceUtils.h"
 #include "nsPrintfCString.h"
@@ -52,8 +51,8 @@ namespace gl {
 // should match the order of EGLExtensions, and be null-terminated.
 static const char* sEGLLibraryExtensionNames[] = {
     "EGL_ANDROID_get_native_client_buffer", "EGL_ANGLE_device_creation",
-    "EGL_ANGLE_device_creation_d3d11", "EGL_ANGLE_platform_angle",
-    "EGL_ANGLE_platform_angle_d3d"};
+    "EGL_ANGLE_device_creation_d3d11",      "EGL_ANGLE_platform_angle",
+    "EGL_ANGLE_platform_angle_d3d",         "EGL_EXT_device_query"};
 
 // should match the order of EGLExtensions, and be null-terminated.
 static const char* sEGLExtensionNames[] = {
@@ -71,7 +70,6 @@ static const char* sEGLExtensionNames[] = {
     "EGL_KHR_create_context",
     "EGL_KHR_stream",
     "EGL_KHR_stream_consumer_gltexture",
-    "EGL_EXT_device_query",
     "EGL_NV_stream_consumer_gltexture_yuv",
     "EGL_ANGLE_stream_producer_d3d_texture",
     "EGL_KHR_surfaceless_context",
@@ -216,11 +214,6 @@ std::shared_ptr<EglDisplay> GLLibraryEGL::CreateDisplay(
 }
 
 static bool IsAccelAngleSupported(nsACString* const out_failureId) {
-  if (wr::RenderThread::IsInRenderThread()) {
-    // We can only enter here with WebRender, so assert that this is a
-    // WebRender-enabled build.
-    return true;
-  }
   if (!gfx::gfxVars::AllowWebglAccelAngle()) {
     if (out_failureId->IsEmpty()) {
       *out_failureId = "FEATURE_FAILURE_ACCL_ANGLE_NOT_OK"_ns;
@@ -271,8 +264,6 @@ AngleErrorReporting gAngleErrorReporter;
 
 static std::shared_ptr<EglDisplay> GetAndInitDisplayForAccelANGLE(
     GLLibraryEGL& egl, nsACString* const out_failureId) {
-  MOZ_RELEASE_ASSERT(!wr::RenderThread::IsInRenderThread());
-
   gfx::FeatureState& d3d11ANGLE =
       gfx::gfxConfig::GetFeature(gfx::Feature::D3D11_HW_ANGLE);
 

@@ -18,15 +18,14 @@
 
 #include "jstypes.h"  // JS_PUBLIC_API
 
-#include "js/GCVector.h"  // JS::GCVector
+#include "js/CompileOptions.h"  // JS::ReadOnlyCompileOptions
+#include "js/GCVector.h"        // JS::GCVector
+#include "js/Transcoding.h"     // JS::TranscodeSource
 
 struct JS_PUBLIC_API JSContext;
 class JS_PUBLIC_API JSScript;
 
 namespace JS {
-
-class JS_PUBLIC_API ReadOnlyCompileOptions;
-struct TranscodeSource;
 
 template <typename UnitT>
 class SourceText;
@@ -124,11 +123,7 @@ extern JS_PUBLIC_API void CancelOffThreadModule(JSContext* cx,
 extern JS_PUBLIC_API bool CanDecodeOffThread(
     JSContext* cx, const ReadOnlyCompileOptions& options, size_t length);
 
-// If options.useOffThreadParseGlobal is true,
-// decode JSScript from the buffer.
-//
-// If options.useOffThreadParseGlobal is false,
-// decode stencil from the buffer and instantiate JSScript from it.
+// Decode stencil from the buffer and instantiate JSScript from it.
 //
 // The start of `buffer` and `cursor` should meet
 // IsTranscodingBytecodeAligned and IsTranscodingBytecodeOffsetAligned.
@@ -156,35 +151,9 @@ extern JS_PUBLIC_API JSScript* FinishOffThreadScriptDecoder(
 extern JS_PUBLIC_API void CancelOffThreadScriptDecoder(JSContext* cx,
                                                        OffThreadToken* token);
 
-// Decode multiple JSScript from the sources.
-extern JS_PUBLIC_API OffThreadToken* DecodeMultiOffThreadScripts(
-    JSContext* cx, const ReadOnlyCompileOptions& options,
-    mozilla::Vector<TranscodeSource>& sources,
-    OffThreadCompileCallback callback, void* callbackData);
-
-extern JS_PUBLIC_API bool FinishMultiOffThreadScriptsDecoder(
-    JSContext* cx, OffThreadToken* token,
-    MutableHandle<GCVector<JSScript*>> scripts);
-
 extern JS_PUBLIC_API void CancelMultiOffThreadScriptsDecoder(
     JSContext* cx, OffThreadToken* token);
 
-// Tell off-thread compilation to/not to use the parse global.
-// The default value is true.
-//
-// If set to false, off-thread compilation will compile to stencil, and
-// instantiate the stencil on main-thread.
-extern JS_PUBLIC_API void SetUseOffThreadParseGlobal(bool value);
-
 }  // namespace JS
-
-namespace js {
-// Returns the value set by JS::SetUseOffThreadParseGlobal.
-// The default value is true.
-//
-// This value is consumed internally, and public API consumer shouldn't
-// directly use this value.
-extern bool UseOffThreadParseGlobal();
-}  // namespace js
 
 #endif /* js_OffThreadScriptCompilation_h */

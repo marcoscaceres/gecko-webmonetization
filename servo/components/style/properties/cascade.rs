@@ -472,17 +472,20 @@ fn tweak_when_ignoring_colors(
             }
         },
         _ => {
-            // We honor transparent and system colors more generally for all
-            // colors.
+            // We honor system colors more generally for all colors.
             //
-            // NOTE(emilio): This doesn't handle caret-color and
-            // accent-color because those use a slightly different syntax
-            // (<color> | auto for example). That's probably fine though, as
-            // using a system color for caret-color doesn't make sense (using
-            // currentColor is fine), and we ignore accent-color in
-            // high-contrast-mode anyways.
+            // We used to honor transparent but that causes accessibility
+            // regressions like bug 1740924.
+            //
+            // NOTE(emilio): This doesn't handle caret-color and accent-color
+            // because those use a slightly different syntax (<color> | auto for
+            // example).
+            //
+            // That's probably fine though, as using a system color for
+            // caret-color doesn't make sense (using currentColor is fine), and
+            // we ignore accent-color in high-contrast-mode anyways.
             if let Some(color) = declaration.color_value() {
-                if color.is_system() || alpha_channel(color, context) == 0 {
+                if color.is_system() {
                     return;
                 }
             }
@@ -802,12 +805,6 @@ impl<'a, 'b: 'a> Cascade<'a, 'b> {
         {
             builder.add_flags(ComputedValueFlags::HAS_AUTHOR_SPECIFIED_BORDER_BACKGROUND);
         }
-        if self
-            .author_specified
-            .contains_any(LonghandIdSet::padding_properties())
-        {
-            builder.add_flags(ComputedValueFlags::HAS_AUTHOR_SPECIFIED_PADDING);
-        }
 
         if self
             .author_specified
@@ -866,77 +863,101 @@ impl<'a, 'b: 'a> Cascade<'a, 'b> {
 
         // We're using the same reset style as another element, and we'll skip
         // applying the relevant properties. So we need to do the relevant
-        // bookkeeping here to keep these two bits correct.
+        // bookkeeping here to keep these bits correct.
         //
-        // Note that all the properties involved are non-inherited, so we don't
-        // need to do anything else other than just copying the bits over.
-        let reset_props_bits = ComputedValueFlags::HAS_AUTHOR_SPECIFIED_BORDER_BACKGROUND |
-            ComputedValueFlags::HAS_AUTHOR_SPECIFIED_PADDING;
-        builder.add_flags(cached_style.flags & reset_props_bits);
+        // Note that the border/background properties are non-inherited, so we
+        // don't need to do anything else other than just copying the bits over.
+        //
+        // When using this optimization, we also need to copy whether the old
+        // style specified viewport units / used font-relative lengths, this one
+        // would as well.  It matches the same rules, so it is the right thing
+        // to do anyways, even if it's only used on inherited properties.
+        let bits_to_copy = ComputedValueFlags::HAS_AUTHOR_SPECIFIED_BORDER_BACKGROUND |
+            ComputedValueFlags::DEPENDS_ON_SELF_FONT_METRICS |
+            ComputedValueFlags::DEPENDS_ON_INHERITED_FONT_METRICS |
+            ComputedValueFlags::USES_VIEWPORT_UNITS;
+        builder.add_flags(cached_style.flags & bits_to_copy);
 
         true
     }
 
-    /// The default font type (which is stored in FontFamilyList's
-    /// `mDefaultFontType`) depends on the current lang group and generic font
-    /// family, so we may need to recompute it if or the family changed.
-    ///
-    /// Also, we prioritize non-document fonts here if we need to (see the pref
-    /// `browser.display.use_document_fonts`).
+    /// The initial font depends on the current lang group so we may need to
+    /// recompute it if the language changed.
     #[inline]
     #[cfg(feature = "gecko")]
-    fn recompute_default_font_family_type_if_needed(&mut self) {
+    fn recompute_initial_font_family_if_needed(&mut self) {
         use crate::gecko_bindings::bindings;
-        use crate::values::computed::font::GenericFontFamily;
+        use crate::values::computed::font::FontFamily;
 
-        if !self.seen.contains(LonghandId::XLang) && !self.seen.contains(LonghandId::FontFamily) {
+        if !self.seen.contains(LonghandId::XLang) {
             return;
         }
 
-        let use_document_fonts = static_prefs::pref!("browser.display.use_document_fonts") != 0;
         let builder = &mut self.context.builder;
-        let (default_font_type, prioritize_user_fonts) = {
+        let default_font_type = {
             let font = builder.get_font().gecko();
 
-            // System fonts are all right, and should have the default font type
-            // set to none already, so bail out early.
-            if font.mFont.family.is_system_font {
-                debug_assert_eq!(
-                    font.mFont.family.families.fallback,
-                    GenericFontFamily::None
-                );
+            if !font.mFont.family.is_initial {
                 return;
             }
 
-            let generic = font.mFont.family.families.single_generic().unwrap_or(GenericFontFamily::None);
             let default_font_type = unsafe {
-                bindings::Gecko_nsStyleFont_ComputeDefaultFontType(
+                bindings::Gecko_nsStyleFont_ComputeFallbackFontTypeForLanguage(
                     builder.device.document(),
-                    generic,
                     font.mLanguage.mRawPtr,
                 )
             };
 
-            // We prioritize user fonts over document fonts if the pref is set,
-            // and we don't have a generic family already (or we're using
-            // cursive or fantasy, since they're ignored, see bug 789788), and
-            // we have a generic family to actually replace it with.
-            let prioritize_user_fonts = !use_document_fonts &&
-                default_font_type != GenericFontFamily::None &&
-                !generic.valid_for_user_font_prioritization();
-
-            if !prioritize_user_fonts && default_font_type == font.mFont.family.families.fallback {
-                // Nothing to do.
+            let initial_generic = font.mFont.family.families.single_generic();
+            debug_assert!(initial_generic.is_some(), "Initial font should be just one generic font");
+            if initial_generic == Some(default_font_type) {
                 return;
             }
-            (default_font_type, prioritize_user_fonts)
+
+            default_font_type
         };
 
         let font = builder.mutate_font().gecko_mut();
-        font.mFont.family.families.fallback = default_font_type;
-        if prioritize_user_fonts {
-            font.mFont.family.families.prioritize_first_generic_or_prepend(default_font_type);
+        // NOTE: Leaves is_initial untouched.
+        font.mFont.family.families = FontFamily::generic(default_font_type).families.clone();
+    }
+
+    /// Prioritize user fonts if needed by pref.
+    #[inline]
+    #[cfg(feature = "gecko")]
+    fn prioritize_user_fonts_if_needed(&mut self) {
+        use crate::gecko_bindings::bindings;
+
+        if !self.seen.contains(LonghandId::FontFamily) {
+            return;
         }
+
+        if static_prefs::pref!("browser.display.use_document_fonts") != 0 {
+            return;
+        }
+
+        let builder = &mut self.context.builder;
+        let default_font_type = {
+            let font = builder.get_font().gecko();
+
+            if font.mFont.family.is_system_font {
+                return;
+            }
+
+            if !font.mFont.family.families.needs_user_font_prioritization() {
+                return;
+            }
+
+            unsafe {
+                bindings::Gecko_nsStyleFont_ComputeFallbackFontTypeForLanguage(
+                    builder.device.document(),
+                    font.mLanguage.mRawPtr,
+                )
+            }
+        };
+
+        let font = builder.mutate_font().gecko_mut();
+        font.mFont.family.families.prioritize_first_generic_or_prepend(default_font_type);
     }
 
     /// Some keyword sizes depend on the font family and language.
@@ -1110,7 +1131,8 @@ impl<'a, 'b: 'a> Cascade<'a, 'b> {
         #[cfg(feature = "gecko")]
         {
             self.unzoom_fonts_if_needed();
-            self.recompute_default_font_family_type_if_needed();
+            self.recompute_initial_font_family_if_needed();
+            self.prioritize_user_fonts_if_needed();
             self.recompute_keyword_font_size_if_needed();
             self.handle_mathml_scriptlevel_if_needed();
             self.constrain_font_size_if_needed()

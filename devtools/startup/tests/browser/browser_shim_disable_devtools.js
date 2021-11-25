@@ -5,7 +5,9 @@
 
 /* eslint-env browser */
 
-const { require } = ChromeUtils.import("resource://devtools/shared/Loader.jsm");
+const { require } = ChromeUtils.import(
+  "resource://devtools/shared/loader/Loader.jsm"
+);
 const { CustomizableUI } = ChromeUtils.import(
   "resource:///modules/CustomizableUI.jsm"
 );
@@ -110,12 +112,10 @@ add_task(async function() {
 
   info("Open the menubar Tools menu");
   const toolsMenuPopup = win.document.getElementById("menu_ToolsPopup");
-  // The "Browser Tools" menu still uses the id `webDeveloperMenu` even though it
-  // is no longer DevTools-specific.
-  const browserToolsMenu = win.document.getElementById("webDeveloperMenu");
+  const browserToolsMenu = win.document.getElementById("browserToolsMenu");
   ok(
     !browserToolsMenu.hidden,
-    "The Web Developer item of the tools menu is visible"
+    "The Browser Tools item of the tools menu is visible"
   );
 
   await simulateMenuOpen(toolsMenuPopup);

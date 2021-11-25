@@ -1442,6 +1442,7 @@ MarkupView.prototype = {
   _onResourceAvailable: async function(resources) {
     for (const resource of resources) {
       if (
+        !this.resourceCommand ||
         resource.resourceType !== this.resourceCommand.TYPES.ROOT_NODE ||
         resource.isDestroyed()
       ) {
@@ -2106,6 +2107,11 @@ MarkupView.prototype = {
     // Update the children to take care of changes in the markup view DOM
     await this._updateChildren(container, { expand, flash });
 
+    // The markup view may have been destroyed in the meantime
+    if (this._destroyed) {
+      return;
+    }
+
     if (updateLevel) {
       // Update container (and its subtree) DOM tree depth level for
       // accessibility where necessary.
@@ -2324,7 +2330,22 @@ MarkupView.prototype = {
    * of the markup-view tree, and not from the perspective of the actual DOM.
    */
   _getParentInTree: function(node) {
-    return node.parentOrHost();
+    const parent = node.parentOrHost();
+    if (!parent) {
+      return null;
+    }
+
+    // If the parent node belongs to a different target while the node's target is the
+    // one selected by the user in the iframe picker, we don't want to go further up.
+    if (
+      node.targetFront !== parent.targetFront &&
+      node.targetFront ==
+        this.inspector.commands.targetCommand.selectedTargetFront
+    ) {
+      return null;
+    }
+
+    return parent;
   },
 
   /**
@@ -2371,6 +2392,7 @@ MarkupView.prototype = {
 
     this.popup.destroy();
     this.popup = null;
+    this._selectedContainer = null;
 
     this._elt.removeEventListener("blur", this._onBlur, true);
     this._elt.removeEventListener("click", this._onMouseClick);
@@ -2426,6 +2448,8 @@ MarkupView.prototype = {
     this.controllerWindow = null;
     this.doc = null;
     this.highlighters = null;
+    this.walker = null;
+    this.resourceCommand = null;
     this.win = null;
 
     this._lastDropTarget = null;

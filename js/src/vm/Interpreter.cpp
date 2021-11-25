@@ -66,6 +66,7 @@
 
 #include "builtin/Boolean-inl.h"
 #include "debugger/DebugAPI-inl.h"
+#include "vm/ArgumentsObject-inl.h"
 #include "vm/EnvironmentObject-inl.h"
 #include "vm/GeckoProfiler-inl.h"
 #include "vm/JSAtom-inl.h"
@@ -203,27 +204,11 @@ static inline bool GetPropertyOperation(JSContext* cx, HandlePropertyName name,
   return GetProperty(cx, lval, name, vp);
 }
 
-static inline bool GetNameOperation(JSContext* cx, InterpreterFrame* fp,
-                                    jsbytecode* pc, MutableHandleValue vp) {
-  RootedObject envChain(cx, fp->environmentChain());
-  RootedPropertyName name(cx, fp->script()->getName(pc));
-
-  /*
-   * Skip along the env chain to the enclosing global object. This is
-   * used for GNAME opcodes where the bytecode emitter has determined a
-   * name access must be on the global. It also insulates us from bugs
-   * in the emitter: type inference will assume that GNAME opcodes are
-   * accessing the global object, and the inferred behavior should match
-   * the actual behavior even if the id could be found on the env chain
-   * before the global object.
-   */
-  if (IsGlobalOp(JSOp(*pc)) && !fp->script()->hasNonSyntacticScope()) {
-    envChain = &cx->global()->lexicalEnvironment();
-  }
-
+static inline bool GetNameOperation(JSContext* cx, HandleObject envChain,
+                                    HandlePropertyName name, JSOp nextOp,
+                                    MutableHandleValue vp) {
   /* Kludge to allow (typeof foo == "undefined") tests. */
-  JSOp op2 = JSOp(pc[JSOpLength_GetName]);
-  if (op2 == JSOp::Typeof) {
+  if (nextOp == JSOp::Typeof) {
     return GetEnvironmentName<GetNameMode::TypeOf>(cx, envChain, name, vp);
   }
   return GetEnvironmentName<GetNameMode::Normal>(cx, envChain, name, vp);
@@ -347,6 +332,7 @@ bool js::RunScript(JSContext* cx, RunState& state) {
   mozilla::TimeStamp startTime;
   if (measuringTime) {
     cx->setIsMeasuringExecutionTime(true);
+    cx->setIsExecuting(true);
     startTime = ReallyNow();
   }
   auto timerEnd = mozilla::MakeScopeExit([&]() {
@@ -354,6 +340,7 @@ bool js::RunScript(JSContext* cx, RunState& state) {
       mozilla::TimeDuration delta = ReallyNow() - startTime;
       cx->realm()->timers.executionTime += delta;
       cx->setIsMeasuringExecutionTime(false);
+      cx->setIsExecuting(false);
     }
   });
 
@@ -824,6 +811,7 @@ bool js::HasInstance(JSContext* cx, HandleObject obj, HandleValue v, bool* bp) {
 }
 
 JSType js::TypeOfObject(JSObject* obj) {
+  AutoUnsafeCallWithABI unsafe;
   if (EmulatesUndefined(obj)) {
     return JSTYPE_UNDEFINED;
   }
@@ -1793,7 +1781,7 @@ static MOZ_ALWAYS_INLINE void InitElemArrayOperation(JSContext* cx,
  */
 
 template <typename T>
-class ReservedRooted : public RootedBase<T, ReservedRooted<T>> {
+class ReservedRooted : public RootedOperations<T, ReservedRooted<T>> {
   Rooted<T>* savedRoot;
 
  public:
@@ -1802,10 +1790,10 @@ class ReservedRooted : public RootedBase<T, ReservedRooted<T>> {
   }
 
   explicit ReservedRooted(Rooted<T>* root) : savedRoot(root) {
-    *root = JS::SafelyInitialized<T>();
+    *root = JS::SafelyInitialized<T>::create();
   }
 
-  ~ReservedRooted() { *savedRoot = JS::SafelyInitialized<T>(); }
+  ~ReservedRooted() { *savedRoot = JS::SafelyInitialized<T>::create(); }
 
   void set(const T& p) const { *savedRoot = p; }
   operator Handle<T>() { return *savedRoot; }
@@ -2166,10 +2154,7 @@ static MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER bool Interpret(JSContext* cx,
     }
     END_CASE(ForceInterpreter)
 
-    CASE(Undefined) {
-      // If this ever changes, change what JSOp::GImplicitThis does too.
-      PUSH_UNDEFINED();
-    }
+    CASE(Undefined) { PUSH_UNDEFINED(); }
     END_CASE(Undefined)
 
     CASE(Pop) { REGS.sp--; }
@@ -2495,9 +2480,10 @@ static MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER bool Interpret(JSContext* cx,
     CASE(BindName) {
       JSOp op = JSOp(*REGS.pc);
       ReservedRooted<JSObject*> envChain(&rootObject0);
-      if (op == JSOp::BindName || script->hasNonSyntacticScope()) {
+      if (op == JSOp::BindName) {
         envChain.set(REGS.fp()->environmentChain());
       } else {
+        MOZ_ASSERT(!script->hasNonSyntacticScope());
         envChain.set(&REGS.fp()->global().lexicalEnvironment());
       }
       ReservedRooted<PropertyName*> name(&rootName0, script->getName(REGS.pc));
@@ -2868,15 +2854,17 @@ static MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER bool Interpret(JSContext* cx,
     END_CASE(FunctionThis)
 
     CASE(GlobalThis) {
-      if (script->hasNonSyntacticScope()) {
-        PUSH_NULL();
-        GetNonSyntacticGlobalThis(cx, REGS.fp()->environmentChain(),
-                                  REGS.stackHandleAt(-1));
-      } else {
-        PUSH_OBJECT(*cx->global()->lexicalEnvironment().thisObject());
-      }
+      MOZ_ASSERT(!script->hasNonSyntacticScope());
+      PUSH_OBJECT(*cx->global()->lexicalEnvironment().thisObject());
     }
     END_CASE(GlobalThis)
+
+    CASE(NonSyntacticGlobalThis) {
+      PUSH_NULL();
+      GetNonSyntacticGlobalThis(cx, REGS.fp()->environmentChain(),
+                                REGS.stackHandleAt(-1));
+    }
+    END_CASE(NonSyntacticGlobalThis)
 
     CASE(CheckIsObj) {
       if (!REGS.sp[-1].isObject()) {
@@ -2973,7 +2961,7 @@ static MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER bool Interpret(JSContext* cx,
       static_assert(JSOpLength_SetName == JSOpLength_StrictSetName,
                     "setname and strictsetname must be the same size");
       static_assert(JSOpLength_SetGName == JSOpLength_StrictSetGName,
-                    "setganem adn strictsetgname must be the same size");
+                    "setgname and strictsetgname must be the same size");
       static_assert(JSOpLength_SetName == JSOpLength_SetGName,
                     "We're sharing the END_CASE so the lengths better match");
 
@@ -3340,13 +3328,11 @@ static MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER bool Interpret(JSContext* cx,
 
     CASE(OptimizeSpreadCall) {
       ReservedRooted<Value> val(&rootValue0, REGS.sp[-1]);
+      MutableHandleValue rval = REGS.stackHandleAt(-1);
 
-      bool optimized = false;
-      if (!OptimizeSpreadCall(cx, val, &optimized)) {
+      if (!OptimizeSpreadCall(cx, val, rval)) {
         goto error;
       }
-
-      PUSH_BOOLEAN(optimized);
     }
     END_CASE(OptimizeSpreadCall)
 
@@ -3356,40 +3342,44 @@ static MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER bool Interpret(JSContext* cx,
     }
     END_CASE(ThrowMsg)
 
-    CASE(ImplicitThis)
-    CASE(GImplicitThis) {
-      JSOp op = JSOp(*REGS.pc);
-      if (op == JSOp::ImplicitThis || script->hasNonSyntacticScope()) {
-        ReservedRooted<PropertyName*> name(&rootName0,
-                                           script->getName(REGS.pc));
-        ReservedRooted<JSObject*> envObj(&rootObject0,
-                                         REGS.fp()->environmentChain());
-        ReservedRooted<JSObject*> env(&rootObject1);
-        if (!LookupNameWithGlobalDefault(cx, name, envObj, &env)) {
-          goto error;
-        }
-
-        Value v = ComputeImplicitThis(env);
-        PUSH_COPY(v);
-      } else {
-        // Treat it like JSOp::Undefined.
-        PUSH_UNDEFINED();
+    CASE(ImplicitThis) {
+      ReservedRooted<PropertyName*> name(&rootName0, script->getName(REGS.pc));
+      ReservedRooted<JSObject*> envObj(&rootObject0,
+                                       REGS.fp()->environmentChain());
+      ReservedRooted<JSObject*> env(&rootObject1);
+      if (!LookupNameWithGlobalDefault(cx, name, envObj, &env)) {
+        goto error;
       }
-      static_assert(JSOpLength_ImplicitThis == JSOpLength_GImplicitThis,
-                    "We're sharing the END_CASE so the lengths better match");
+
+      Value v = ComputeImplicitThis(env);
+      PUSH_COPY(v);
     }
     END_CASE(ImplicitThis)
 
-    CASE(GetGName)
-    CASE(GetName) {
+    CASE(GetGName) {
       ReservedRooted<Value> rval(&rootValue0);
-      if (!GetNameOperation(cx, REGS.fp(), REGS.pc, &rval)) {
+      ReservedRooted<JSObject*> env(&rootObject0,
+                                    &cx->global()->lexicalEnvironment());
+      ReservedRooted<PropertyName*> name(&rootName0, script->getName(REGS.pc));
+      MOZ_ASSERT(!script->hasNonSyntacticScope());
+      if (!GetNameOperation(cx, env, name, JSOp(REGS.pc[JSOpLength_GetGName]),
+                            &rval)) {
         goto error;
       }
 
       PUSH_COPY(rval);
-      static_assert(JSOpLength_GetName == JSOpLength_GetGName,
-                    "We're sharing the END_CASE so the lengths better match");
+    }
+    END_CASE(GetGName)
+
+    CASE(GetName) {
+      ReservedRooted<Value> rval(&rootValue0);
+      ReservedRooted<PropertyName*> name(&rootName0, script->getName(REGS.pc));
+      if (!GetNameOperation(cx, REGS.fp()->environmentChain(), name,
+                            JSOp(REGS.pc[JSOpLength_GetName]), &rval)) {
+        goto error;
+      }
+
+      PUSH_COPY(rval);
     }
     END_CASE(GetName)
 
@@ -3429,7 +3419,7 @@ static MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER bool Interpret(JSContext* cx,
     CASE(Double) { PUSH_COPY(GET_INLINE_VALUE(REGS.pc)); }
     END_CASE(Double)
 
-    CASE(String) { PUSH_STRING(script->getAtom(REGS.pc)); }
+    CASE(String) { PUSH_STRING(script->getString(REGS.pc)); }
     END_CASE(String)
 
     CASE(ToString) {
@@ -3573,8 +3563,8 @@ static MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER bool Interpret(JSContext* cx,
     CASE(SetAliasedVar) {
       EnvironmentCoordinate ec = EnvironmentCoordinate(REGS.pc);
       EnvironmentObject& obj = REGS.fp()->aliasedEnvironment(ec);
-      SetAliasedVarOperation(cx, script, REGS.pc, obj, ec, REGS.sp[-1],
-                             CheckTDZ);
+      MOZ_ASSERT(!IsUninitializedLexical(obj.aliasedBinding(ec)));
+      obj.setAliasedBinding(ec, REGS.sp[-1]);
     }
     END_CASE(SetAliasedVar)
 
@@ -3611,8 +3601,7 @@ static MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER bool Interpret(JSContext* cx,
     CASE(InitAliasedLexical) {
       EnvironmentCoordinate ec = EnvironmentCoordinate(REGS.pc);
       EnvironmentObject& obj = REGS.fp()->aliasedEnvironment(ec);
-      SetAliasedVarOperation(cx, script, REGS.pc, obj, ec, REGS.sp[-1],
-                             DontCheckTDZ);
+      obj.setAliasedBinding(ec, REGS.sp[-1]);
     }
     END_CASE(InitAliasedLexical)
 
@@ -3983,7 +3972,7 @@ static MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER bool Interpret(JSContext* cx,
          * 350509, due to Igor Bukanov.
          */
         ReservedRooted<Value> v(&rootValue0, rval);
-        cx->setPendingExceptionAndCaptureStack(v);
+        cx->setPendingException(v, ShouldCaptureStack::Maybe);
         goto error;
       }
 
@@ -4497,7 +4486,7 @@ prologue_error:
 
 bool js::ThrowOperation(JSContext* cx, HandleValue v) {
   MOZ_ASSERT(!cx->isExceptionPending());
-  cx->setPendingExceptionAndCaptureStack(v);
+  cx->setPendingException(v, ShouldCaptureStack::Maybe);
   return false;
 }
 
@@ -5002,7 +4991,10 @@ bool js::SpreadCallOperation(JSContext* cx, HandleScript script, jsbytecode* pc,
   return true;
 }
 
-bool js::OptimizeSpreadCall(JSContext* cx, HandleValue arg, bool* optimized) {
+static bool OptimizeArraySpreadCall(JSContext* cx, HandleObject obj,
+                                    MutableHandleValue result) {
+  MOZ_ASSERT(result.isUndefined());
+
   // Optimize spread call by skipping spread operation when following
   // conditions are met:
   //   * the argument is an array
@@ -5011,14 +5003,7 @@ bool js::OptimizeSpreadCall(JSContext* cx, HandleValue arg, bool* optimized) {
   //   * the array's prototype is Array.prototype
   //   * Array.prototype[@@iterator] is not modified
   //   * %ArrayIteratorPrototype%.next is not modified
-  if (!arg.isObject()) {
-    *optimized = false;
-    return true;
-  }
-
-  RootedObject obj(cx, &arg.toObject());
   if (!IsPackedArray(obj)) {
-    *optimized = false;
     return true;
   }
 
@@ -5027,11 +5012,112 @@ bool js::OptimizeSpreadCall(JSContext* cx, HandleValue arg, bool* optimized) {
     return false;
   }
 
-  return stubChain->tryOptimizeArray(cx, obj.as<ArrayObject>(), optimized);
+  bool optimized;
+  if (!stubChain->tryOptimizeArray(cx, obj.as<ArrayObject>(), &optimized)) {
+    return false;
+  }
+  if (!optimized) {
+    return true;
+  }
+
+  result.setObject(*obj);
+  return true;
+}
+
+static bool OptimizeArgumentsSpreadCall(JSContext* cx, HandleObject obj,
+                                        MutableHandleValue result) {
+  MOZ_ASSERT(result.isUndefined());
+
+  // Optimize spread call by skipping the spread operation when the following
+  // conditions are met:
+  //   * the argument is an arguments object
+  //   * the arguments object has no deleted elements
+  //   * arguments.length is not overridden
+  //   * arguments[@@iterator] is not overridden
+  //   * %ArrayIteratorPrototype%.next is not modified
+
+  if (!obj->is<ArgumentsObject>()) {
+    return true;
+  }
+
+  Handle<ArgumentsObject*> args = obj.as<ArgumentsObject>();
+  if (args->isAnyElementDeleted() || args->hasOverriddenLength() ||
+      args->hasOverriddenIterator()) {
+    return true;
+  }
+
+  ForOfPIC::Chain* stubChain = ForOfPIC::getOrCreate(cx);
+  if (!stubChain) {
+    return false;
+  }
+
+  bool optimized;
+  if (!stubChain->tryOptimizeArrayIteratorNext(cx, &optimized)) {
+    return false;
+  }
+  if (!optimized) {
+    return true;
+  }
+
+  auto* array = ArrayFromArgumentsObject(cx, args);
+  if (!array) {
+    return false;
+  }
+
+  result.setObject(*array);
+  return true;
+}
+
+bool js::OptimizeSpreadCall(JSContext* cx, HandleValue arg,
+                            MutableHandleValue result) {
+  // This function returns |undefined| if the spread operation can't be
+  // optimized.
+  result.setUndefined();
+
+  if (!arg.isObject()) {
+    return true;
+  }
+
+  RootedObject obj(cx, &arg.toObject());
+  if (!OptimizeArraySpreadCall(cx, obj, result)) {
+    return false;
+  }
+  if (result.isObject()) {
+    return true;
+  }
+  if (!OptimizeArgumentsSpreadCall(cx, obj, result)) {
+    return false;
+  }
+  if (result.isObject()) {
+    return true;
+  }
+
+  MOZ_ASSERT(result.isUndefined());
+  return true;
+}
+
+ArrayObject* js::ArrayFromArgumentsObject(JSContext* cx,
+                                          Handle<ArgumentsObject*> args) {
+  MOZ_ASSERT(!args->hasOverriddenLength());
+  MOZ_ASSERT(!args->isAnyElementDeleted());
+
+  uint32_t length = args->initialLength();
+  auto* array = NewDenseFullyAllocatedArray(cx, length);
+  if (!array) {
+    return nullptr;
+  }
+  array->setDenseInitializedLength(length);
+
+  for (uint32_t index = 0; index < length; index++) {
+    const Value& v = args->element(index);
+    array->initDenseElement(index, v);
+  }
+
+  return array;
 }
 
 JSObject* js::NewObjectOperation(JSContext* cx, HandleScript script,
-                                 jsbytecode* pc) {
+                                 const jsbytecode* pc) {
   if (JSOp(*pc) == JSOp::NewObject) {
     RootedShape shape(cx, script->getShape(pc));
     return PlainObject::createWithShape(cx, shape);
@@ -5045,6 +5131,13 @@ JSObject* js::NewPlainObjectBaselineFallback(JSContext* cx, HandleShape shape,
                                              gc::AllocKind allocKind,
                                              gc::AllocSite* site) {
   MOZ_ASSERT(shape->getObjectClass() == &PlainObject::class_);
+
+  mozilla::Maybe<AutoRealm> ar;
+  if (cx->realm() != shape->realm()) {
+    MOZ_ASSERT(cx->compartment() == shape->compartment());
+    ar.emplace(cx, shape);
+  }
+
   gc::InitialHeap initialHeap = site->initialHeap();
   return NativeObject::create(cx, allocKind, initialHeap, shape, site);
 }
@@ -5053,20 +5146,15 @@ JSObject* js::NewPlainObjectOptimizedFallback(JSContext* cx, HandleShape shape,
                                               gc::AllocKind allocKind,
                                               gc::InitialHeap initialHeap) {
   MOZ_ASSERT(shape->getObjectClass() == &PlainObject::class_);
-  gc::AllocSite* site = cx->zone()->optimizedAllocSite();
-  return NativeObject::create(cx, allocKind, initialHeap, shape, site);
-}
 
-JSObject* js::CreateThisWithTemplate(JSContext* cx,
-                                     HandleObject templateObject) {
   mozilla::Maybe<AutoRealm> ar;
-  if (cx->realm() != templateObject->nonCCWRealm()) {
-    MOZ_ASSERT(cx->compartment() == templateObject->compartment());
-    ar.emplace(cx, templateObject);
+  if (cx->realm() != shape->realm()) {
+    MOZ_ASSERT(cx->compartment() == shape->compartment());
+    ar.emplace(cx, shape);
   }
 
-  RootedShape shape(cx, templateObject->shape());
-  return PlainObject::createWithShape(cx, shape);
+  gc::AllocSite* site = cx->zone()->optimizedAllocSite();
+  return NativeObject::create(cx, allocKind, initialHeap, shape, site);
 }
 
 ArrayObject* js::NewArrayOperation(

@@ -37,10 +37,6 @@ namespace mozilla {
 
 class CancelableRunnable;
 
-namespace dom {
-class WebGLParent;
-}  // namespace dom
-
 namespace gfx {
 class DrawTarget;
 class GPUProcessManager;
@@ -98,9 +94,6 @@ class WebRenderScrollDataWrapper;
 struct CollectedFrames;
 
 struct ScopedLayerTreeRegistration {
-  // For Layers
-  ScopedLayerTreeRegistration(LayersId aLayersId, Layer* aRoot,
-                              GeckoContentController* aController);
   // For WebRender
   ScopedLayerTreeRegistration(LayersId aLayersId,
                               GeckoContentController* aController);
@@ -181,7 +174,8 @@ class CompositorBridgeParentBase : public PCompositorBridgeParent,
     MOZ_CRASH("Should only be called on ContentCompositorBridgeParent.");
   }
 
-  virtual void ForceComposeToTarget(gfx::DrawTarget* aTarget,
+  virtual void ForceComposeToTarget(wr::RenderReasons aReasons,
+                                    gfx::DrawTarget* aTarget,
                                     const gfx::IntRect* aRect = nullptr) {
     MOZ_CRASH();
   }
@@ -201,7 +195,7 @@ class CompositorBridgeParentBase : public PCompositorBridgeParent,
       PAPZCTreeManagerParent* aActor) = 0;
 
   virtual PTextureParent* AllocPTextureParent(
-      const SurfaceDescriptor& aSharedData, const ReadLockDescriptor& aReadLock,
+      const SurfaceDescriptor& aSharedData, ReadLockDescriptor& aReadLock,
       const LayersBackend& aBackend, const TextureFlags& aTextureFlags,
       const LayersId& id, const uint64_t& aSerial,
       const MaybeExternalImageId& aExternalImageId) = 0;
@@ -222,8 +216,10 @@ class CompositorBridgeParentBase : public PCompositorBridgeParent,
       PCompositorWidgetParent* aActor) = 0;
 
   virtual mozilla::ipc::IPCResult RecvAdoptChild(const LayersId& id) = 0;
-  virtual mozilla::ipc::IPCResult RecvFlushRenderingAsync() = 0;
-  virtual mozilla::ipc::IPCResult RecvForcePresent() = 0;
+  virtual mozilla::ipc::IPCResult RecvFlushRenderingAsync(
+      const wr::RenderReasons& aReasons) = 0;
+  virtual mozilla::ipc::IPCResult RecvForcePresent(
+      const wr::RenderReasons& aReasons) = 0;
   virtual mozilla::ipc::IPCResult RecvBeginRecording(
       const TimeStamp& aRecordingStart, BeginRecordingResolver&& aResolve) = 0;
   virtual mozilla::ipc::IPCResult RecvEndRecordingToDisk(
@@ -244,7 +240,8 @@ class CompositorBridgeParentBase : public PCompositorBridgeParent,
       CompositorOptions* compositorOptions) = 0;
   virtual mozilla::ipc::IPCResult RecvNotifyChildRecreated(
       const LayersId& id, CompositorOptions* compositorOptions) = 0;
-  virtual mozilla::ipc::IPCResult RecvFlushRendering() = 0;
+  virtual mozilla::ipc::IPCResult RecvFlushRendering(
+      const wr::RenderReasons& aReasons) = 0;
   virtual mozilla::ipc::IPCResult RecvWaitOnTransactionProcessed() = 0;
   virtual mozilla::ipc::IPCResult RecvStartFrameTimeRecording(
       const int32_t& bufferSize, uint32_t* startIndex) = 0;
@@ -255,8 +252,6 @@ class CompositorBridgeParentBase : public PCompositorBridgeParent,
   virtual mozilla::ipc::IPCResult RecvInitPCanvasParent(
       Endpoint<PCanvasParent>&& aEndpoint) = 0;
   virtual mozilla::ipc::IPCResult RecvReleasePCanvasParent() = 0;
-
-  virtual already_AddRefed<PWebGLParent> AllocPWebGLParent() = 0;
 
   bool mCanSend;
 
@@ -311,10 +306,13 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase,
   mozilla::ipc::IPCResult RecvNotifyChildRecreated(
       const LayersId& child, CompositorOptions* aOptions) override;
   mozilla::ipc::IPCResult RecvAdoptChild(const LayersId& child) override;
-  mozilla::ipc::IPCResult RecvFlushRendering() override;
-  mozilla::ipc::IPCResult RecvFlushRenderingAsync() override;
+  mozilla::ipc::IPCResult RecvFlushRendering(
+      const wr::RenderReasons& aReasons) override;
+  mozilla::ipc::IPCResult RecvFlushRenderingAsync(
+      const wr::RenderReasons& aReasons) override;
   mozilla::ipc::IPCResult RecvWaitOnTransactionProcessed() override;
-  mozilla::ipc::IPCResult RecvForcePresent() override;
+  mozilla::ipc::IPCResult RecvForcePresent(
+      const wr::RenderReasons& aReasons) override;
 
   mozilla::ipc::IPCResult RecvStartFrameTimeRecording(
       const int32_t& aBufferSize, uint32_t* aOutStartIndex) override;
@@ -362,7 +360,7 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase,
   void SetFixedLayerMargins(ScreenIntCoord aTop, ScreenIntCoord aBottom);
 
   PTextureParent* AllocPTextureParent(
-      const SurfaceDescriptor& aSharedData, const ReadLockDescriptor& aReadLock,
+      const SurfaceDescriptor& aSharedData, ReadLockDescriptor& aReadLock,
       const LayersBackend& aLayersBackend, const TextureFlags& aFlags,
       const LayersId& aId, const uint64_t& aSerial,
       const wr::MaybeExternalImageId& aExternalImageId) override;
@@ -411,9 +409,9 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase,
   void AsyncRender();
 
   // Can be called from any thread
-  void ScheduleRenderOnCompositorThread() override;
+  void ScheduleRenderOnCompositorThread(wr::RenderReasons aReasons) override;
 
-  void ScheduleComposition();
+  void ScheduleComposition(wr::RenderReasons aReasons);
 
   void NotifyShadowTreeTransaction(LayersId aId, bool aIsFirstPaint,
                                    const FocusTarget& aFocusTarget,
@@ -429,7 +427,8 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase,
   void ScheduleRotationOnCompositorThread(const TargetConfig& aTargetConfig,
                                           bool aIsFirstPaint);
 
-  static void ScheduleForcedComposition(const LayersId& aLayersId);
+  static void ScheduleForcedComposition(const LayersId& aLayersId,
+                                        wr::RenderReasons aReasons);
 
   /**
    * Returns the unique layer tree identifier that corresponds to the root
@@ -474,7 +473,6 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase,
   struct LayerTreeState {
     LayerTreeState();
     ~LayerTreeState();
-    RefPtr<Layer> mRoot;
     RefPtr<GeckoContentController> mController;
     APZCTreeManagerParent* mApzcTreeManagerParent;
     RefPtr<CompositorBridgeParent> mParent;
@@ -483,7 +481,6 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase,
     // their FrameMetrics with the corresponding child process that holds
     // the PCompositorBridgeChild
     ContentCompositorBridgeParent* mContentCompositorBridgeParent;
-    TargetConfig mTargetConfig;
 
     CompositorController* GetCompositorController() const;
     RefPtr<UiCompositorControllerParent> mUiControllerParent;
@@ -529,7 +526,8 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase,
   widget::CompositorWidget* GetWidget() { return mWidget; }
 
   virtual void ForceComposeToTarget(
-      gfx::DrawTarget* aTarget, const gfx::IntRect* aRect = nullptr) override;
+      wr::RenderReasons aReasons, gfx::DrawTarget* aTarget,
+      const gfx::IntRect* aRect = nullptr) override;
 
   PAPZCTreeManagerParent* AllocPAPZCTreeManagerParent(
       const LayersId& aLayersId) override;
@@ -581,12 +579,6 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase,
   WebRenderBridgeParent* GetWrBridge() { return mWrBridge; }
   webgpu::WebGPUParent* GetWebGPUBridge() { return mWebGPUBridge; }
 
-  already_AddRefed<PWebGLParent> AllocPWebGLParent() override {
-    MOZ_ASSERT_UNREACHABLE(
-        "This message is CrossProcessCompositorBridgeParent only");
-    return nullptr;
-  }
-
  private:
   void Initialize();
 
@@ -614,14 +606,14 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase,
   static void UpdateDebugFlags();
 
   /**
-   * Notify the compositor the debug flags have been updated.
+   * Notify the compositor some webrender parameters have been updated.
    */
-  static void UpdateWebRenderMultithreading();
+  static void UpdateWebRenderParameters();
 
   /**
    * Notify the compositor some webrender parameters have been updated.
    */
-  static void UpdateWebRenderParameters();
+  static void UpdateWebRenderBoolParameters();
 
   /**
    * Notify the compositor webrender profiler UI string has been updated.
@@ -651,7 +643,7 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase,
   bool IsPaused() { return mPaused; }
 
  protected:
-  void ForceComposition();
+  void ForceComposition(wr::RenderReasons aReasons);
   void CancelCurrentCompositeTask();
 
   /**

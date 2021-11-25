@@ -37,7 +37,8 @@ class VendorPython(MozbuildObject):
             # of transitive dependencies aren't implicitly changed.
             shutil.copy(requirements, tmp_requirements_absolute)
 
-            # resolve the dependencies and update requirements.txt
+            # resolve the dependencies and update requirements.txt.
+            # "--allow-unsafe" is required to vendor pip and setuptools.
             subprocess.check_output(
                 [
                     self.virtualenv_manager.python_path,
@@ -46,10 +47,11 @@ class VendorPython(MozbuildObject):
                     "compile",
                     tmpspec,
                     "--no-header",
-                    "--no-index",
+                    "--no-emit-index-url",
                     "--output-file",
                     tmp_requirements_absolute,
                     "--generate-hashes",
+                    "--allow-unsafe",
                 ],
                 # Run pip-compile from within the temporary directory so that the "via"
                 # annotations don't have the non-deterministic temporary path in them.
@@ -58,8 +60,11 @@ class VendorPython(MozbuildObject):
 
             with TemporaryDirectory() as tmp:
                 # use requirements.txt to download archived source distributions of all packages
-                self.virtualenv_manager._run_pip(
+                subprocess.check_call(
                     [
+                        self.virtualenv_manager.python_path,
+                        "-m",
+                        "pip",
                         "download",
                         "-r",
                         tmp_requirements_absolute,

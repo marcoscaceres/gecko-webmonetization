@@ -26,6 +26,7 @@
 #include "mozilla/Preferences.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/SchedulerGroup.h"
+#include "mozilla/WinHeaderOnlyUtils.h"
 #include "mozilla/WindowsVersion.h"
 #include "mozilla/Unused.h"
 #include "nsIContentPolicy.h"
@@ -53,6 +54,7 @@
 #include "nsUnicharUtils.h"
 #include "nsWindowsHelpers.h"
 #include "WinContentSystemParameters.h"
+#include "WinWindowOcclusionTracker.h"
 
 #include <textstor.h>
 #include "TSFTextStore.h"
@@ -469,21 +471,7 @@ void WinUtils::Initialize() {
   }
 
   if (IsWin8OrLater()) {
-    HMODULE kernel32Dll = ::GetModuleHandleW(L"kernel32");
-    if (kernel32Dll) {
-      typedef LONG(WINAPI * GetCurrentPackageIdProc)(UINT32*, BYTE*);
-      GetCurrentPackageIdProc pGetCurrentPackageId =
-          (GetCurrentPackageIdProc)::GetProcAddress(kernel32Dll,
-                                                    "GetCurrentPackageId");
-
-      // If there was any package identity to retrieve, we get
-      // ERROR_INSUFFICIENT_BUFFER. If there had been no package identity it
-      // would instead return APPMODEL_ERROR_NO_PACKAGE.
-      UINT32 packageNameSize = 0;
-      sHasPackageIdentity = pGetCurrentPackageId &&
-                            (pGetCurrentPackageId(&packageNameSize, nullptr) ==
-                             ERROR_INSUFFICIENT_BUFFER);
-    }
+    sHasPackageIdentity = mozilla::HasPackageIdentity();
   }
 }
 
@@ -2320,37 +2308,43 @@ bool WinUtils::PreparePathForTelemetry(nsAString& aPath,
 nsString WinUtils::GetPackageFamilyName() {
   nsString rv;
 
-  if (!HasPackageIdentity()) {
-    return rv;
+  UniquePtr<wchar_t[]> packageIdentity = mozilla::GetPackageFamilyName();
+  if (packageIdentity) {
+    rv = packageIdentity.get();
   }
 
-  HMODULE kernel32Dll = ::GetModuleHandleW(L"kernel32");
-  if (!kernel32Dll) {
-    return rv;
-  }
-
-  typedef LONG(WINAPI * GetCurrentPackageFamilyNameProc)(UINT32*, PWSTR);
-  GetCurrentPackageFamilyNameProc pGetCurrentPackageFamilyName =
-      (GetCurrentPackageFamilyNameProc)::GetProcAddress(
-          kernel32Dll, "GetCurrentPackageFamilyName");
-  if (!pGetCurrentPackageFamilyName) {
-    return rv;
-  }
-
-  UINT32 packageNameSize = 0;
-  if (pGetCurrentPackageFamilyName(&packageNameSize, nullptr) !=
-      ERROR_INSUFFICIENT_BUFFER) {
-    return rv;
-  }
-
-  UniquePtr<wchar_t[]> packageIdentity = MakeUnique<wchar_t[]>(packageNameSize);
-  if (pGetCurrentPackageFamilyName(&packageNameSize, packageIdentity.get()) !=
-      ERROR_SUCCESS) {
-    return rv;
-  }
-
-  rv = packageIdentity.get();
   return rv;
+}
+
+bool WinUtils::GetClassName(HWND aHwnd, nsAString& aClassName) {
+  const int bufferLength = 256;
+  aClassName.SetLength(bufferLength);
+
+  int length = ::GetClassNameW(aHwnd, (char16ptr_t)aClassName.BeginWriting(),
+                               bufferLength);
+  if (length == 0) {
+    return false;
+  }
+  MOZ_RELEASE_ASSERT(length <= (bufferLength - 1));
+  aClassName.Truncate(length);
+  return true;
+}
+
+static BOOL CALLBACK EnumUpdateWindowOcclusionProc(HWND aHwnd, LPARAM aLParam) {
+  const bool* const enable = reinterpret_cast<bool*>(aLParam);
+  nsWindow* window = WinUtils::GetNSWindowPtr(aHwnd);
+  if (window) {
+    window->MaybeEnableWindowOcclusion(*enable);
+  }
+  return TRUE;
+}
+
+void WinUtils::EnableWindowOcclusion(const bool aEnable) {
+  if (aEnable) {
+    WinWindowOcclusionTracker::Ensure();
+  }
+  ::EnumWindows(EnumUpdateWindowOcclusionProc,
+                reinterpret_cast<LPARAM>(&aEnable));
 }
 
 }  // namespace widget

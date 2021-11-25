@@ -10,11 +10,15 @@
 
 #include "mozilla/Assertions.h"
 #include "mozilla/intl/Calendar.h"
+#include "mozilla/intl/Collator.h"
+#include "mozilla/intl/Currency.h"
+#include "mozilla/intl/TimeZone.h"
 
 #include <algorithm>
 #include <array>
 #include <cstring>
 #include <iterator>
+#include <string_view>
 
 #include "builtin/Array.h"
 #include "builtin/intl/Collator.h"
@@ -27,8 +31,8 @@
 #include "builtin/intl/NumberingSystemsGenerated.h"
 #include "builtin/intl/PluralRules.h"
 #include "builtin/intl/RelativeTimeFormat.h"
-#include "builtin/intl/ScopedICUObject.h"
 #include "builtin/intl/SharedIntlData.h"
+#include "builtin/intl/StringAsciiChars.h"
 #include "ds/Sort.h"
 #include "js/CharacterEncoding.h"
 #include "js/Class.h"
@@ -38,12 +42,6 @@
 #include "js/PropertySpec.h"
 #include "js/Result.h"
 #include "js/StableStringChars.h"
-#include "unicode/ucal.h"
-#include "unicode/ucol.h"
-#include "unicode/ucurr.h"
-#include "unicode/uenum.h"
-#include "unicode/uloc.h"
-#include "unicode/utypes.h"
 #include "vm/GlobalObject.h"
 #include "vm/JSAtom.h"
 #include "vm/JSContext.h"
@@ -57,8 +55,6 @@
 
 using namespace js;
 
-using js::intl::IcuLocale;
-
 /******************** Intl ********************/
 
 bool js::intl_GetCalendarInfo(JSContext* cx, unsigned argc, Value* vp) {
@@ -70,16 +66,12 @@ bool js::intl_GetCalendarInfo(JSContext* cx, unsigned argc, Value* vp) {
     return false;
   }
 
-  UErrorCode status = U_ZERO_ERROR;
-  const UChar* uTimeZone = nullptr;
-  int32_t uTimeZoneLength = 0;
-  UCalendar* cal = ucal_open(uTimeZone, uTimeZoneLength, locale.get(),
-                             UCAL_DEFAULT, &status);
-  if (U_FAILURE(status)) {
-    intl::ReportInternalError(cx);
+  auto result = mozilla::intl::Calendar::TryCreate(locale.get());
+  if (result.isErr()) {
+    intl::ReportInternalError(cx, result.unwrapErr());
     return false;
   }
-  ScopedICUObject<UCalendar, ucal_close> toClose(cal);
+  auto calendar = result.unwrap();
 
   RootedObject info(cx, NewPlainObject(cx));
   if (!info) {
@@ -87,70 +79,37 @@ bool js::intl_GetCalendarInfo(JSContext* cx, unsigned argc, Value* vp) {
   }
 
   RootedValue v(cx);
-  int32_t firstDayOfWeek = ucal_getAttribute(cal, UCAL_FIRST_DAY_OF_WEEK);
-  v.setInt32(firstDayOfWeek);
 
+  v.setInt32(static_cast<int32_t>(calendar->GetFirstDayOfWeek()));
   if (!DefineDataProperty(cx, info, cx->names().firstDayOfWeek, v)) {
     return false;
   }
 
-  int32_t minDays = ucal_getAttribute(cal, UCAL_MINIMAL_DAYS_IN_FIRST_WEEK);
-  v.setInt32(minDays);
+  v.setInt32(calendar->GetMinimalDaysInFirstWeek());
   if (!DefineDataProperty(cx, info, cx->names().minDays, v)) {
     return false;
   }
 
-  UCalendarWeekdayType prevDayType =
-      ucal_getDayOfWeekType(cal, UCAL_SATURDAY, &status);
-  if (U_FAILURE(status)) {
-    intl::ReportInternalError(cx);
+  RootedArrayObject weekendArray(cx, NewDenseEmptyArray(cx));
+  if (!weekendArray) {
     return false;
   }
 
-  RootedValue weekendStart(cx), weekendEnd(cx);
+  auto weekend = calendar->GetWeekend();
+  if (weekend.isErr()) {
+    intl::ReportInternalError(cx, weekend.unwrapErr());
+    return false;
+  }
 
-  for (int i = UCAL_SUNDAY; i <= UCAL_SATURDAY; i++) {
-    UCalendarDaysOfWeek dayOfWeek = static_cast<UCalendarDaysOfWeek>(i);
-    UCalendarWeekdayType type = ucal_getDayOfWeekType(cal, dayOfWeek, &status);
-    if (U_FAILURE(status)) {
-      intl::ReportInternalError(cx);
+  for (auto day : weekend.unwrap()) {
+    if (!NewbornArrayPush(cx, weekendArray,
+                          Int32Value(static_cast<int32_t>(day)))) {
       return false;
     }
-
-    if (prevDayType != type) {
-      switch (type) {
-        case UCAL_WEEKDAY:
-          // If the first Weekday after Weekend is Sunday (1),
-          // then the last Weekend day is Saturday (7).
-          // Otherwise we'll just take the previous days number.
-          weekendEnd.setInt32(i == 1 ? 7 : i - 1);
-          break;
-        case UCAL_WEEKEND:
-          weekendStart.setInt32(i);
-          break;
-        case UCAL_WEEKEND_ONSET:
-        case UCAL_WEEKEND_CEASE:
-          // At the time this code was added, ICU apparently never behaves this
-          // way, so just throw, so that users will report a bug and we can
-          // decide what to do.
-          intl::ReportInternalError(cx);
-          return false;
-        default:
-          break;
-      }
-    }
-
-    prevDayType = type;
   }
 
-  MOZ_ASSERT(weekendStart.isInt32());
-  MOZ_ASSERT(weekendEnd.isInt32());
-
-  if (!DefineDataProperty(cx, info, cx->names().weekendStart, weekendStart)) {
-    return false;
-  }
-
-  if (!DefineDataProperty(cx, info, cx->names().weekendEnd, weekendEnd)) {
+  v.setObject(*weekendArray);
+  if (!DefineDataProperty(cx, info, cx->names().weekend, v)) {
     return false;
   }
 
@@ -302,29 +261,54 @@ bool js::intl_BestAvailableLocale(JSContext* cx, unsigned argc, Value* vp) {
 
 #ifdef DEBUG
   {
-    intl::LanguageTag tag(cx);
-    bool ok;
-    JS_TRY_VAR_OR_RETURN_FALSE(
-        cx, ok, intl::LanguageTagParser::tryParse(cx, locale, tag));
-    MOZ_ASSERT(ok, "locale is a structurally valid language tag");
+    MOZ_ASSERT(StringIsAscii(locale), "language tags are ASCII-only");
 
-    MOZ_ASSERT(!tag.unicodeExtension(),
-               "locale must contain no Unicode extensions");
+    // |locale| is a structurally valid language tag.
+    mozilla::intl::Locale tag;
 
-    if (!tag.canonicalize(cx)) {
+    using ParserError = mozilla::intl::LocaleParser::ParserError;
+    mozilla::Result<mozilla::Ok, ParserError> parse_result = Ok();
+    {
+      intl::StringAsciiChars chars(locale);
+      if (!chars.init(cx)) {
+        return false;
+      }
+
+      parse_result = mozilla::intl::LocaleParser::TryParse(chars, tag);
+    }
+
+    if (parse_result.isErr()) {
+      MOZ_ASSERT(parse_result.unwrapErr() == ParserError::OutOfMemory,
+                 "locale is a structurally valid language tag");
+
+      intl::ReportInternalError(cx);
       return false;
     }
 
-    JSString* tagStr = tag.toString(cx);
+    MOZ_ASSERT(!tag.GetUnicodeExtension(),
+               "locale must contain no Unicode extensions");
+
+    if (auto result = tag.Canonicalize(); result.isErr()) {
+      MOZ_ASSERT(
+          result.unwrapErr() !=
+          mozilla::intl::Locale::CanonicalizationError::DuplicateVariant);
+      intl::ReportInternalError(cx);
+      return false;
+    }
+
+    intl::FormatBuffer<char, intl::INITIAL_CHAR_BUFFER_SIZE> buffer(cx);
+    if (auto result = tag.ToString(buffer); result.isErr()) {
+      intl::ReportInternalError(cx, result.unwrapErr());
+      return false;
+    }
+
+    JSLinearString* tagStr = buffer.toString(cx);
     if (!tagStr) {
       return false;
     }
 
-    bool canonical;
-    if (!EqualStrings(cx, locale, tagStr, &canonical)) {
-      return false;
-    }
-    MOZ_ASSERT(canonical, "locale is a canonicalized language tag");
+    MOZ_ASSERT(EqualStrings(locale, tagStr),
+               "locale is a canonicalized language tag");
   }
 #endif
 
@@ -360,39 +344,47 @@ bool js::intl_supportedLocaleOrFallback(JSContext* cx, unsigned argc,
     return false;
   }
 
-  intl::LanguageTag tag(cx);
-  bool ok;
-  JS_TRY_VAR_OR_RETURN_FALSE(
-      cx, ok, intl::LanguageTagParser::tryParse(cx, locale, tag));
+  mozilla::intl::Locale tag;
+  bool canParseLocale = false;
+  if (StringIsAscii(locale)) {
+    intl::StringAsciiChars chars(locale);
+    if (!chars.init(cx)) {
+      return false;
+    }
+
+    // Tell the analysis the |tag.canonicalize()| method can't GC.
+    JS::AutoSuppressGCAnalysis nogc;
+
+    canParseLocale = mozilla::intl::LocaleParser::TryParse(chars, tag).isOk() &&
+                     tag.Canonicalize().isOk();
+  }
 
   RootedLinearString candidate(cx);
-  if (!ok) {
+  if (!canParseLocale) {
     candidate = NewStringCopyZ<CanGC>(cx, intl::LastDitchLocale());
     if (!candidate) {
       return false;
     }
   } else {
-    if (!tag.canonicalize(cx)) {
-      return false;
-    }
-
     // The default locale must be in [[AvailableLocales]], and that list must
     // not contain any locales with Unicode extension sequences, so remove any
     // present in the candidate.
-    tag.clearUnicodeExtension();
+    tag.ClearUnicodeExtension();
 
-    JSString* canonical = tag.toString(cx);
-    if (!canonical) {
+    intl::FormatBuffer<char, intl::INITIAL_CHAR_BUFFER_SIZE> buffer(cx);
+    if (auto result = tag.ToString(buffer); result.isErr()) {
+      intl::ReportInternalError(cx, result.unwrapErr());
       return false;
     }
 
-    candidate = canonical->ensureLinear(cx);
+    candidate = buffer.toAsciiString(cx);
     if (!candidate) {
       return false;
     }
 
-    // Certain old-style language tags lack a script code, but in current usage
-    // they *would* include a script code. Map these over to modern forms.
+    // Certain old-style language tags lack a script code, but in current
+    // usage they *would* include a script code. Map these over to modern
+    // forms.
     for (const auto& mapping : js::intl::oldStyleLanguageTagMappings) {
       const char* oldStyle = mapping.oldStyle;
       const char* modernStyle = mapping.modernStyle;
@@ -412,8 +404,8 @@ bool js::intl_supportedLocaleOrFallback(JSContext* cx, unsigned argc,
   // - [[AvailableLocales]] is a List [...]. The list must include the value
   //   returned by the DefaultLocale abstract operation (6.2.4), [...].
   //
-  // That implies we must ignore any candidate which isn't supported by all Intl
-  // service constructors.
+  // That implies we must ignore any candidate which isn't supported by all
+  // Intl service constructors.
 
   RootedLinearString supportedCollator(cx);
   JS_TRY_VAR_OR_RETURN_FALSE(
@@ -429,8 +421,8 @@ bool js::intl_supportedLocaleOrFallback(JSContext* cx, unsigned argc,
 
 #ifdef DEBUG
   // Note: We don't test the supported locales of the remaining Intl service
-  // constructors, because the set of supported locales is exactly equal to the
-  // set of supported locales of Intl.DateTimeFormat.
+  // constructors, because the set of supported locales is exactly equal to
+  // the set of supported locales of Intl.DateTimeFormat.
   for (auto kind :
        {SupportedLocaleKind::DisplayNames, SupportedLocaleKind::ListFormat,
         SupportedLocaleKind::NumberFormat, SupportedLocaleKind::PluralRules,
@@ -549,42 +541,26 @@ static ArrayObject* CreateArrayFromSortedList(
 }
 
 /**
- * Create an array from an UEnumeration.
+ * Create an array from an intl::Enumeration.
  */
-template <const auto& unsupported, const auto& missing>
-static bool EnumerationIntoList(JSContext* cx, UEnumeration* values,
+template <const auto& unsupported, class Enumeration>
+static bool EnumerationIntoList(JSContext* cx, Enumeration values,
                                 MutableHandle<StringList> list) {
-  while (true) {
-    UErrorCode status = U_ZERO_ERROR;
-    int32_t len;
-    const char* value = uenum_next(values, &len, &status);
-    if (U_FAILURE(status)) {
+  for (auto value : values) {
+    if (value.isErr()) {
       intl::ReportInternalError(cx);
       return false;
     }
-    if (value == nullptr) {
-      break;
-    }
+    auto span = value.unwrap();
 
     // Skip over known, unsupported values.
-    if (std::any_of(
-            std::begin(unsupported), std::end(unsupported),
-            [value](const auto& e) { return std::strcmp(value, e) == 0; })) {
+    std::string_view sv(span.data(), span.size());
+    if (std::any_of(std::begin(unsupported), std::end(unsupported),
+                    [sv](const auto& e) { return sv == e; })) {
       continue;
     }
 
-    auto* string = NewStringCopyN<CanGC>(cx, value, size_t(len));
-    if (!string) {
-      return false;
-    }
-    if (!list.append(string)) {
-      return false;
-    }
-  }
-
-  // Add known missing values.
-  for (const char* value : missing) {
-    auto* string = NewStringCopyZ<CanGC>(cx, value);
+    auto* string = NewStringCopy<CanGC>(cx, span);
     if (!string) {
       return false;
     }
@@ -597,58 +573,17 @@ static bool EnumerationIntoList(JSContext* cx, UEnumeration* values,
 }
 
 /**
- * Create an array from an UEnumeration.
+ * Returns the list of calendar types which mustn't be returned by
+ * |Intl.supportedValuesOf()|.
  */
-template <const auto& unsupported>
-static bool EnumerationIntoList(JSContext* cx, const char* type,
-                                UEnumeration* values,
-                                MutableHandle<StringList> list) {
-  while (true) {
-    UErrorCode status = U_ZERO_ERROR;
-    const char* value = uenum_next(values, nullptr, &status);
-    if (U_FAILURE(status)) {
-      intl::ReportInternalError(cx);
-      return false;
-    }
-    if (value == nullptr) {
-      break;
-    }
-
-    // ICU returns old-style keyword values; map them to BCP 47 equivalents.
-    value = uloc_toUnicodeLocaleType(type, value);
-    if (!value) {
-      intl::ReportInternalError(cx);
-      return false;
-    }
-
-    // Skip over known, unsupported values.
-    if (std::any_of(
-            std::begin(unsupported), std::end(unsupported),
-            [value](const auto& e) { return std::strcmp(value, e) == 0; })) {
-      continue;
-    }
-
-    auto* string = NewStringCopyZ<CanGC>(cx, value);
-    if (!string) {
-      return false;
-    }
-    if (!list.append(string)) {
-      return false;
-    }
-  }
-
-  return true;
+static constexpr auto UnsupportedCalendars() {
+  // No calendar values are currently unsupported.
+  return std::array<const char*, 0>{};
 }
 
-static void CloseEnumeration(UEnumeration* ptr) {
-  // <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=83258> prevents this function
-  // to be a lambda.
-
-  // Tell the analysis the |uenum_close| function can't GC.
-  JS::AutoSuppressGCAnalysis nogc;
-
-  uenum_close(ptr);
-}
+// Defined outside of the function to workaround bugs in GCC<9.
+// Also see <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=85589>.
+static constexpr auto UnsupportedCalendarsArray = UnsupportedCalendars();
 
 /**
  * AvailableCalendars ( )
@@ -657,28 +592,20 @@ static ArrayObject* AvailableCalendars(JSContext* cx) {
   Rooted<StringList> list(cx, StringList(cx));
 
   {
-    // Hazard analysis complains that the mozilla::Result destructor calls a GC
-    // function, which is unsound when returning an unrooted value. Work around
-    // this issue by restricting the lifetime of |keywords| to a separate block.
+    // Hazard analysis complains that the mozilla::Result destructor calls a
+    // GC function, which is unsound when returning an unrooted value. Work
+    // around this issue by restricting the lifetime of |keywords| to a
+    // separate block.
     auto keywords = mozilla::intl::Calendar::GetBcp47KeywordValuesForLocale("");
     if (keywords.isErr()) {
       intl::ReportInternalError(cx, keywords.unwrapErr());
       return nullptr;
     }
 
-    for (auto keyword : keywords.unwrap()) {
-      if (keyword.isErr()) {
-        intl::ReportInternalError(cx);
-        return nullptr;
-      }
+    static constexpr auto& unsupported = UnsupportedCalendarsArray;
 
-      auto* string = NewStringCopy<CanGC>(cx, keyword.unwrap());
-      if (!string) {
-        return nullptr;
-      }
-      if (!list.append(string)) {
-        return nullptr;
-      }
+    if (!EnumerationIntoList<unsupported>(cx, keywords.unwrap(), &list)) {
+      return nullptr;
     }
   }
 
@@ -704,36 +631,24 @@ static constexpr auto UnsupportedCollationsArray = UnsupportedCollations();
  * AvailableCollations ( )
  */
 static ArrayObject* AvailableCollations(JSContext* cx) {
-  UErrorCode status = U_ZERO_ERROR;
-  UEnumeration* values = ucol_getKeywordValues("collation", &status);
-  if (U_FAILURE(status)) {
-    intl::ReportInternalError(cx);
-    return nullptr;
-  }
-  ScopedICUObject<UEnumeration, CloseEnumeration> toClose(values);
-
-  static constexpr auto& unsupported = UnsupportedCollationsArray;
-
   Rooted<StringList> list(cx, StringList(cx));
-  if (!EnumerationIntoList<unsupported>(cx, "co", values, &list)) {
-    return nullptr;
-  }
 
-  // |ucol_getKeywordValues| returns the possible collations for all installed
-  // locales. The root locale is excluded in the list of installed locales, so
-  // we have to explicitly request the available collations of the root locale.
-  //
-  // https://unicode-org.atlassian.net/browse/ICU-21641
-  UEnumeration* rootValues =
-      ucol_getKeywordValuesForLocale("collation", "", false, &status);
-  if (U_FAILURE(status)) {
-    intl::ReportInternalError(cx);
-    return nullptr;
-  }
-  ScopedICUObject<UEnumeration, CloseEnumeration> toCloseRoot(rootValues);
+  {
+    // Hazard analysis complains that the mozilla::Result destructor calls a
+    // GC function, which is unsound when returning an unrooted value. Work
+    // around this issue by restricting the lifetime of |keywords| to a
+    // separate block.
+    auto keywords = mozilla::intl::Collator::GetBcp47KeywordValues();
+    if (keywords.isErr()) {
+      intl::ReportInternalError(cx, keywords.unwrapErr());
+      return nullptr;
+    }
 
-  if (!EnumerationIntoList<unsupported>(cx, "co", rootValues, &list)) {
-    return nullptr;
+    static constexpr auto& unsupported = UnsupportedCollationsArray;
+
+    if (!EnumerationIntoList<unsupported>(cx, keywords.unwrap(), &list)) {
+      return nullptr;
+    }
   }
 
   return CreateArrayFromList(cx, &list);
@@ -741,52 +656,43 @@ static ArrayObject* AvailableCollations(JSContext* cx) {
 
 /**
  * Returns a list of known, unsupported currencies which are returned by
- * |ucurr_openISOCurrencies|.
+ * |Currency::GetISOCurrencies()|.
  */
 static constexpr auto UnsupportedCurrencies() {
   // "MVP" is also marked with "questionable, remove?" in ucurr.cpp, but only
-  // these two currency codes aren't supported by |Intl.DisplayNames| and
+  // this single currency code isn't supported by |Intl.DisplayNames| and
   // therefore must be excluded by |Intl.supportedValuesOf|.
   return std::array{
-      "EQE",  // https://unicode-org.atlassian.net/browse/ICU-21686
       "LSM",  // https://unicode-org.atlassian.net/browse/ICU-21687
-  };
-}
-
-/**
- * Return a list of known, missing currencies which aren't returned by
- * |ucurr_openISOCurrencies|.
- */
-static constexpr auto MissingCurrencies() {
-  return std::array{
-      "UYW",  // https://unicode-org.atlassian.net/browse/ICU-21622
-      "VES",  // https://unicode-org.atlassian.net/browse/ICU-21685
   };
 }
 
 // Defined outside of the function to workaround bugs in GCC<9.
 // Also see <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=85589>.
 static constexpr auto UnsupportedCurrenciesArray = UnsupportedCurrencies();
-static constexpr auto MissingCurrenciesArray = MissingCurrencies();
 
 /**
  * AvailableCurrencies ( )
  */
 static ArrayObject* AvailableCurrencies(JSContext* cx) {
-  UErrorCode status = U_ZERO_ERROR;
-  UEnumeration* values = ucurr_openISOCurrencies(UCURR_ALL, &status);
-  if (U_FAILURE(status)) {
-    intl::ReportInternalError(cx);
-    return nullptr;
-  }
-  ScopedICUObject<UEnumeration, CloseEnumeration> toClose(values);
-
-  static constexpr auto& unsupported = UnsupportedCurrenciesArray;
-  static constexpr auto& missing = MissingCurrenciesArray;
-
   Rooted<StringList> list(cx, StringList(cx));
-  if (!EnumerationIntoList<unsupported, missing>(cx, values, &list)) {
-    return nullptr;
+
+  {
+    // Hazard analysis complains that the mozilla::Result destructor calls a
+    // GC function, which is unsound when returning an unrooted value. Work
+    // around this issue by restricting the lifetime of |keywords| to a
+    // separate block.
+    auto currencies = mozilla::intl::Currency::GetISOCurrencies();
+    if (currencies.isErr()) {
+      intl::ReportInternalError(cx, currencies.unwrapErr());
+      return nullptr;
+    }
+
+    static constexpr auto& unsupported = UnsupportedCurrenciesArray;
+
+    if (!EnumerationIntoList<unsupported>(cx, currencies.unwrap(), &list)) {
+      return nullptr;
+    }
   }
 
   return CreateArrayFromList(cx, &list);
@@ -806,7 +712,8 @@ static ArrayObject* AvailableNumberingSystems(JSContext* cx) {
  * AvailableTimeZones ( )
  */
 static ArrayObject* AvailableTimeZones(JSContext* cx) {
-  // Unsorted list of canonical time zone names, possibly containing duplicates.
+  // Unsorted list of canonical time zone names, possibly containing
+  // duplicates.
   Rooted<StringList> timeZones(cx, StringList(cx));
 
   intl::SharedIntlData& sharedIntlData = cx->runtime()->sharedIntlData.ref();
@@ -823,8 +730,8 @@ static ArrayObject* AvailableTimeZones(JSContext* cx) {
 
     // Canonicalize the time zone before adding it to the result array.
 
-    // Some time zone names are canonicalized differently by ICU -- handle those
-    // first.
+    // Some time zone names are canonicalized differently by ICU -- handle
+    // those first.
     ianaTimeZone.set(nullptr);
     if (!sharedIntlData.tryCanonicalizeTimeZoneConsistentWithIANA(
             cx, validatedTimeZone, &ianaTimeZone)) {
@@ -846,14 +753,14 @@ static ArrayObject* AvailableTimeZones(JSContext* cx) {
 
       intl::FormatBuffer<char16_t, intl::INITIAL_CHAR_BUFFER_SIZE>
           canonicalTimeZone(cx);
-      auto result = mozilla::intl::Calendar::GetCanonicalTimeZoneID(
+      auto result = mozilla::intl::TimeZone::GetCanonicalTimeZoneID(
           stableChars.twoByteRange(), canonicalTimeZone);
       if (result.isErr()) {
         intl::ReportInternalError(cx, result.unwrapErr());
         return nullptr;
       }
 
-      timeZone = canonicalTimeZone.toString();
+      timeZone = canonicalTimeZone.toString(cx);
       if (!timeZone) {
         return nullptr;
       }
@@ -874,7 +781,7 @@ static ArrayObject* AvailableTimeZones(JSContext* cx) {
 }
 
 template <size_t N>
-constexpr auto MeasurementUnitNames(const MeasureUnit (&units)[N]) {
+constexpr auto MeasurementUnitNames(const intl::SimpleMeasureUnit (&units)[N]) {
   std::array<const char*, N> array = {};
   for (size_t i = 0; i < N; ++i) {
     array[i] = units[i].name;
@@ -887,7 +794,7 @@ constexpr auto MeasurementUnitNames(const MeasureUnit (&units)[N]) {
  */
 static ArrayObject* AvailableUnits(JSContext* cx) {
   static constexpr auto simpleMeasureUnitNames =
-      MeasurementUnitNames(simpleMeasureUnits);
+      MeasurementUnitNames(intl::simpleMeasureUnits);
 
   return CreateArrayFromSortedList(cx, simpleMeasureUnitNames);
 }

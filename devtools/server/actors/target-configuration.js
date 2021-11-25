@@ -10,9 +10,9 @@ const {
   targetConfigurationSpec,
 } = require("devtools/shared/specs/target-configuration");
 const {
-  WatchedDataHelpers,
-} = require("devtools/server/actors/watcher/WatchedDataHelpers.jsm");
-const { SUPPORTED_DATA } = WatchedDataHelpers;
+  SessionDataHelpers,
+} = require("devtools/server/actors/watcher/SessionDataHelpers.jsm");
+const { SUPPORTED_DATA } = SessionDataHelpers;
 const { TARGET_CONFIGURATION } = SUPPORTED_DATA;
 const Services = require("Services");
 
@@ -25,6 +25,8 @@ const SUPPORTED_OPTIONS = {
   colorSchemeSimulation: true,
   // Set a custom user agent
   customUserAgent: true,
+  // Is the client using the new performance panel.
+  isNewPerfPanelEnabled: true,
   // Enable JavaScript
   javascriptEnabled: true,
   // Force a custom device pixel ratio (used in RDM). Set to null to restore origin ratio.
@@ -101,7 +103,7 @@ const TargetConfigurationActor = ActorClassWithSpec(targetConfigurationSpec, {
   _shouldHandleConfigurationInParentProcess() {
     // Only handle parent process configuration if the watcherActor is tied to a
     // browser element (i.e. we're *not* in the Browser Toolbox)
-    return this.watcherActor.browserElement;
+    return this.watcherActor.context.type == "browser-element";
   },
 
   /**
@@ -123,8 +125,8 @@ const TargetConfigurationActor = ActorClassWithSpec(targetConfigurationSpec, {
     // If the watcher is bound to one browser element (i.e. a tab), ignore
     // updates related to other browser elements
     if (
-      this.watcherActor.browserId &&
-      browsingContext.browserId != this.watcherActor.browserId
+      this.watcherActor.context.type == "browser-element" &&
+      browsingContext.browserId != this.watcherActor.context.browserId
     ) {
       return;
     }
@@ -144,7 +146,7 @@ const TargetConfigurationActor = ActorClassWithSpec(targetConfigurationSpec, {
   },
 
   _getConfiguration() {
-    const targetConfigurationData = this.watcherActor.getWatchedData(
+    const targetConfigurationData = this.watcherActor.getSessionDataForType(
       TARGET_CONFIGURATION
     );
     if (!targetConfigurationData) {

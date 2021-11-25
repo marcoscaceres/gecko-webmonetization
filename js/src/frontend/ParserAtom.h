@@ -7,24 +7,44 @@
 #ifndef frontend_ParserAtom_h
 #define frontend_ParserAtom_h
 
-#include "mozilla/DebugOnly.h"        // mozilla::DebugOnly
 #include "mozilla/HashFunctions.h"    // mozilla::HashString
 #include "mozilla/MemoryReporting.h"  // mozilla::MallocSizeOf
 #include "mozilla/Range.h"            // mozilla::Range
 #include "mozilla/Span.h"             // mozilla::Span
-#include "mozilla/Variant.h"          // mozilla::Variant
+#include "mozilla/TextUtils.h"
 
-#include "ds/LifoAlloc.h"         // LifoAlloc
+#include <stddef.h>
+#include <stdint.h>
+
+#include "jstypes.h"
+#include "NamespaceImports.h"
+
 #include "frontend/TypedIndex.h"  // TypedIndex
 #include "js/HashTable.h"         // HashMap
-#include "js/UniquePtr.h"         // js::UniquePtr
+#include "js/ProtoKey.h"          // JS_FOR_EACH_PROTOTYPE
+#include "js/Symbol.h"            // JS_FOR_EACH_WELL_KNOWN_SYMBOL
+#include "js/TypeDecls.h"         // Latin1Char
+#include "js/Utility.h"           // UniqueChars
 #include "js/Vector.h"            // Vector
+#include "util/Text.h"            // InflatedChar16Sequence
 #include "vm/CommonPropertyNames.h"
-#include "vm/StringType.h"     // CompareChars, StringEqualsAscii
+#include "vm/StaticStrings.h"
 #include "vm/WellKnownAtom.h"  // WellKnownAtomId, WellKnownAtomInfo
+
+struct JS_PUBLIC_API JSContext;
+struct JSRuntime;
+
+class JSAtom;
+class JSString;
+
+namespace mozilla {
+union Utf8Unit;
+}
 
 namespace js {
 
+class GenericPrinter;
+class LifoAlloc;
 class StringBuffer;
 
 namespace frontend {
@@ -32,12 +52,9 @@ namespace frontend {
 struct CompilationAtomCache;
 struct CompilationStencil;
 class BorrowingCompilationStencil;
-class ParserAtom;
 
 template <typename CharT>
 class SpecificParserAtomLookup;
-
-class ParserAtomsTable;
 
 // These types correspond into indices in the StaticStrings arrays.
 enum class Length1StaticParserString : uint8_t;
@@ -336,7 +353,21 @@ class alignas(alignof(uint32_t)) ParserAtom {
   // Bit flags inside flags_.
   static constexpr uint32_t HasTwoByteCharsFlag = 1 << 0;
   static constexpr uint32_t UsedByStencilFlag = 1 << 1;
+  static constexpr uint32_t AtomizeFlag = 1 << 2;
 
+ public:
+  // Whether to atomize the ParserAtom during instantiation.
+  //
+  // If this ParserAtom is used by opcode with JOF_ATOM, or used as a binding
+  // in scope, it needs to be instantiated as JSAtom.
+  // Otherwise, it needs to be instantiated as LinearString, to reduce the
+  // cost of atomization.
+  enum class Atomize : uint32_t {
+    No = 0,
+    Yes = AtomizeFlag,
+  };
+
+ private:
   // Helper routine to read some sequence of two-byte chars, and write them
   // into a target buffer of a particular character width.
   //
@@ -369,8 +400,6 @@ class alignas(alignof(uint32_t)) ParserAtom {
   uint32_t flags_ = 0;
 
   // End of fields.
-
-  static const uint32_t MAX_LENGTH = JSString::MAX_LENGTH;
 
   ParserAtom(uint32_t length, HashNumber hash, bool hasTwoByteChars)
       : hash_(hash),
@@ -406,25 +435,41 @@ class alignas(alignof(uint32_t)) ParserAtom {
     return true;
   }
 
+  bool isPrivateName() const {
+    if (length() < 2) {
+      return false;
+    }
+
+    return charAt(0) == '#';
+  }
+
   HashNumber hash() const { return hash_; }
   uint32_t length() const { return length_; }
 
   bool isUsedByStencil() const { return flags_ & UsedByStencilFlag; }
 
+ private:
+  bool isMarkedAtomize() const { return flags_ & AtomizeFlag; }
+
+  static constexpr uint32_t MinimumLengthForNonAtom = 8;
+
+ public:
+  bool isInstantiatedAsJSAtom() const;
+
   template <typename CharT>
   bool equalsSeq(HashNumber hash, InflatedChar16Sequence<CharT> seq) const;
 
   // Convert NotInstantiated and usedByStencil entry to a js-atom.
-  JSAtom* instantiate(JSContext* cx, ParserAtomIndex index,
-                      CompilationAtomCache& atomCache) const;
+  JSString* instantiateString(JSContext* cx, ParserAtomIndex index,
+                              CompilationAtomCache& atomCache) const;
+  JSAtom* instantiateAtom(JSContext* cx, ParserAtomIndex index,
+                          CompilationAtomCache& atomCache) const;
 
  private:
-  void markUsedByStencil() { flags_ |= UsedByStencilFlag; }
-
-  constexpr void setHashAndLength(HashNumber hash, uint32_t length) {
-    hash_ = hash;
-    length_ = length;
+  void markUsedByStencil(Atomize atomize) {
+    flags_ |= UsedByStencilFlag | uint32_t(atomize);
   }
+  void markAtomize(Atomize atomize) { flags_ |= uint32_t(atomize); }
 
   template <typename CharT>
   const CharT* chars() const {
@@ -533,8 +578,7 @@ class WellKnownParserAtoms {
     static_assert(std::is_same_v<CharsT, const Latin1Char*> ||
                       std::is_same_v<CharsT, const char16_t*> ||
                       std::is_same_v<CharsT, const char*> ||
-                      std::is_same_v<CharsT, char16_t*> ||
-                      std::is_same_v<CharsT, LittleEndianChars>,
+                      std::is_same_v<CharsT, char16_t*>,
                   "This assert mostly explicitly documents the calling types, "
                   "and forces that to be updated if new types show up.");
     switch (length) {
@@ -641,8 +685,23 @@ class ParserAtomsTable {
                                      CompilationAtomCache& atomCache,
                                      JSAtom* atom);
 
+  // Intern ParserAtom data from other ParserAtomTable.
+  // This copies flags as well.
   TaggedParserAtomIndex internExternalParserAtom(JSContext* cx,
                                                  const ParserAtom* atom);
+
+  // The atomIndex given as argument is in relation with the context Stencil.
+  // The atomIndex might be a well-known or static, in which case this function
+  // is a no-op.
+  TaggedParserAtomIndex internExternalParserAtomIndex(
+      JSContext* cx, const CompilationStencil& context,
+      TaggedParserAtomIndex atomIndex);
+
+  // Compare an internal atom index with an external atom index coming from the
+  // stencil given as argument.
+  bool isEqualToExternalParserAtomIndex(TaggedParserAtomIndex internal,
+                                        const CompilationStencil& context,
+                                        TaggedParserAtomIndex external) const;
 
   bool addPlaceholder(JSContext* cx);
 
@@ -660,10 +719,14 @@ class ParserAtomsTable {
       TaggedParserAtomIndex index) const;
   bool isModuleExportName(TaggedParserAtomIndex index) const;
   bool isIndex(TaggedParserAtomIndex index, uint32_t* indexp) const;
+  bool isInstantiatedAsJSAtom(TaggedParserAtomIndex index) const;
   uint32_t length(TaggedParserAtomIndex index) const;
 
   // Methods for atom.
-  void markUsedByStencil(TaggedParserAtomIndex index) const;
+  void markUsedByStencil(TaggedParserAtomIndex index,
+                         ParserAtom::Atomize atomize) const;
+  void markAtomize(TaggedParserAtomIndex index,
+                   ParserAtom::Atomize atomize) const;
   bool toNumber(JSContext* cx, TaggedParserAtomIndex index,
                 double* result) const;
   UniqueChars toNewUTF8CharsZ(JSContext* cx, TaggedParserAtomIndex index) const;
@@ -672,6 +735,11 @@ class ParserAtomsTable {
   UniqueChars toQuotedString(JSContext* cx, TaggedParserAtomIndex index) const;
   JSAtom* toJSAtom(JSContext* cx, TaggedParserAtomIndex index,
                    CompilationAtomCache& atomCache) const;
+
+ private:
+  JSAtom* toWellKnownJSAtom(JSContext* cx, TaggedParserAtomIndex index) const;
+
+ public:
   bool appendTo(StringBuffer& buffer, TaggedParserAtomIndex index) const;
 
  public:

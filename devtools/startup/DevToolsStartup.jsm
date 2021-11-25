@@ -9,9 +9,9 @@
  * It manages all the possible entry points for DevTools:
  * - Handles command line arguments like -jsconsole,
  * - Register all key shortcuts,
- * - Listen for "Web Developer" system menu opening, under "Tools",
+ * - Listen for "Browser Tools" system menu opening, under "Tools",
  * - Inject the wrench icon in toolbar customization, which is used
- *   by the "Web Developer" list displayed in the hamburger menu,
+ *   by the "Browser Tools" list displayed in the hamburger menu,
  * - Register the JSON Viewer protocol handler.
  * - Inject the profiler recording button in toolbar customization.
  *
@@ -81,7 +81,7 @@ ChromeUtils.defineModuleGetter(
 // our own lazy require.
 XPCOMUtils.defineLazyGetter(this, "Telemetry", function() {
   const { require } = ChromeUtils.import(
-    "resource://devtools/shared/Loader.jsm"
+    "resource://devtools/shared/loader/Loader.jsm"
   );
   // eslint-disable-next-line no-shadow
   const Telemetry = require("devtools/client/shared/telemetry");
@@ -95,8 +95,7 @@ XPCOMUtils.defineLazyGetter(this, "StartupBundle", function() {
 });
 
 XPCOMUtils.defineLazyGetter(this, "KeyShortcutsBundle", function() {
-  const url = "chrome://devtools-startup/locale/key-shortcuts.properties";
-  return Services.strings.createBundle(url);
+  return new Localization(["devtools/startup/key-shortcuts.ftl"], true);
 });
 
 /**
@@ -114,7 +113,7 @@ XPCOMUtils.defineLazyGetter(this, "KeyShortcutsBundle", function() {
  */
 function getLocalizedKeyShortcut(id) {
   try {
-    return KeyShortcutsBundle.GetStringFromName(id);
+    return KeyShortcutsBundle.formatValueSync(id);
   } catch (e) {
     console.error("Failed to retrieve DevTools localized shortcut for id", id);
     return null;
@@ -137,31 +136,35 @@ XPCOMUtils.defineLazyGetter(this, "KeyShortcuts", function() {
     // or the default one.
     {
       id: "toggleToolbox",
-      shortcut: getLocalizedKeyShortcut("toggleToolbox.commandkey"),
+      shortcut: getLocalizedKeyShortcut("devtools-commandkey-toggle-toolbox"),
       modifiers,
     },
     // All locales are using F12
     {
       id: "toggleToolboxF12",
-      shortcut: getLocalizedKeyShortcut("toggleToolboxF12.commandkey"),
+      shortcut: getLocalizedKeyShortcut(
+        "devtools-commandkey-toggle-toolbox-f12"
+      ),
       modifiers: "", // F12 is the only one without modifiers
     },
     // Open the Browser Toolbox
     {
       id: "browserToolbox",
-      shortcut: getLocalizedKeyShortcut("browserToolbox.commandkey"),
+      shortcut: getLocalizedKeyShortcut("devtools-commandkey-browser-toolbox"),
       modifiers: "accel,alt,shift",
     },
     // Open the Browser Console
     {
       id: "browserConsole",
-      shortcut: getLocalizedKeyShortcut("browserConsole.commandkey"),
+      shortcut: getLocalizedKeyShortcut("devtools-commandkey-browser-console"),
       modifiers: "accel,shift",
     },
     // Toggle the Responsive Design Mode
     {
       id: "responsiveDesignMode",
-      shortcut: getLocalizedKeyShortcut("responsiveDesignMode.commandkey"),
+      shortcut: getLocalizedKeyShortcut(
+        "devtools-commandkey-responsive-design-mode"
+      ),
       modifiers,
     },
     // The following keys are also registered in /client/definitions.js
@@ -170,55 +173,57 @@ XPCOMUtils.defineLazyGetter(this, "KeyShortcuts", function() {
     // Key for opening the Inspector
     {
       toolId: "inspector",
-      shortcut: getLocalizedKeyShortcut("inspector.commandkey"),
+      shortcut: getLocalizedKeyShortcut("devtools-commandkey-inspector"),
       modifiers,
     },
     // Key for opening the Web Console
     {
       toolId: "webconsole",
-      shortcut: getLocalizedKeyShortcut("webconsole.commandkey"),
+      shortcut: getLocalizedKeyShortcut("devtools-commandkey-webconsole"),
       modifiers,
     },
     // Key for opening the Debugger
     {
       toolId: "jsdebugger",
-      shortcut: getLocalizedKeyShortcut("jsdebugger.commandkey2"),
+      shortcut: getLocalizedKeyShortcut("devtools-commandkey-jsdebugger"),
       modifiers,
     },
     // Key for opening the Network Monitor
     {
       toolId: "netmonitor",
-      shortcut: getLocalizedKeyShortcut("netmonitor.commandkey"),
+      shortcut: getLocalizedKeyShortcut("devtools-commandkey-netmonitor"),
       modifiers,
     },
     // Key for opening the Style Editor
     {
       toolId: "styleeditor",
-      shortcut: getLocalizedKeyShortcut("styleeditor.commandkey"),
+      shortcut: getLocalizedKeyShortcut("devtools-commandkey-styleeditor"),
       modifiers: "shift",
     },
     // Key for opening the Performance Panel
     {
       toolId: "performance",
-      shortcut: getLocalizedKeyShortcut("performance.commandkey"),
+      shortcut: getLocalizedKeyShortcut("devtools-commandkey-performance"),
       modifiers: "shift",
     },
     // Key for opening the Storage Panel
     {
       toolId: "storage",
-      shortcut: getLocalizedKeyShortcut("storage.commandkey"),
+      shortcut: getLocalizedKeyShortcut("devtools-commandkey-storage"),
       modifiers: "shift",
     },
     // Key for opening the DOM Panel
     {
       toolId: "dom",
-      shortcut: getLocalizedKeyShortcut("dom.commandkey"),
+      shortcut: getLocalizedKeyShortcut("devtools-commandkey-dom"),
       modifiers,
     },
     // Key for opening the Accessibility Panel
     {
       toolId: "accessibility",
-      shortcut: getLocalizedKeyShortcut("accessibilityF12.commandkey"),
+      shortcut: getLocalizedKeyShortcut(
+        "devtools-commandkey-accessibility-f12"
+      ),
       modifiers: "shift",
     },
   ];
@@ -229,7 +234,7 @@ XPCOMUtils.defineLazyGetter(this, "KeyShortcuts", function() {
     shortcuts.push({
       id: "inspectorMac",
       toolId: "inspector",
-      shortcut: getLocalizedKeyShortcut("inspector.commandkey"),
+      shortcut: getLocalizedKeyShortcut("devtools-commandkey-inspector"),
       modifiers: "accel,shift",
     });
   }
@@ -246,13 +251,15 @@ function getProfilerKeyShortcuts() {
     // Start/stop the profiler
     {
       id: "profilerStartStop",
-      shortcut: getLocalizedKeyShortcut("profilerStartStop.commandkey"),
+      shortcut: getLocalizedKeyShortcut(
+        "devtools-commandkey-profiler-start-stop"
+      ),
       modifiers: "control,shift",
     },
     // Capture a profile
     {
       id: "profilerCapture",
-      shortcut: getLocalizedKeyShortcut("profilerCapture.commandkey"),
+      shortcut: getLocalizedKeyShortcut("devtools-commandkey-profiler-capture"),
       modifiers: "control,shift",
     },
   ];
@@ -516,7 +523,7 @@ DevToolsStartup.prototype = {
     // The developer menu hook only needs to be added if devtools have not been
     // initialized yet.
     if (!this.initialized) {
-      this.hookWebDeveloperMenu(window);
+      this.hookBrowserToolsMenu(window);
     }
 
     this.createDevToolsEnableMenuItem(window);
@@ -529,13 +536,13 @@ DevToolsStartup.prototype = {
    * and dragging it from the customization panel to the toolbar.
    * (i.e. this isn't displayed by default to users!)
    *
-   * _But_, the "Web Developer" entry in the hamburger menu (the menu with
+   * _But_, the "Browser Tools" entry in the hamburger menu (the menu with
    * 3 horizontal lines), is using this "developer-button" view to populate
    * its menu. So we have to register this button for the menu to work.
    *
-   * Also, this menu duplicates its own entries from the "Web Developer"
+   * Also, this menu duplicates its own entries from the "Browser Tools"
    * menu in the system menu, under "Tools" main menu item. The system
-   * menu is being hooked by "hookWebDeveloperMenu" which ends up calling
+   * menu is being hooked by "hookBrowserToolsMenu" which ends up calling
    * devtools/client/framework/browser-menus to create the items for real,
    * initDevTools, from onViewShowing is also calling browser-menu.
    */
@@ -682,12 +689,12 @@ DevToolsStartup.prototype = {
   },
 
   /*
-   * We listen to the "Web Developer" system menu, which is under "Tools" main item.
+   * We listen to the "Browser Tools" system menu, which is under "Tools" main item.
    * This menu item is hardcoded empty in Firefox UI. We listen for its opening to
    * populate it lazily. Loading main DevTools module is going to populate it.
    */
-  hookWebDeveloperMenu(window) {
-    const menu = window.document.getElementById("webDeveloperMenu");
+  hookBrowserToolsMenu(window) {
+    const menu = window.document.getElementById("browserToolsMenu");
     const onPopupShowing = () => {
       if (!Services.prefs.getBoolPref(DEVTOOLS_ENABLED_PREF)) {
         return;
@@ -923,7 +930,7 @@ DevToolsStartup.prototype = {
 
     this.initialized = true;
     const { require } = ChromeUtils.import(
-      "resource://devtools/shared/Loader.jsm"
+      "resource://devtools/shared/loader/Loader.jsm"
     );
     // Ensure loading main devtools module that hooks up into browser UI
     // and initialize all devtools machinery.
@@ -1113,7 +1120,7 @@ DevToolsStartup.prototype = {
     }
 
     const { DevToolsLoader } = ChromeUtils.import(
-      "resource://devtools/shared/Loader.jsm"
+      "resource://devtools/shared/loader/Loader.jsm"
     );
 
     try {

@@ -15,6 +15,7 @@
 #include "ConnectionEntry.h"
 #include "nsQueryObject.h"
 #include "mozilla/ChaosMode.h"
+#include "nsHttpHandler.h"
 
 namespace mozilla {
 namespace net {
@@ -215,7 +216,7 @@ void ConnectionEntry::InsertTransaction(
     bool aInsertAsFirstForTheSamePriority /* = false */) {
   mPendingQ.InsertTransaction(pendingTransInfo,
                               aInsertAsFirstForTheSamePriority);
-  pendingTransInfo->Transaction()->OnPendingQueueInserted();
+  pendingTransInfo->Transaction()->OnPendingQueueInserted(mConnInfo->HashKey());
 }
 
 nsTArray<RefPtr<PendingTransactionInfo>>*

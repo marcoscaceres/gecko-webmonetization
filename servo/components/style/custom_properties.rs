@@ -71,10 +71,31 @@ static ENVIRONMENT_VARIABLES: [EnvironmentVariable; 4] = [
     make_variable!(atom!("safe-area-inset-right"), get_safearea_inset_right),
 ];
 
+fn get_titlebar_radius(device: &Device) -> VariableValue {
+    VariableValue::pixel(device.titlebar_radius())
+}
+
+fn get_menu_radius(device: &Device) -> VariableValue {
+    VariableValue::pixel(device.menu_radius())
+}
+
+static CHROME_ENVIRONMENT_VARIABLES: [EnvironmentVariable; 2] = [
+    make_variable!(atom!("-moz-gtk-csd-titlebar-radius"), get_titlebar_radius),
+    make_variable!(atom!("-moz-gtk-menu-radius"), get_menu_radius),
+];
+
 impl CssEnvironment {
     #[inline]
     fn get(&self, name: &Atom, device: &Device) -> Option<VariableValue> {
-        let var = ENVIRONMENT_VARIABLES.iter().find(|var| var.name == *name)?;
+        if let Some(var) = ENVIRONMENT_VARIABLES.iter().find(|var| var.name == *name) {
+            return Some((var.evaluator)(device));
+        }
+        if !device.is_chrome_document() {
+            return None;
+        }
+        let var = CHROME_ENVIRONMENT_VARIABLES
+            .iter()
+            .find(|var| var.name == *name)?;
         Some((var.evaluator)(device))
     }
 }
@@ -663,10 +684,7 @@ impl<'a> CustomPropertiesBuilder<'a> {
 /// (meaning we should use the inherited value).
 ///
 /// It does cycle dependencies removal at the same time as substitution.
-fn substitute_all(
-    custom_properties_map: &mut CustomPropertiesMap,
-    device: &Device,
-) {
+fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, device: &Device) {
     // The cycle dependencies removal in this function is a variant
     // of Tarjan's algorithm. It is mostly based on the pseudo-code
     // listed in
@@ -980,7 +998,9 @@ fn substitute_block<'i>(
                         let first_token_type = input
                             .next_including_whitespace_and_comments()
                             .ok()
-                            .map_or_else(TokenSerializationType::nothing, |t| t.serialization_type());
+                            .map_or_else(TokenSerializationType::nothing, |t| {
+                                t.serialization_type()
+                            });
                         input.reset(&after_comma);
                         let mut position = (after_comma.position(), first_token_type);
                         last_token_type = substitute_block(
@@ -995,7 +1015,7 @@ fn substitute_block<'i>(
                     Ok(())
                 })?;
                 set_position_at_next_iteration = true
-            }
+            },
             Token::Function(_) |
             Token::ParenthesisBlock |
             Token::CurlyBracketBlock |

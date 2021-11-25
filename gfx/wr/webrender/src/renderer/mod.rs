@@ -35,7 +35,7 @@
 //! calling `DrawTarget::to_framebuffer_rect`
 
 use api::{BlobImageHandler, ColorF, ColorU, MixBlendMode};
-use api::{DocumentId, Epoch, ExternalImageHandler};
+use api::{DocumentId, Epoch, ExternalImageHandler, RenderReasons};
 use api::CrashAnnotator;
 #[cfg(feature = "replay")]
 use api::ExternalImageId;
@@ -46,11 +46,11 @@ use api::{RenderNotifier, ImageBufferKind, SharedFontInstanceMap};
 #[cfg(feature = "replay")]
 use api::ExternalImage;
 use api::units::*;
-use api::channel::{unbounded_channel, Receiver};
+use api::channel::{unbounded_channel, Sender, Receiver};
 pub use api::DebugFlags;
 use core::time::Duration;
 
-use crate::render_api::{RenderApiSender, DebugCommand, FrameMsg, MemoryReport};
+use crate::render_api::{RenderApiSender, DebugCommand, FrameMsg, ApiMsg, MemoryReport};
 use crate::batch::{AlphaBatchContainer, BatchKind, BatchFeatures, BatchTextures, BrushBatchKind, ClipBatchList};
 #[cfg(any(feature = "capture", feature = "replay"))]
 use crate::capture::{CaptureConfig, ExternalCaptureImage, PlainExternalImage};
@@ -58,7 +58,6 @@ use crate::composite::{CompositeState, CompositeTileSurface, ResolvedExternalSur
 use crate::composite::{CompositorKind, Compositor, NativeTileId, CompositeFeatures, CompositeSurfaceFormat, ResolvedExternalSurfaceColorData};
 use crate::composite::{CompositorConfig, NativeSurfaceOperationDetails, NativeSurfaceId, NativeSurfaceOperation};
 use crate::composite::TileKind;
-use crate::c_str;
 use crate::debug_colors;
 use crate::device::{DepthFunction, Device, DrawTarget, ExternalTexture, GpuFrameId};
 use crate::device::{ProgramCache, ReadTarget, ShaderError, Texture, TextureFilter, TextureFlags, TextureSlot};
@@ -72,9 +71,9 @@ use crate::glyph_cache::GlyphCache;
 use crate::glyph_rasterizer::{GlyphFormat, GlyphRasterizer};
 use crate::gpu_cache::{GpuCacheUpdate, GpuCacheUpdateList};
 use crate::gpu_cache::{GpuCacheDebugChunk, GpuCacheDebugCmd};
-use crate::gpu_types::{PrimitiveInstanceData, ScalingInstance, SvgFilterInstance};
+use crate::gpu_types::{PrimitiveInstanceData, ScalingInstance, SvgFilterInstance, CopyInstance};
 use crate::gpu_types::{BlurInstance, ClearInstance, CompositeInstance, ZBufferId, CompositorTransform};
-use crate::internal_types::{TextureSource, ResourceCacheError, TextureCacheCategory};
+use crate::internal_types::{TextureSource, ResourceCacheError, TextureCacheCategory, FrameId};
 #[cfg(any(feature = "capture", feature = "replay"))]
 use crate::internal_types::DebugOutput;
 use crate::internal_types::{CacheTextureId, FastHashMap, FastHashSet, RenderedDocument, ResultMsg};
@@ -85,7 +84,7 @@ use crate::prim_store::DeferredResolve;
 use crate::profiler::{self, GpuProfileTag, TransactionProfile};
 use crate::profiler::{Profiler, add_event_marker, add_text_marker, thread_is_being_profiled};
 use crate::device::query::{GpuProfiler, GpuDebugMethod};
-use crate::render_backend::{FrameId, RenderBackend};
+use crate::render_backend::RenderBackend;
 use crate::render_task_graph::RenderTaskGraph;
 use crate::render_task::{RenderTask, RenderTaskKind, ReadbackTask};
 use crate::resource_cache::ResourceCache;
@@ -95,6 +94,7 @@ use crate::render_target::{AlphaRenderTarget, ColorRenderTarget, PictureCacheTar
 use crate::render_target::{RenderTarget, TextureCacheRenderTarget};
 use crate::render_target::{RenderTargetKind, BlitJob};
 use crate::texture_cache::{TextureCache, TextureCacheConfig};
+use crate::picture_textures::PictureTextures;
 use crate::tile_cache::PictureCacheDebugInfo;
 use crate::util::drain_filter;
 use crate::rectangle_occlusion as occlusion;
@@ -757,6 +757,7 @@ impl BufferDamageTracker {
 /// one per OS window), and all instances share the same thread.
 pub struct Renderer {
     result_rx: Receiver<ResultMsg>,
+    api_tx: Sender<ApiMsg>,
     pub device: Device,
     pending_texture_updates: Vec<TextureUpdateList>,
     /// True if there are any TextureCacheUpdate pending.
@@ -879,6 +880,10 @@ pub struct Renderer {
 
     max_primitive_instance_count: usize,
     enable_instancing: bool,
+
+    /// Count consecutive oom frames to detectif we are stuck unable to render
+    /// in a loop.
+    consecutive_oom_frames: u32,
 }
 
 #[derive(Debug)]
@@ -888,6 +893,7 @@ pub enum RendererError {
     Resource(ResourceCacheError),
     MaxTextureSize,
     SoftwareRasterizer,
+    OutOfMemory,
 }
 
 impl From<ShaderError> for RendererError {
@@ -958,6 +964,7 @@ impl Renderer {
             options.resource_override_path.clone(),
             options.use_optimized_shaders,
             options.upload_method.clone(),
+            options.batched_upload_threshold,
             options.cached_programs.take(),
             options.allow_texture_storage_support,
             options.allow_texture_swizzling,
@@ -1280,10 +1287,13 @@ impl Renderer {
             let texture_cache = TextureCache::new(
                 max_internal_texture_size,
                 image_tiling_threshold,
-                picture_tile_size,
                 color_cache_formats,
                 swizzle_settings,
                 &texture_cache_config,
+            );
+
+            let picture_textures = PictureTextures::new(
+                picture_tile_size,
                 picture_texture_filter,
             );
 
@@ -1291,6 +1301,7 @@ impl Renderer {
 
             let mut resource_cache = ResourceCache::new(
                 texture_cache,
+                picture_textures,
                 glyph_rasterizer,
                 glyph_cache,
                 rb_font_instances,
@@ -1335,6 +1346,7 @@ impl Renderer {
 
         let mut renderer = Renderer {
             result_rx,
+            api_tx: api_tx.clone(),
             device,
             active_documents: FastHashMap::default(),
             pending_texture_updates: Vec::new(),
@@ -1396,6 +1408,7 @@ impl Renderer {
             buffer_damage_tracker: BufferDamageTracker::default(),
             max_primitive_instance_count,
             enable_instancing: options.enable_instancing,
+            consecutive_oom_frames: 0,
         };
 
         // We initially set the flags to default and then now call set_debug_flags
@@ -1489,6 +1502,7 @@ impl Renderer {
                         doc.profile.merge(&mut prev_doc.profile);
 
                         if prev_doc.frame.must_be_drawn() {
+                            prev_doc.render_reasons |= RenderReasons::TEXTURE_CACHE_FLUSH;
                             self.render_impl(
                                 document_id,
                                 &mut prev_doc,
@@ -1616,6 +1630,9 @@ impl Renderer {
                 ResultMsg::RefreshShader(path) => {
                     self.pending_shader_updates.push(path);
                 }
+                ResultMsg::SetParameter(ref param) => {
+                    self.device.set_parameter(param);
+                }
                 ResultMsg::DebugOutput(output) => match output {
                     #[cfg(feature = "capture")]
                     DebugOutput::SaveCapture(config, deferred) => {
@@ -1649,8 +1666,7 @@ impl Renderer {
             DebugCommand::ClearCaches(_)
             | DebugCommand::SimulateLongSceneBuild(_)
             | DebugCommand::EnableNativeCompositor(_)
-            | DebugCommand::SetBatchingLookback(_)
-            | DebugCommand::EnableMultithreading(_) => {}
+            | DebugCommand::SetBatchingLookback(_) => {}
             DebugCommand::InvalidateGpuCache => {
                 self.gpu_cache_texture.invalidate();
             }
@@ -1727,6 +1743,25 @@ impl Renderer {
             |n| { n.when() == Checkpoint::FrameRendered },
             |n| { n.notify(); },
         );
+
+        let mut oom = false;
+        if let Err(ref errors) = result {
+            for error in errors {
+                if matches!(error, &RendererError::OutOfMemory) {
+                    oom = true;
+                    break;
+                }
+            }
+        }
+
+        if oom {
+            let _ = self.api_tx.send(ApiMsg::MemoryPressure);
+            // Ensure we don't get stuck in a loop.
+            self.consecutive_oom_frames += 1;
+            assert!(self.consecutive_oom_frames < 5, "Renderer out of memory");
+        } else {
+            self.consecutive_oom_frames = 0;
+        }
 
         // This is the end of the rendering pipeline. If some notifications are is still there,
         // just clear them and they will autimatically fire the Checkpoint::TransactionDropped
@@ -1976,7 +2011,7 @@ impl Renderer {
                     let duration = Duration::new(0,0);
                     if let Some(n) = self.profile.get(profiler::RENDERED_PICTURE_TILES) {
                         let message = (n as usize).to_string();
-                        add_text_marker(cstr!("NumPictureCacheInvalidated"), &message, duration);
+                        add_text_marker("NumPictureCacheInvalidated", &message, duration);
                     }
                 }
 
@@ -2033,7 +2068,7 @@ impl Renderer {
         if thread_is_being_profiled() {
             let duration = Duration::new(0,0);
             let message = (self.profile.get_or(profiler::DRAW_CALLS, 0.0) as usize).to_string();
-            add_text_marker(cstr!("NumDrawCalls"), &message, duration);
+            add_text_marker("NumDrawCalls", &message, duration);
         }
 
         let report = self.texture_resolver.report_memory();
@@ -2057,6 +2092,29 @@ impl Renderer {
 
           self.profiler.update_frame_stats(stats);
         }
+
+        // Turn the render reasons bitflags into something we can see in the profiler.
+        // For now this is just a binary yes/no for each bit, which means that when looking
+        // at "Render reasons" in the profiler HUD the average view indicates the proportion
+        // of frames that had the bit set over a half second window whereas max shows whether
+        // the bit as been set at least once during that time window.
+        // We could implement better ways to visualize this information.
+        let add_markers = thread_is_being_profiled();
+        for i in 0..RenderReasons::NUM_BITS {
+            let counter = profiler::RENDER_REASON_FIRST + i as usize;
+            let mut val = 0.0;
+            let reason_bit = RenderReasons::from_bits_truncate(1 << i);
+            if active_doc.render_reasons.contains(reason_bit) {
+                val = 1.0;
+                if add_markers {
+                    let event_str = format!("Render reason {:?}", reason_bit);
+                    add_event_marker(&event_str);
+                }
+            }
+            self.profile.set(counter, val);
+        }
+        active_doc.render_reasons = RenderReasons::empty();
+
 
         self.texture_resolver.update_profile(&mut self.profile);
 
@@ -2128,6 +2186,8 @@ impl Renderer {
         self.documents_seen.clear();
         self.shared_texture_cache_cleared = false;
 
+        self.check_gl_errors();
+
         if self.renderer_errors.is_empty() {
             Ok(results)
         } else {
@@ -2190,6 +2250,45 @@ impl Renderer {
         let mut delete_cache_texture_time = 0;
 
         for update_list in pending_texture_updates.drain(..) {
+            // Handle copies from one texture to another.
+            for ((src_tex, dst_tex), copies) in &update_list.copies {
+
+                let dest_texture = &self.texture_resolver.texture_cache_map[&dst_tex].texture;
+                let dst_texture_size = dest_texture.get_dimensions().to_f32();
+
+                let mut copy_instances = Vec::new();
+                for copy in copies {
+                    copy_instances.push(CopyInstance {
+                        src_rect: copy.src_rect.to_f32(),
+                        dst_rect: copy.dst_rect.to_f32(),
+                        dst_texture_size,
+                    });
+                }
+
+                let draw_target = DrawTarget::from_texture(dest_texture, false);
+                self.device.bind_draw_target(draw_target);
+
+                self.shaders
+                    .borrow_mut()
+                    .ps_copy
+                    .bind(
+                        &mut self.device,
+                        &Transform3D::identity(),
+                        None,
+                        &mut self.renderer_errors,
+                        &mut self.profile,
+                    );
+
+                self.draw_instanced_batch(
+                    &copy_instances,
+                    VertexArrayKind::Copy,
+                    &BatchTextures::composite_rgb(
+                        TextureSource::TextureCache(*src_tex, Swizzle::default())
+                    ),
+                    &mut RendererStats::default(),
+                );
+            }
+
             // Find any textures that will need to be deleted in this group of allocations.
             let mut pending_deletes = Vec::new();
             for allocation in &update_list.allocations {
@@ -2235,11 +2334,12 @@ impl Renderer {
                     TextureCacheAllocationKind::Free => {}
                 }
             }
+
             // Now that we've saved as many deletions for reuse as we can, actually delete whatever is left.
             if !pending_deletes.is_empty() {
                 let delete_texture_start = precise_time_ns();
                 for (texture, _) in pending_deletes {
-                    add_event_marker(c_str!("TextureCacheFree"));
+                    add_event_marker("TextureCacheFree");
                     self.device.delete_texture(texture);
                 }
                 delete_cache_texture_time += precise_time_ns() - delete_texture_start;
@@ -2247,8 +2347,8 @@ impl Renderer {
 
             for allocation in update_list.allocations {
                 match allocation.kind {
-                    TextureCacheAllocationKind::Alloc(_) => add_event_marker(c_str!("TextureCacheAlloc")),
-                    TextureCacheAllocationKind::Reset(_) => add_event_marker(c_str!("TextureCacheReset")),
+                    TextureCacheAllocationKind::Alloc(_) => add_event_marker("TextureCacheAlloc"),
+                    TextureCacheAllocationKind::Reset(_) => add_event_marker("TextureCacheReset"),
                     TextureCacheAllocationKind::Free => {}
                 };
                 match allocation.kind {
@@ -2306,6 +2406,8 @@ impl Renderer {
             }
 
             upload_to_texture_cache(self, update_list.updates);
+
+            self.check_gl_errors();
         }
 
         if create_cache_texture_time > 0 {
@@ -2329,6 +2431,15 @@ impl Renderer {
             |n| { n.when() == Checkpoint::FrameTexturesUpdated },
             |n| { n.notify(); },
         );
+    }
+
+    fn check_gl_errors(&mut self) {
+        let err = self.device.gl().get_error();
+        if err == gl::OUT_OF_MEMORY {
+            self.renderer_errors.push(RendererError::OutOfMemory);
+        }
+
+        // Probably should check for other errors?
     }
 
     fn bind_textures(&mut self, textures: &BatchTextures) {
@@ -4194,7 +4305,6 @@ impl Renderer {
                     ExternalTexture::new(
                         texture_id,
                         texture_target,
-                        Swizzle::default(),
                         image.uv,
                     )
                 }
@@ -4209,7 +4319,6 @@ impl Renderer {
                     ExternalTexture::new(
                         0,
                         texture_target,
-                        Swizzle::default(),
                         image.uv,
                     )
                 }
@@ -4295,6 +4404,7 @@ impl Renderer {
 
             if can_use_partial_present {
                 let mut combined_dirty_rect = DeviceRect::zero();
+                let fb_rect = DeviceRect::from_size(draw_target_dimensions.to_f32());
 
                 // Work out how many dirty rects WR produced, and if that's more than
                 // what the device supports.
@@ -4306,7 +4416,14 @@ impl Renderer {
                         &tile.local_dirty_rect,
                         tile.transform_index,
                     );
-                    combined_dirty_rect = combined_dirty_rect.union(&dirty_rect);
+
+                    // In pathological cases where a tile is extremely zoomed, it
+                    // may end up with device coords outside the range of an i32,
+                    // so clamp it to the frame buffer rect here, before it gets
+                    // casted to an i32 rect below.
+                    if let Some(dirty_rect) = dirty_rect.intersection(&fb_rect) {
+                        combined_dirty_rect = combined_dirty_rect.union(&dirty_rect);
+                    }
                 }
 
                 let combined_dirty_rect = combined_dirty_rect.round();
@@ -4802,9 +4919,6 @@ impl Renderer {
                 self.gpu_profiler.disable_samplers();
             }
         }
-
-        self.device.set_use_batched_texture_uploads(flags.contains(DebugFlags::USE_BATCHED_TEXTURE_UPLOADS));
-        self.device.set_use_draw_calls_for_texture_copy(flags.contains(DebugFlags::USE_DRAW_CALLS_FOR_TEXTURE_COPY));
 
         self.debug_flags = flags;
     }
@@ -5409,6 +5523,7 @@ pub struct RendererOptions {
     pub upload_method: UploadMethod,
     /// The default size in bytes for PBOs used to upload texture data.
     pub upload_pbo_default_size: usize,
+    pub batched_upload_threshold: i32,
     pub workers: Option<Arc<ThreadPool>>,
     pub enable_multithreading: bool,
     pub blob_image_handler: Option<Box<dyn BlobImageHandler>>,
@@ -5503,6 +5618,7 @@ impl Default for RendererOptions {
             // but we are unable to make this decision here, so picking the reasonable medium.
             upload_method: UploadMethod::PixelBuffer(ONE_TIME_USAGE_HINT),
             upload_pbo_default_size: 512 * 512 * 4,
+            batched_upload_threshold: 512 * 512,
             workers: None,
             enable_multithreading: true,
             blob_image_handler: None,

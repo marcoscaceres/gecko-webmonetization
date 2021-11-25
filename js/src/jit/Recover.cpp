@@ -1417,10 +1417,26 @@ bool MTypeOf::writeRecoverData(CompactBufferWriter& writer) const {
 RTypeOf::RTypeOf(CompactBufferReader& reader) {}
 
 bool RTypeOf::recover(JSContext* cx, SnapshotIterator& iter) const {
-  RootedValue v(cx, iter.read());
+  JS::Value v = iter.read();
 
-  RootedValue result(cx, StringValue(TypeOfOperation(v, cx->runtime())));
-  iter.storeInstructionResult(result);
+  iter.storeInstructionResult(Int32Value(TypeOfValue(v)));
+  return true;
+}
+
+bool MTypeOfName::writeRecoverData(CompactBufferWriter& writer) const {
+  MOZ_ASSERT(canRecoverOnBailout());
+  writer.writeUnsigned(uint32_t(RInstruction::Recover_TypeOfName));
+  return true;
+}
+
+RTypeOfName::RTypeOfName(CompactBufferReader& reader) {}
+
+bool RTypeOfName::recover(JSContext* cx, SnapshotIterator& iter) const {
+  int32_t type = iter.read().toInt32();
+  MOZ_ASSERT(JSTYPE_UNDEFINED <= type && type < JSTYPE_LIMIT);
+
+  JSString* name = TypeName(JSType(type), *cx->runtime()->commonNames);
+  iter.storeInstructionResult(StringValue(name));
   return true;
 }
 
@@ -1674,31 +1690,6 @@ bool RNewIterator::recover(JSContext* cx, SnapshotIterator& iter) const {
     return false;
   }
 
-  result.setObject(*resultObject);
-  iter.storeInstructionResult(result);
-  return true;
-}
-
-bool MCreateThisWithTemplate::writeRecoverData(
-    CompactBufferWriter& writer) const {
-  MOZ_ASSERT(canRecoverOnBailout());
-  writer.writeUnsigned(uint32_t(RInstruction::Recover_CreateThisWithTemplate));
-  return true;
-}
-
-RCreateThisWithTemplate::RCreateThisWithTemplate(CompactBufferReader& reader) {}
-
-bool RCreateThisWithTemplate::recover(JSContext* cx,
-                                      SnapshotIterator& iter) const {
-  RootedObject templateObject(cx, &iter.read().toObject());
-
-  // See CodeGenerator::visitCreateThisWithTemplate
-  JSObject* resultObject = CreateThisWithTemplate(cx, templateObject);
-  if (!resultObject) {
-    return false;
-  }
-
-  RootedValue result(cx);
   result.setObject(*resultObject);
   iter.storeInstructionResult(result);
   return true;
@@ -2066,5 +2057,35 @@ bool RCreateInlinedArgumentsObject::recover(JSContext* cx,
   }
 
   iter.storeInstructionResult(JS::ObjectValue(*result));
+  return true;
+}
+
+bool MRest::writeRecoverData(CompactBufferWriter& writer) const {
+  MOZ_ASSERT(canRecoverOnBailout());
+  writer.writeUnsigned(uint32_t(RInstruction::Recover_Rest));
+  writer.writeUnsigned(numFormals());
+  return true;
+}
+
+RRest::RRest(CompactBufferReader& reader) {
+  numFormals_ = reader.readUnsigned();
+}
+
+bool RRest::recover(JSContext* cx, SnapshotIterator& iter) const {
+  JitFrameLayout* frame = iter.frame();
+
+  uint32_t numActuals = iter.read().toInt32();
+  MOZ_ASSERT(numActuals == frame->numActualArgs());
+
+  uint32_t numFormals = numFormals_;
+
+  uint32_t length = std::max(numActuals, numFormals) - numFormals;
+  Value* src = frame->argv() + numFormals + 1;  // +1 to skip |this|.
+  JSObject* rest = jit::InitRestParameter(cx, length, src, nullptr);
+  if (!rest) {
+    return false;
+  }
+
+  iter.storeInstructionResult(ObjectValue(*rest));
   return true;
 }

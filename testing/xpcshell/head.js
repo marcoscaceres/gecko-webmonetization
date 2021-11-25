@@ -408,7 +408,9 @@ function _setupDevToolsServer(breakpointFiles, callback) {
 
   let require;
   try {
-    ({ require } = ChromeUtils.import("resource://devtools/shared/Loader.jsm"));
+    ({ require } = ChromeUtils.import(
+      "resource://devtools/shared/loader/Loader.jsm"
+    ));
   } catch (e) {
     throw new Error(
       "resource://devtools appears to be inaccessible from the " +
@@ -528,6 +530,12 @@ function _execute_test() {
       );
       geckoViewStartup.observe(null, "profile-after-change", null);
       geckoViewStartup.observe(null, "app-startup", null);
+
+      // Glean needs to be initialized for metric recording & tests to work.
+      // Usually this happens through Glean Kotlin,
+      // but for xpcshell tests we initialize it from here.
+      const FOG = Cc["@mozilla.org/toolkit/glean;1"].createInstance(Ci.nsIFOG);
+      FOG.initializeFOG();
     } catch (ex) {
       do_throw(`Failed to initialize GeckoView: ${ex}`, ex.stack);
     }

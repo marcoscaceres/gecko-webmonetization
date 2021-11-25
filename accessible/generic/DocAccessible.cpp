@@ -28,6 +28,7 @@
 #include "nsIDocShell.h"
 #include "mozilla/dom/Document.h"
 #include "nsPIDOMWindow.h"
+#include "nsIContentInlines.h"
 #include "nsIEditingSession.h"
 #include "nsIFrame.h"
 #include "nsIInterfaceRequestorUtils.h"
@@ -50,6 +51,7 @@
 #include "mozilla/dom/BrowserChild.h"
 #include "mozilla/dom/DocumentType.h"
 #include "mozilla/dom/Element.h"
+#include "mozilla/dom/HTMLSelectElement.h"
 #include "mozilla/dom/MutationEventBinding.h"
 #include "mozilla/dom/UserActivation.h"
 
@@ -270,9 +272,9 @@ already_AddRefed<AccAttributes> DocAccessible::Attributes() {
   // Override ARIA object attributes from outerdoc.
   aria::AttrIterator attribIter(mParent->GetContent());
   while (attribIter.Next()) {
-    nsAutoString value;
+    nsString value;
     attribIter.AttrValue(value);
-    attributes->SetAttribute(attribIter.AttrName(), value);
+    attributes->SetAttribute(attribIter.AttrName(), std::move(value));
   }
 
   return attributes.forget();
@@ -297,7 +299,7 @@ void DocAccessible::TakeFocus() const {
 already_AddRefed<EditorBase> DocAccessible::GetEditor() const {
   // Check if document is editable (designMode="on" case). Otherwise check if
   // the html:body (for HTML document case) or document element is editable.
-  if (!mDocumentNode->HasFlag(NODE_IS_EDITABLE) &&
+  if (!mDocumentNode->IsInDesignMode() &&
       (!mContent || !mContent->HasFlag(NODE_IS_EDITABLE))) {
     return nullptr;
   }
@@ -366,12 +368,27 @@ void DocAccessible::Init() {
   // Initialize notification controller.
   mNotificationController = new NotificationController(this, mPresShell);
 
-  // Mark the document accessible as loaded if its DOM document was loaded at
-  // this point (this can happen because a11y is started late or DOM document
-  // having no container was loaded.
+  // Mark the DocAccessible as loaded if its DOM document is already loaded at
+  // this point. This can happen for one of three reasons:
+  // 1. A11y was started late.
+  // 2. DOM loading for a document (probably an in-process iframe) completed
+  // before its Accessible container was created.
+  // 3. The PresShell for the document was created after DOM loading completed.
+  // In that case, we tried to create the DocAccessible when DOM loading
+  // completed, but we can't create a DocAccessible without a PresShell, so
+  // this failed. The DocAccessible was subsequently created due to a layout
+  // notification.
   if (mDocumentNode->GetReadyStateEnum() ==
       dom::Document::READYSTATE_COMPLETE) {
     mLoadState |= eDOMLoaded;
+    // If this happened due to reasons 1 or 2, it isn't *necessary* to fire a
+    // doc load complete event. If it happened due to reason 3, we need to fire
+    // doc load complete because clients (especially tests) might be waiting
+    // for the document to load using this event. We can't distinguish why this
+    // happened at this point, so just fire it regardless. It won't do any
+    // harm even if it isn't necessary. We set mLoadEventType here and it will
+    // be fired in ProcessLoad as usual.
+    mLoadEventType = nsIAccessibleEvent::EVENT_DOCUMENT_LOAD_COMPLETE;
   }
 
   AddEventListeners();
@@ -685,7 +702,21 @@ void DocAccessible::AttributeWillChange(dom::Element* aElement,
   }
 
   if (aAttribute == nsGkAtoms::id) {
+    if (accessible->IsActiveDescendant()) {
+      RefPtr<AccEvent> event =
+          new AccStateChangeEvent(accessible, states::ACTIVE, false);
+      FireDelayedEvent(event);
+    }
+
     RelocateARIAOwnedIfNeeded(aElement);
+  }
+
+  if (aAttribute == nsGkAtoms::aria_activedescendant) {
+    if (LocalAccessible* activeDescendant = accessible->CurrentItem()) {
+      RefPtr<AccEvent> event =
+          new AccStateChangeEvent(activeDescendant, states::ACTIVE, false);
+      FireDelayedEvent(event);
+    }
   }
 
   // If attribute affects accessible's state, store the old state so we can
@@ -753,7 +784,8 @@ void DocAccessible::AttributeChanged(dom::Element* aElement,
   if (aAttribute == nsGkAtoms::id) {
     dom::Element* elm = accessible->Elm();
     RelocateARIAOwnedIfNeeded(elm);
-    ARIAActiveDescendantIDMaybeMoved(elm);
+    ARIAActiveDescendantIDMaybeMoved(accessible);
+    accessible->SendCache(CacheDomain::DOMNodeID, CacheUpdateType::Update);
   }
 
   // The activedescendant universal property redirects accessible focus events
@@ -784,22 +816,25 @@ void DocAccessible::AttributeChanged(dom::Element* aElement,
 }
 
 void DocAccessible::ARIAActiveDescendantChanged(LocalAccessible* aAccessible) {
-  nsIContent* elm = aAccessible->GetContent();
-  if (elm && elm->IsElement() && aAccessible->IsActiveWidget()) {
+  if (dom::Element* elm = aAccessible->Elm()) {
     nsAutoString id;
-    if (elm->AsElement()->GetAttr(kNameSpaceID_None,
-                                  nsGkAtoms::aria_activedescendant, id)) {
+    if (elm->GetAttr(kNameSpaceID_None, nsGkAtoms::aria_activedescendant, id)) {
       dom::Element* activeDescendantElm = IDRefsIterator::GetElem(elm, id);
       if (activeDescendantElm) {
         LocalAccessible* activeDescendant = GetAccessible(activeDescendantElm);
         if (activeDescendant) {
-          FocusMgr()->ActiveItemChanged(activeDescendant, false);
+          RefPtr<AccEvent> event =
+              new AccStateChangeEvent(activeDescendant, states::ACTIVE, true);
+          FireDelayedEvent(event);
+          if (aAccessible->IsActiveWidget()) {
+            FocusMgr()->ActiveItemChanged(activeDescendant, false);
 #ifdef A11Y_LOG
-          if (logging::IsEnabled(logging::eFocus)) {
-            logging::ActiveItemChangeCausedBy("ARIA activedescedant changed",
-                                              activeDescendant);
-          }
+            if (logging::IsEnabled(logging::eFocus)) {
+              logging::ActiveItemChangeCausedBy("ARIA activedescedant changed",
+                                                activeDescendant);
+            }
 #endif
+          }
           return;
         }
       }
@@ -861,6 +896,14 @@ void DocAccessible::ContentStateChanged(dom::Document* aDocument,
         new AccStateChangeEvent(accessible, states::TRAVERSED, true);
     FireDelayedEvent(event);
   }
+
+  // We only expose NS_EVENT_STATE_DEFAULT on buttons, but we can get
+  // notifications for other controls like checkboxes.
+  if (aStateMask.HasState(NS_EVENT_STATE_DEFAULT) && accessible->IsButton()) {
+    RefPtr<AccEvent> event =
+        new AccStateChangeEvent(accessible, states::DEFAULT);
+    FireDelayedEvent(event);
+  }
 }
 
 void DocAccessible::CharacterDataWillChange(nsIContent* aContent,
@@ -885,6 +928,10 @@ void DocAccessible::ContentRemoved(nsIContent* aChildNode,
   // double processing of same subtrees. If it pops up in profiling, then
   // consider reusing a document node cache to reject these notifications early.
   ContentRemoved(aChildNode);
+}
+
+void DocAccessible::MarkForBoundsProcessing(LocalAccessible* aAcc) {
+  mMaybeBoundsChanged.EnsureInserted(aAcc);
 }
 
 void DocAccessible::ParentChainChanged(nsIContent* aContent) {}
@@ -917,8 +964,7 @@ void* DocAccessible::GetNativeWindow() const {
   nsViewManager* vm = mPresShell->GetViewManager();
   if (!vm) return nullptr;
 
-  nsCOMPtr<nsIWidget> widget;
-  vm->GetRootWidget(getter_AddRefs(widget));
+  nsCOMPtr<nsIWidget> widget = vm->GetRootWidget();
   if (widget) return widget->GetNativeData(NS_NATIVE_WINDOW);
 
   return nullptr;
@@ -1315,6 +1361,31 @@ void DocAccessible::ProcessInvalidationList() {
   mInvalidationList.Clear();
 }
 
+void DocAccessible::ProcessBoundsChanged() {
+  if (!StaticPrefs::accessibility_cache_enabled_AtStartup()) {
+    return;
+  }
+
+  nsTArray<CacheData> data;
+  for (auto* acc : mMaybeBoundsChanged) {
+    if (!acc->IsDefunct()) {
+      RefPtr<AccAttributes> fields = acc->BundleFieldsForCache(
+          CacheDomain::Bounds, CacheUpdateType::Update);
+      if (fields->Count()) {
+        data.AppendElement(CacheData(
+            acc->IsDoc() ? 0 : reinterpret_cast<uint64_t>(acc->UniqueID()),
+            fields));
+      }
+    }
+  }
+
+  mMaybeBoundsChanged.Clear();
+
+  if (data.Length()) {
+    IPCDoc()->SendCache(CacheUpdateType::Update, data, true);
+  }
+}
+
 LocalAccessible* DocAccessible::GetAccessibleEvenIfNotInMap(
     nsINode* aNode) const {
   if (!aNode->IsContent() ||
@@ -1446,6 +1517,13 @@ void DocAccessible::DoInitialUpdate() {
     DocAccessibleChild* ipcDoc = IPCDoc();
     MOZ_ASSERT(ipcDoc);
     if (ipcDoc) {
+      if (StaticPrefs::accessibility_cache_enabled_AtStartup()) {
+        // If we're caching, we should send an initial update for this document
+        // and its attributes. Each acc contained in this doc will have its
+        // initial update sent in `InsertIntoIpcTree`.
+        SendCache(CacheDomain::All, CacheUpdateType::Initial);
+      }
+
       for (auto idx = 0U; idx < mChildren.Length(); idx++) {
         ipcDoc->InsertIntoIpcTree(this, mChildren.ElementAt(idx), idx, true);
       }
@@ -1594,13 +1672,24 @@ bool DocAccessible::UpdateAccessibleOnAttrChange(dom::Element* aElement,
     return true;
   }
 
-  if (aAttribute == nsGkAtoms::aria_multiselectable &&
-      aElement->HasAttr(kNameSpaceID_None, nsGkAtoms::role)) {
-    // This affects whether the accessible supports SelectAccessible.
-    // COM says we cannot change what interfaces are supported on-the-fly,
-    // so invalidate this object. A new one will be created on demand.
-    RecreateAccessible(aElement);
+  if (aAttribute == nsGkAtoms::multiple) {
+    if (dom::HTMLSelectElement* select =
+            dom::HTMLSelectElement::FromNode(aElement)) {
+      if (select->Size() <= 1) {
+        // Adding the 'multiple' attribute to a select that has a size of 1
+        // creates a listbox as opposed to a combobox with a popup combobox
+        // list. Removing the attribute does the opposite.
+        RecreateAccessible(aElement);
+        return true;
+      }
+    }
+  }
 
+  if (aAttribute == nsGkAtoms::size &&
+      aElement->IsHTMLElement(nsGkAtoms::select)) {
+    // Changing the size of a select element can potentially change it from a
+    // combobox button to a listbox with different underlying implementations.
+    RecreateAccessible(aElement);
     return true;
   }
 
@@ -2335,7 +2424,9 @@ void DocAccessible::ShutdownChildrenInSubtree(LocalAccessible* aAccessible) {
 
 bool DocAccessible::IsLoadEventTarget() const {
   nsCOMPtr<nsIDocShellTreeItem> treeItem = mDocumentNode->GetDocShell();
-  NS_ASSERTION(treeItem, "No document shell for document!");
+  if (!treeItem) {
+    return false;
+  }
 
   nsCOMPtr<nsIDocShellTreeItem> parentTreeItem;
   treeItem->GetInProcessParent(getter_AddRefs(parentTreeItem));
@@ -2406,46 +2497,17 @@ void DocAccessible::DispatchScrollingEvent(nsINode* aTarget,
   nsEventShell::FireEvent(event);
 }
 
-void DocAccessible::ARIAActiveDescendantIDMaybeMoved(dom::Element* aElm) {
-  nsINode* focusNode = FocusMgr()->FocusedDOMNode();
-  // The focused element must be within this document.
-  if (!focusNode || focusNode->OwnerDoc() != mDocumentNode) {
-    return;
+void DocAccessible::ARIAActiveDescendantIDMaybeMoved(
+    LocalAccessible* aAccessible) {
+  LocalAccessible* widget = nullptr;
+  if (aAccessible->IsActiveDescendant(&widget) && widget) {
+    // The active descendant might have just been inserted and may not be in the
+    // tree yet. Therefore, schedule this async to ensure the tree is up to
+    // date.
+    mNotificationController
+        ->ScheduleNotification<DocAccessible, LocalAccessible>(
+            this, &DocAccessible::ARIAActiveDescendantChanged, widget);
   }
-
-  dom::Element* focusElm = nullptr;
-  if (focusNode == mDocumentNode) {
-    // The document is focused, so look for aria-activedescendant on the
-    // body/root.
-    focusElm = Elm();
-    if (!focusElm) {
-      return;
-    }
-  } else {
-    MOZ_ASSERT(focusNode->IsElement());
-    focusElm = focusNode->AsElement();
-  }
-
-  // Check if the focus has aria-activedescendant and whether
-  // it refers to the id just set on aElm.
-  nsAutoString id;
-  aElm->GetAttr(kNameSpaceID_None, nsGkAtoms::id, id);
-  if (!focusElm->AttrValueIs(kNameSpaceID_None,
-                             nsGkAtoms::aria_activedescendant, id,
-                             eCaseMatters)) {
-    return;
-  }
-
-  // The aria-activedescendant target has probably changed.
-  LocalAccessible* acc = GetAccessibleEvenIfNotInMapOrContainer(focusNode);
-  if (!acc) {
-    return;
-  }
-
-  // The active descendant might have just been inserted and may not be in the
-  // tree yet. Therefore, schedule this async to ensure the tree is up to date.
-  mNotificationController->ScheduleNotification<DocAccessible, LocalAccessible>(
-      this, &DocAccessible::ARIAActiveDescendantChanged, acc);
 }
 
 void DocAccessible::SetRoleMapEntryForDoc(dom::Element* aElement) {

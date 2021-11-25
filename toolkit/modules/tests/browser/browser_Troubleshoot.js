@@ -535,9 +535,6 @@ const SNAPSHOT_SCHEMA = {
         windowLayerManagerRemote: {
           type: "boolean",
         },
-        windowUsingAdvancedLayers: {
-          type: "boolean",
-        },
         numAcceleratedWindowsMessage: {
           type: "object",
           properties: {
@@ -616,9 +613,6 @@ const SNAPSHOT_SCHEMA = {
         },
         directWriteVersion: {
           type: "string",
-        },
-        usesTiling: {
-          type: "boolean",
         },
         clearTypeParameters: {
           type: "string",

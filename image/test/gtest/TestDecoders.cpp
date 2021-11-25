@@ -58,7 +58,7 @@ static already_AddRefed<SourceSurface> CheckDecoderState(
             bool(progress & FLAG_IS_ANIMATED));
 
   // The decoder should get the correct size.
-  IntSize size = aDecoder->Size();
+  OrientedIntSize size = aDecoder->Size();
   EXPECT_EQ(aTestCase.mSize.width, size.width);
   EXPECT_EQ(aTestCase.mSize.height, size.height);
 
@@ -316,7 +316,7 @@ static void CheckAnimationDecoderResults(const ImageTestCase& aTestCase,
   }
 
   // The decoder should get the correct size.
-  IntSize size = aDecoder->Size();
+  OrientedIntSize size = aDecoder->Size();
   EXPECT_EQ(aTestCase.mSize.width, size.width);
   EXPECT_EQ(aTestCase.mSize.height, size.height);
 
@@ -710,6 +710,10 @@ TEST_F(ImageDecoders, AVIFSingleChunk) {
 
 TEST_F(ImageDecoders, AVIFSingleChunkNonzeroReserved) {
   CheckDecoderSingleChunk(NonzeroReservedAVIFTestCase());
+}
+
+TEST_F(ImageDecoders, AVIFSingleChunkMultipleColr) {
+  CheckDecoderSingleChunk(MultipleColrAVIFTestCase());
 }
 
 TEST_F(ImageDecoders, AVIFSingleChunkTransparent10bit420) {

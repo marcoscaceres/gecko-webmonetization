@@ -188,7 +188,7 @@ interface nsIXULRuntime : nsISupports
   const unsigned long PROCESS_TYPE_VR = 6;
   const unsigned long PROCESS_TYPE_RDD = 7;
   const unsigned long PROCESS_TYPE_SOCKET = 8;
-  const unsigned long PROCESS_TYPE_SANDBOX_BROKER = 9;
+  const unsigned long PROCESS_TYPE_REMOTESANDBOXBROKER = 9;
   const unsigned long PROCESS_TYPE_FORKSERVER = 10;
 
   /**
@@ -315,6 +315,12 @@ interface nsIXULRuntime : nsISupports
    * restart mechanism (such as RegisterApplicationRestart on Windows).
    */
   readonly attribute boolean restartedByOS;
+
+  /** Whether the chrome color-scheme is dark */
+  readonly attribute boolean chromeColorSchemeIsDark;
+
+  /** Whether we should draw over the titlebar */
+  readonly attribute boolean drawInTitlebar;
 
   /**
    * The path of the shortcut used to start the current process, or "" if none.

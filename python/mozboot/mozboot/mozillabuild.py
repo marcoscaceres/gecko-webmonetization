@@ -6,6 +6,7 @@ from __future__ import absolute_import, print_function, unicode_literals
 
 import ctypes
 import os
+import platform
 import sys
 import subprocess
 
@@ -157,9 +158,46 @@ class MozillaBuildBootstrapper(BaseBootstrapper):
 
         from mozboot import android
 
+        os_arch = platform.machine()
+        if os_arch == "AMD64":
+            # On Windows, x86_64 is reported as AMD64 but we use x86_64
+            # everywhere else, so let's normalized it here.
+            os_arch = "x86_64"
         android.ensure_android(
-            "windows", artifact_mode=artifact_mode, no_interactive=self.no_interactive
+            "windows",
+            os_arch,
+            artifact_mode=artifact_mode,
+            no_interactive=self.no_interactive,
         )
+        android.ensure_android(
+            "windows",
+            os_arch,
+            system_images_only=True,
+            artifact_mode=artifact_mode,
+            no_interactive=self.no_interactive,
+            avd_manifest_path=android.AVD_MANIFEST_X86_64,
+        )
+        android.ensure_android(
+            "windows",
+            os_arch,
+            system_images_only=True,
+            artifact_mode=artifact_mode,
+            no_interactive=self.no_interactive,
+            avd_manifest_path=android.AVD_MANIFEST_ARM,
+        )
+
+    def ensure_mobile_android_packages(self, state_dir, checkout_root):
+        from mozboot import android
+
+        self.install_toolchain_artifact(
+            state_dir, checkout_root, android.WINDOWS_X86_64_ANDROID_AVD
+        )
+        self.install_toolchain_artifact(
+            state_dir, checkout_root, android.WINDOWS_ARM_ANDROID_AVD
+        )
+
+    def install_mobile_android_artifact_mode_packages(self, mozconfig_builder):
+        self.install_mobile_android_packages(mozconfig_builder, artifact_mode=True)
 
     def generate_mobile_android_mozconfig(self, artifact_mode=False):
         from mozboot import android

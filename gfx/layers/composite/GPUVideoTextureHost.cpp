@@ -71,78 +71,20 @@ TextureHost* GPUVideoTextureHost::EnsureWrappedTextureHost() {
 
     RefPtr<wr::RenderTextureHost> texture =
         new wr::RenderTextureHostWrapper(wrappedId);
-    wr::RenderThread::Get()->RegisterExternalImage(
-        wr::AsUint64(mExternalImageId.ref()), texture.forget());
+    wr::RenderThread::Get()->RegisterExternalImage(mExternalImageId.ref(),
+                                                   texture.forget());
   }
 
-  if (mPendingSourceProvider) {
-    RefPtr<TextureSourceProvider> provider = mPendingSourceProvider.forget();
-    mWrappedTextureHost->SetTextureSourceProvider(provider);
-  }
   if (mPendingUpdatedInternal) {
     mWrappedTextureHost->UpdatedInternal(mPendingIntRegion.ptrOr(nullptr));
     mPendingIntRegion.reset();
     mPendingUpdatedInternal = false;
-  }
-  if (mPendingPrepareTextureSource) {
-    mWrappedTextureHost->PrepareTextureSource(*mPendingPrepareTextureSource);
-    mPendingPrepareTextureSource.reset();
   }
 
   return mWrappedTextureHost;
 }
 
 bool GPUVideoTextureHost::IsValid() { return !!EnsureWrappedTextureHost(); }
-
-bool GPUVideoTextureHost::Lock() {
-  if (!EnsureWrappedTextureHost()) {
-    return false;
-  }
-  return EnsureWrappedTextureHost()->Lock();
-}
-
-void GPUVideoTextureHost::Unlock() {
-  if (!EnsureWrappedTextureHost()) {
-    return;
-  }
-  EnsureWrappedTextureHost()->Unlock();
-}
-
-void GPUVideoTextureHost::PrepareTextureSource(
-    CompositableTextureSourceRef& aTexture) {
-  if (!EnsureWrappedTextureHost()) {
-    mPendingPrepareTextureSource = Some(aTexture);
-    return;
-  }
-  EnsureWrappedTextureHost()->PrepareTextureSource(aTexture);
-}
-
-bool GPUVideoTextureHost::BindTextureSource(
-    CompositableTextureSourceRef& aTexture) {
-  MOZ_ASSERT(EnsureWrappedTextureHost(), "Image isn't valid yet");
-  if (!EnsureWrappedTextureHost()) {
-    return false;
-  }
-  return EnsureWrappedTextureHost()->BindTextureSource(aTexture);
-}
-
-bool GPUVideoTextureHost::AcquireTextureSource(
-    CompositableTextureSourceRef& aTexture) {
-  MOZ_ASSERT(EnsureWrappedTextureHost(), "Image isn't valid yet");
-  if (!EnsureWrappedTextureHost()) {
-    return false;
-  }
-  return EnsureWrappedTextureHost()->AcquireTextureSource(aTexture);
-}
-
-void GPUVideoTextureHost::SetTextureSourceProvider(
-    TextureSourceProvider* aProvider) {
-  if (!EnsureWrappedTextureHost()) {
-    mPendingSourceProvider = aProvider;
-    return;
-  }
-  EnsureWrappedTextureHost()->SetTextureSourceProvider(aProvider);
-}
 
 gfx::YUVColorSpace GPUVideoTextureHost::GetYUVColorSpace() const {
   MOZ_ASSERT(mWrappedTextureHost, "Image isn't valid yet");
@@ -220,8 +162,8 @@ void GPUVideoTextureHost::CreateRenderTexture(
 
     RefPtr<wr::RenderTextureHost> texture =
         new wr::RenderTextureHostWrapper(wrappedId);
-    wr::RenderThread::Get()->RegisterExternalImage(
-        wr::AsUint64(mExternalImageId.ref()), texture.forget());
+    wr::RenderThread::Get()->RegisterExternalImage(mExternalImageId.ref(),
+                                                   texture.forget());
     return;
   }
 
@@ -275,14 +217,6 @@ bool GPUVideoTextureHost::SupportsExternalCompositing(
     return false;
   }
   return EnsureWrappedTextureHost()->SupportsExternalCompositing(aBackend);
-}
-
-void GPUVideoTextureHost::UnbindTextureSource() {
-  if (EnsureWrappedTextureHost()) {
-    EnsureWrappedTextureHost()->UnbindTextureSource();
-  }
-  // Handle read unlock
-  TextureHost::UnbindTextureSource();
 }
 
 void GPUVideoTextureHost::NotifyNotUsed() {

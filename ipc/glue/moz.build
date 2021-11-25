@@ -161,6 +161,7 @@ UNIFIED_SOURCES += [
     "BrowserProcessSubThread.cpp",
     "CrashReporterClient.cpp",
     "CrashReporterHost.cpp",
+    "Endpoint.cpp",
     "FileDescriptor.cpp",
     "FileDescriptorUtils.cpp",
     "IdleSchedulerChild.cpp",
@@ -216,7 +217,7 @@ LOCAL_INCLUDES += [
     "/dom/storage",
     "/netwerk/base",
     "/third_party/libwebrtc",
-    "/third_party/libwebrtc/webrtc",
+    "/third_party/libwebrtc/third_party/abseil-cpp",
     "/xpcom/build",
 ]
 
@@ -260,6 +261,9 @@ LOCAL_INCLUDES += [
 include("/ipc/chromium/chromium-config.mozbuild")
 
 FINAL_LIBRARY = "xul"
+
+if CONFIG["OS_ARCH"] == "Darwin":
+    OS_LIBS += ["bsm"]  # for audit_token_to_pid
 
 for var in ("MOZ_CHILD_PROCESS_NAME", "MOZ_CHILD_PROCESS_BUNDLE"):
     DEFINES[var] = '"%s"' % CONFIG[var]

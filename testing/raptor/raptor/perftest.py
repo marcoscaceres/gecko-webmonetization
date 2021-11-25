@@ -107,6 +107,7 @@ class Perftest(object):
     ):
         self._dirs_to_remove = []
         self.verbose = verbose
+        self.page_count = []
 
         # Override the magic --host HOST_IP with the value of the environment variable.
         if host == "HOST_IP":
@@ -483,6 +484,7 @@ class Perftest(object):
 
         self.config["raptor_json_path"] = raptor_json_path
         self.config["artifact_dir"] = self.artifact_dir
+        self.config["page_count"] = self.page_count
         res = self.results_handler.summarize_and_output(self.config, tests, test_names)
 
         # gecko profiling symbolication
@@ -531,7 +533,7 @@ class Perftest(object):
         self.config.update(
             {
                 "playback_tool": test.get("playback"),
-                "playback_version": test.get("playback_version", "5.1.1"),
+                "playback_version": test.get("playback_version", "7.0.4"),
                 "playback_files": [
                     os.path.join(playback_dir, test.get("playback_pageset_manifest"))
                 ],

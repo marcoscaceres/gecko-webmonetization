@@ -274,6 +274,16 @@ AutofillProfileAutoCompleteSearch.prototype = {
     }
 
     Promise.resolve(pendingSearchResult).then(result => {
+      if (this.forceStop) {
+        // If we notify the listener the search result when the search is already
+        // cancelled, it corrupts the internal state of the listener. So we only
+        // reset the controller's state in this case.
+        if (isFormAutofillSearch) {
+          autocompleteController.resetInternalState();
+        }
+        return;
+      }
+
       listener.onSearchResult(this, result);
       // Don't save cache results or reset state when returning non-autofill results such as the
       // form history fallback above.
@@ -799,7 +809,6 @@ var FormAutofillContent = {
       this.debug("No control is removed or inserted since last collection.");
       return;
     }
-
     let validDetails = formHandler.collectFormFields();
 
     this._formsDetails.set(formHandler.form.rootElement, formHandler);

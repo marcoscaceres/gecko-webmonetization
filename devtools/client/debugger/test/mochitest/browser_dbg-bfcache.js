@@ -17,7 +17,6 @@ add_task(async function() {
   if (Services.appinfo.sessionHistoryInParent) {
     info("Run test with bfcacheInParent ENABLED");
     await pushPref("fission.bfcacheInParent", true);
-    await pushPref("dom.security.https_first", false);
     await testSourcesOnNavigation();
     await testDebuggerPauseStateOnNavigation();
   }
@@ -59,15 +58,11 @@ async function testDebuggerPauseStateOnNavigation() {
   await waitForPaused(dbg);
 
   ok(dbg.toolbox.isHighlighted("jsdebugger"), "Debugger is highlighted");
-  
+
   await goForward(EXAMPLE_URL + "doc-bfcache2.html");
 
-  // This check should be removed when Bug 1722305 is fixed, which would cause will-navigate
-  // to start firing properly with fission.
-  if (!Services.appinfo.sessionHistoryInParent) {
-    await waitUntil(() => !dbg.toolbox.isHighlighted("jsdebugger"));
-    ok(true, "Debugger is not highlighted");
-  }
+  await waitUntil(() => !dbg.toolbox.isHighlighted("jsdebugger"));
+  ok(true, "Debugger is not highlighted");
 
   dbg.toolbox.closeToolbox();
 }

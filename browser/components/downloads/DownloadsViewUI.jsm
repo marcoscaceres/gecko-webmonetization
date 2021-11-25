@@ -24,6 +24,7 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   DownloadsCommon: "resource:///modules/DownloadsCommon.jsm",
   FileUtils: "resource://gre/modules/FileUtils.jsm",
   OS: "resource://gre/modules/osfile.jsm",
+  UrlbarUtils: "resource:///modules/UrlbarUtils.jsm",
 });
 
 XPCOMUtils.defineLazyServiceGetter(
@@ -31,6 +32,13 @@ XPCOMUtils.defineLazyServiceGetter(
   "handlerSvc",
   "@mozilla.org/uriloader/handler-service;1",
   "nsIHandlerService"
+);
+
+XPCOMUtils.defineLazyServiceGetter(
+  this,
+  "gReputationService",
+  "@mozilla.org/reputationservice/application-reputation-service;1",
+  Ci.nsIApplicationReputationService
 );
 
 const { Integration } = ChromeUtils.import(
@@ -63,9 +71,9 @@ var gDownloadElementButtons = {
   },
   show: {
     commandName: "downloadsCmd_show",
-    l10nId: "downloads-cmd-show-button",
-    descriptionL10nId: "downloads-cmd-show-description",
-    panelL10nId: "downloads-cmd-show-panel",
+    l10nId: "downloads-cmd-show-button-2",
+    descriptionL10nId: "downloads-cmd-show-description-2",
+    panelL10nId: "downloads-cmd-show-panel-2",
     iconClass: "downloadIconShow",
   },
   subviewOpenOrRemoveFile: {
@@ -113,12 +121,32 @@ var DownloadsViewUI = {
   },
 
   /**
+   * Get source url of the download without'http' or'https' prefix.
+   */
+  getStrippedUrl(download) {
+    return UrlbarUtils.stripPrefixAndTrim(download?.source?.url, {
+      stripHttp: true,
+      stripHttps: true,
+    })[0];
+  },
+
+  /**
    * Returns the user-facing label for the given Download object. This is
    * normally the leaf name of the download target file. In case this is a very
    * old history download for which the target file is unknown, the download
    * source URI is displayed.
    */
   getDisplayName(download) {
+    if (
+      download.error?.reputationCheckVerdict ==
+      Downloads.Error.BLOCK_VERDICT_DOWNLOAD_SPAM
+    ) {
+      let l10n = {
+        id: "downloads-blocked-from-url",
+        args: { url: DownloadsViewUI.getStrippedUrl(download) },
+      };
+      return { l10n };
+    }
     return download.target.path
       ? OS.Path.basename(download.target.path)
       : download.source.url;
@@ -196,6 +224,10 @@ var DownloadsViewUI = {
       contextMenu.querySelector(".downloadUnblockMenuItem").hidden &&
       contextMenu.querySelector(".downloadShowMenuItem").hidden;
 
+    let download = element._shell.download;
+    let mimeInfo = DownloadsCommon.getMimeInfo(download);
+    let { preferredAction, useSystemDefault } = mimeInfo ? mimeInfo : {};
+
     // Hide the "use system viewer" and "always use system viewer" items
     // if the feature is disabled or this download doesn't support it:
     let useSystemViewerItem = contextMenu.querySelector(
@@ -211,16 +243,41 @@ var DownloadsViewUI = {
     alwaysUseSystemViewerItem.hidden =
       !DownloadsCommon.alwaysOpenInSystemViewerItemEnabled ||
       !canViewInternally;
-    if (!alwaysUseSystemViewerItem.hidden) {
-      let download = element._shell.download;
-      let mimeInfo = DownloadsCommon.getMimeInfo(download);
-      let { preferredAction, useSystemDefault } = mimeInfo ? mimeInfo : {};
 
-      if (preferredAction === useSystemDefault) {
-        alwaysUseSystemViewerItem.setAttribute("checked", "true");
-      } else {
-        alwaysUseSystemViewerItem.removeAttribute("checked");
-      }
+    // If non default mime-type or cannot be opened internally, display
+    // "always open similar files" item instead so that users can add a new
+    // mimetype to about:preferences table and set to open with system default.
+    // Only appear if browser.download.improvements_to_download_panel is enabled.
+    let improvementsOn = Services.prefs.getBoolPref(
+      "browser.download.improvements_to_download_panel"
+    );
+    let alwaysOpenSimilarFilesItem = contextMenu.querySelector(
+      ".downloadAlwaysOpenSimilarFilesMenuItem"
+    );
+
+    // In HelperAppDlg.jsm, we determine whether or not an "always open..." checkbox
+    // should appear in the unknownContentType window. Here, we use similar checks to
+    // determine if we should show the "always open similar files" context menu item.
+    let shouldNotRememberChoice =
+      download.contentType === "application/octet-stream" ||
+      download.contentType === "application/x-msdownload" ||
+      (download.contentType === "text/plain" &&
+        gReputationService.isBinary(download.target.path));
+
+    if (improvementsOn && !canViewInternally) {
+      alwaysOpenSimilarFilesItem.hidden =
+        state !== DOWNLOAD_FINISHED || shouldNotRememberChoice;
+    } else {
+      alwaysOpenSimilarFilesItem.hidden = true;
+    }
+
+    // Update checkbox for "always open..." options.
+    if (preferredAction === useSystemDefault) {
+      alwaysUseSystemViewerItem.setAttribute("checked", "true");
+      alwaysOpenSimilarFilesItem.setAttribute("checked", "true");
+    } else {
+      alwaysUseSystemViewerItem.removeAttribute("checked");
+      alwaysOpenSimilarFilesItem.removeAttribute("checked");
     }
   },
 };
@@ -373,8 +430,17 @@ DownloadsViewUI.DownloadElementShell.prototype = {
    *        URL of the icon to load, generally from the "image" property.
    */
   showDisplayNameAndIcon(displayName, icon) {
-    this._downloadTarget.setAttribute("value", displayName);
-    this._downloadTarget.setAttribute("tooltiptext", displayName);
+    if (displayName.l10n) {
+      let document = this.element.ownerDocument;
+      document.l10n.setAttributes(
+        this._downloadTarget,
+        displayName.l10n.id,
+        displayName.l10n.args
+      );
+    } else {
+      this._downloadTarget.setAttribute("value", displayName);
+      this._downloadTarget.setAttribute("tooltiptext", displayName);
+    }
     this._downloadTypeIcon.setAttribute("src", icon);
   },
 
@@ -454,6 +520,10 @@ DownloadsViewUI.DownloadElementShell.prototype = {
    *        Downloads View. Type is either l10n object or string literal.
    */
   showStatusWithDetails(stateLabel, hoverStatus) {
+    if (stateLabel.l10n) {
+      this.showStatus(stateLabel, hoverStatus);
+      return;
+    }
     let [displayHost] = DownloadUtils.getURIHost(this.download.source.url);
     let [displayDate] = DownloadUtils.getReadableDates(
       new Date(this.download.endTime)
@@ -665,6 +735,9 @@ DownloadsViewUI.DownloadElementShell.prototype = {
                   this.showButton("askRemoveFileOrAllow");
                 }
                 break;
+              case Downloads.Error.BLOCK_VERDICT_DOWNLOAD_SPAM:
+                this.showButton("askRemoveFileOrAllow");
+                break;
               default:
                 // Assume Downloads.Error.BLOCK_VERDICT_MALWARE
                 this.showButton("removeFile");
@@ -737,6 +810,7 @@ DownloadsViewUI.DownloadElementShell.prototype = {
 
   /**
    * Returns [title, [details1, details2]] for blocked downloads.
+   * The title or details could be raw strings or l10n objects.
    */
   get rawBlockedTitleAndDetails() {
     let s = DownloadsCommon.strings;
@@ -761,6 +835,19 @@ DownloadsViewUI.DownloadElementShell.prototype = {
         ];
       case Downloads.Error.BLOCK_VERDICT_MALWARE:
         return [s.blockedMalware, [s.unblockTypeMalware, s.unblockTip2]];
+
+      case Downloads.Error.BLOCK_VERDICT_DOWNLOAD_SPAM:
+        let title = {
+          id: "downloads-files-not-downloaded",
+          args: {
+            num: this.download.blockedDownloadsCount,
+          },
+        };
+        let details = {
+          id: "downloads-blocked-download-detailed-info",
+          args: { url: DownloadsViewUI.getStrippedUrl(this.download) },
+        };
+        return [{ l10n: title }, [{ l10n: details }, null]];
     }
     throw new Error(
       "Unexpected reputationCheckVerdict: " +
@@ -866,6 +953,7 @@ DownloadsViewUI.DownloadElementShell.prototype = {
       case "downloadsCmd_open:tab":
       case "downloadsCmd_open:tabshifted":
       case "downloadsCmd_open:window":
+      case "downloadsCmd_alwaysOpenSimilarFiles":
         // This property is false if the download did not succeed.
         return this.download.target.exists;
       case "downloadsCmd_show":
@@ -998,5 +1086,26 @@ DownloadsViewUI.DownloadElementShell.prototype = {
     }
     handlerSvc.store(mimeInfo);
     DownloadsCommon.openDownload(this.download).catch(Cu.reportError);
+  },
+
+  downloadsCmd_alwaysOpenSimilarFiles() {
+    const mimeInfo = DownloadsCommon.getMimeInfo(this.download);
+    if (!mimeInfo) {
+      throw new Error("Can't open download with unknown mime-type");
+    }
+
+    // User has selected to always open this mime-type from now on and will add this
+    // mime-type to our preferences table with the system default option. Open the
+    // file immediately after selecting the menu item like alwaysOpenInSystemViewer.
+    if (mimeInfo.preferredAction !== mimeInfo.useSystemDefault) {
+      mimeInfo.preferredAction = mimeInfo.useSystemDefault;
+      handlerSvc.store(mimeInfo);
+      DownloadsCommon.openDownload(this.download).catch(Cu.reportError);
+    } else {
+      // Otherwise, if user unchecks this option after already enabling it from the
+      // context menu, resort to saveToDisk.
+      mimeInfo.preferredAction = mimeInfo.saveToDisk;
+      handlerSvc.store(mimeInfo);
+    }
   },
 };

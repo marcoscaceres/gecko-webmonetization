@@ -16,6 +16,7 @@
 
 #include "gc/GC.h"
 #include "vm/GeckoProfiler.h"
+#include "vm/HelperThreads.h"
 #include "vm/JSContext.h"
 
 namespace js {
@@ -72,30 +73,6 @@ class MOZ_RAII AutoEmptyNursery : public AutoAssertEmptyNursery {
   explicit AutoEmptyNursery(JSContext* cx);
 };
 
-class MOZ_RAII AutoCheckCanAccessAtomsDuringGC {
-#ifdef DEBUG
-  JSRuntime* runtime;
-
- public:
-  explicit AutoCheckCanAccessAtomsDuringGC(JSRuntime* rt) : runtime(rt) {
-    // Ensure we're only used from within the GC.
-    MOZ_ASSERT(JS::RuntimeHeapIsMajorCollecting());
-
-    // Ensure there is no off-thread parsing running.
-    MOZ_ASSERT(!rt->hasHelperThreadZones());
-
-    // Set up a check to assert if we try to start an off-thread parse.
-    runtime->setOffThreadParsingBlocked(true);
-  }
-  ~AutoCheckCanAccessAtomsDuringGC() {
-    runtime->setOffThreadParsingBlocked(false);
-  }
-#else
- public:
-  explicit AutoCheckCanAccessAtomsDuringGC(JSRuntime* rt) {}
-#endif
-};
-
 // Abstract base class for exclusive heap access for tracing or GC.
 class MOZ_RAII AutoHeapSession {
  public:
@@ -117,14 +94,6 @@ class MOZ_RAII AutoGCSession : public AutoHeapSession {
  public:
   explicit AutoGCSession(GCRuntime* gc, JS::HeapState state)
       : AutoHeapSession(gc, state) {}
-
-  AutoCheckCanAccessAtomsDuringGC& checkAtomsAccess() {
-    return maybeCheckAtomsAccess.ref();
-  }
-
-  // During a GC we can check that it's not possible for anything else to be
-  // using the atoms zone.
-  mozilla::Maybe<AutoCheckCanAccessAtomsDuringGC> maybeCheckAtomsAccess;
 };
 
 class MOZ_RAII AutoMajorGCProfilerEntry : public AutoGeckoProfilerEntry {
@@ -132,12 +101,10 @@ class MOZ_RAII AutoMajorGCProfilerEntry : public AutoGeckoProfilerEntry {
   explicit AutoMajorGCProfilerEntry(GCRuntime* gc);
 };
 
-class MOZ_RAII AutoTraceSession : public AutoLockAllAtoms,
-                                  public AutoHeapSession {
+class MOZ_RAII AutoTraceSession : public AutoHeapSession {
  public:
   explicit AutoTraceSession(JSRuntime* rt)
-      : AutoLockAllAtoms(rt),
-        AutoHeapSession(&rt->gc, JS::HeapState::Tracing) {}
+      : AutoHeapSession(&rt->gc, JS::HeapState::Tracing) {}
 };
 
 struct MOZ_RAII AutoFinishGC {
@@ -180,6 +147,44 @@ class AutoDisableBarriers {
 
  private:
   GCRuntime* gc;
+};
+
+// Set compartments' maybeAlive flags if anything is marked while this class is
+// live. This is used while marking roots.
+class AutoUpdateLiveCompartments {
+  GCRuntime* gc;
+
+ public:
+  explicit AutoUpdateLiveCompartments(GCRuntime* gc);
+  ~AutoUpdateLiveCompartments();
+};
+
+class MOZ_RAII AutoRunParallelTask : public GCParallelTask {
+  // This class takes a pointer to a member function of GCRuntime.
+  using TaskFunc = JS_MEMBER_FN_PTR_TYPE(GCRuntime, void);
+
+  TaskFunc func_;
+  AutoLockHelperThreadState& lock_;
+
+ public:
+  AutoRunParallelTask(GCRuntime* gc, TaskFunc func, gcstats::PhaseKind phase,
+                      AutoLockHelperThreadState& lock)
+      : GCParallelTask(gc, phase), func_(func), lock_(lock) {
+    gc->startTask(*this, lock_);
+  }
+
+  ~AutoRunParallelTask() { gc->joinTask(*this, lock_); }
+
+  void run(AutoLockHelperThreadState& lock) override {
+    AutoUnlockHelperThreadState unlock(lock);
+
+    // The hazard analysis can't tell what the call to func_ will do but it's
+    // not allowed to GC.
+    JS::AutoSuppressGCAnalysis nogc;
+
+    // Call pointer to member function on |gc|.
+    JS_CALL_MEMBER_FN_PTR(gc, func_);
+  }
 };
 
 GCAbortReason IsIncrementalGCUnsafe(JSRuntime* rt);
@@ -231,50 +236,23 @@ void CheckHashTablesAfterMovingGC(JSRuntime* rt);
 void CheckHeapAfterGC(JSRuntime* rt);
 #endif
 
-struct MovingTracer final : public GenericTracer {
-  explicit MovingTracer(JSRuntime* rt)
-      : GenericTracer(rt, JS::TracerKind::Moving,
-                      JS::WeakMapTraceAction::TraceKeysAndValues) {}
-
-  JSObject* onObjectEdge(JSObject* obj) override;
-  Shape* onShapeEdge(Shape* shape) override;
-  JSString* onStringEdge(JSString* string) override;
-  js::BaseScript* onScriptEdge(js::BaseScript* script) override;
-  BaseShape* onBaseShapeEdge(BaseShape* base) override;
-  GetterSetter* onGetterSetterEdge(GetterSetter* gs) override;
-  PropMap* onPropMapEdge(PropMap* map) override;
-  Scope* onScopeEdge(Scope* scope) override;
-  RegExpShared* onRegExpSharedEdge(RegExpShared* shared) override;
-  BigInt* onBigIntEdge(BigInt* bi) override;
-  JS::Symbol* onSymbolEdge(JS::Symbol* sym) override;
-  jit::JitCode* onJitCodeEdge(jit::JitCode* jit) override;
+struct MovingTracer final : public GenericTracerImpl<MovingTracer> {
+  explicit MovingTracer(JSRuntime* rt);
 
  private:
   template <typename T>
   T* onEdge(T* thingp);
+  friend class GenericTracerImpl<MovingTracer>;
 };
 
-struct SweepingTracer final : public GenericTracer {
-  explicit SweepingTracer(JSRuntime* rt)
-      : GenericTracer(rt, JS::TracerKind::Sweeping,
-                      JS::WeakMapTraceAction::TraceKeysAndValues) {}
-
-  JSObject* onObjectEdge(JSObject* obj) override;
-  Shape* onShapeEdge(Shape* shape) override;
-  JSString* onStringEdge(JSString* string) override;
-  js::BaseScript* onScriptEdge(js::BaseScript* script) override;
-  BaseShape* onBaseShapeEdge(BaseShape* base) override;
-  GetterSetter* onGetterSetterEdge(js::GetterSetter* gs) override;
-  PropMap* onPropMapEdge(PropMap* map) override;
-  jit::JitCode* onJitCodeEdge(jit::JitCode* jit) override;
-  Scope* onScopeEdge(Scope* scope) override;
-  RegExpShared* onRegExpSharedEdge(RegExpShared* shared) override;
-  BigInt* onBigIntEdge(BigInt* bi) override;
-  JS::Symbol* onSymbolEdge(JS::Symbol* sym) override;
+struct MinorSweepingTracer final
+    : public GenericTracerImpl<MinorSweepingTracer> {
+  explicit MinorSweepingTracer(JSRuntime* rt);
 
  private:
   template <typename T>
   T* onEdge(T* thingp);
+  friend class GenericTracerImpl<MinorSweepingTracer>;
 };
 
 extern void DelayCrossCompartmentGrayMarking(JSObject* src);

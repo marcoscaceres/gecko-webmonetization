@@ -345,6 +345,7 @@ static unsigned StackArgBytesForWasmABI(const FuncType& funcType) {
 static void Move64(MacroAssembler& masm, const Address& src,
                    const Address& dest, Register scratch) {
 #if JS_BITS_PER_WORD == 32
+  MOZ_RELEASE_ASSERT(src.base != scratch && dest.base != scratch);
   masm.load32(LowWord(src), scratch);
   masm.store32(scratch, LowWord(dest));
   masm.load32(HighWord(src), scratch);
@@ -840,7 +841,7 @@ static bool GenerateInterpEntry(MacroAssembler& masm, const FuncExport& fe,
   WasmPop(masm, WasmTlsReg);
 
   // Store the register result, if any, in argv[0].
-  // No spectre.index_masking is required, as the value leaves ReturnReg.
+  // No widening is required, as the value leaves ReturnReg.
   StoreRegisterResult(masm, fe, argv);
 
   // After the ReturnReg is stored into argv[0] but before fp is clobbered by
@@ -1303,7 +1304,7 @@ static bool GenerateJitEntry(MacroAssembler& masm, size_t funcExportIndex,
     switch (results[0].kind()) {
       case ValType::I32:
         GenPrintIsize(DebugChannel::Function, masm, ReturnReg);
-        // No spectre.index_masking is required, as the value is boxed.
+        // No widening is required, as the value is boxed.
         masm.boxNonDouble(JSVAL_TYPE_INT32, ReturnReg, JSReturnOperand);
         break;
       case ValType::F32: {
@@ -1422,8 +1423,7 @@ static bool GenerateJitEntry(MacroAssembler& masm, size_t funcExportIndex,
                         SymbolicAddress::CoerceInPlace_JitEntry);
     masm.assertStackAlignment(ABIStackAlignment);
 
-    // No spectre.index_masking is required, as the return value is used as a
-    // bool.
+    // No widening is required, as the return value is used as a bool.
     masm.branchTest32(Assembler::NonZero, ReturnReg, ReturnReg,
                       &rejoinBeforeCall);
   }
@@ -1631,10 +1631,8 @@ void wasm::GenerateDirectCallFromJit(MacroAssembler& masm, const FuncExport& fe,
       case wasm::ValType::I32:
         // The return value is in ReturnReg, which is what Ion expects.
         GenPrintIsize(DebugChannel::Function, masm, ReturnReg);
-#if defined(JS_CODEGEN_X64)
-        if (JitOptions.spectreIndexMasking) {
-          masm.movl(ReturnReg, ReturnReg);
-        }
+#ifdef JS_64BIT
+        masm.widenInt32(ReturnReg);
 #endif
         break;
       case wasm::ValType::I64:
@@ -1692,6 +1690,7 @@ static void StackCopy(MacroAssembler& masm, MIRType type, Register scratch,
     masm.store32(scratch, dst);
   } else if (type == MIRType::Int64) {
 #if JS_BITS_PER_WORD == 32
+    MOZ_RELEASE_ASSERT(src.base != scratch && dst.base != scratch);
     GenPrintf(DebugChannel::Import, masm, "i64(");
     masm.load32(LowWord(src), scratch);
     GenPrintIsize(DebugChannel::Import, masm, scratch);
@@ -2138,8 +2137,7 @@ static bool GenerateImportInterpExit(MacroAssembler& masm, const FuncImport& fi,
     switch (registerResultType.kind()) {
       case ValType::I32:
         masm.load32(argv, ReturnReg);
-        // No spectre.index_masking is required, as we know the value comes from
-        // an i32 load.
+        // No widening is required, as we know the value comes from an i32 load.
         GenPrintf(DebugChannel::Import, masm, "wasm-import[%u]; returns ",
                   funcImportIndex);
         GenPrintIsize(DebugChannel::Import, masm, ReturnReg);
@@ -2381,8 +2379,8 @@ static bool GenerateImportJitExit(MacroAssembler& masm, const FuncImport& fi,
     MOZ_ASSERT(results.length() == 1, "multi-value return unimplemented");
     switch (results[0].kind()) {
       case ValType::I32:
-        // No spectre.index_masking required, as the return value does not come
-        // to us in ReturnReg.
+        // No widening is required, as the return value does not come to us in
+        // ReturnReg.
         masm.truncateValueToInt32(JSReturnOperand, ReturnDoubleReg, ReturnReg,
                                   &oolConvert);
         GenPrintIsize(DebugChannel::Import, masm, ReturnReg);
@@ -2490,8 +2488,8 @@ static bool GenerateImportJitExit(MacroAssembler& masm, const FuncImport& fi,
           masm.branchTest32(Assembler::Zero, ReturnReg, ReturnReg, throwLabel);
           masm.unboxInt32(Address(masm.getStackPointer(), offsetToCoerceArgv),
                           ReturnReg);
-          // No spectre.index_masking required, as we generate a known-good
-          // value in a safe way here.
+          // No widening is required, as we generate a known-good value in a
+          // safe way here.
           break;
         case ValType::I64: {
           masm.call(SymbolicAddress::CoerceInPlace_ToBigInt);
@@ -2614,7 +2612,7 @@ bool wasm::GenerateBuiltinThunk(MacroAssembler& masm, ABIFunctionType abiType,
   masm.call(ImmPtr(funcPtr, ImmPtr::NoCheckToken()));
 
 #if defined(JS_CODEGEN_X64)
-  // No spectre.index_masking is required, as the caller will mask.
+  // No widening is required, as the caller will widen.
 #elif defined(JS_CODEGEN_X86)
   // x86 passes the return value on the x87 FP stack.
   Operand op(esp, 0);
@@ -2768,7 +2766,6 @@ static bool GenerateTrapExit(MacroAssembler& masm, Label* throwLabel,
 static bool GenerateThrowStub(MacroAssembler& masm, Label* throwLabel,
                               Offsets* offsets) {
   Register scratch = ABINonArgReturnReg0;
-  Register scratch2 = ABINonArgReturnReg1;
 
   AssertExpectedSP(masm);
   masm.haltingAlign(CodeAlignment);
@@ -2831,29 +2828,12 @@ static bool GenerateThrowStub(MacroAssembler& masm, Label* throwLabel,
 
   // The case where a Wasm catch handler was found while unwinding the stack.
   masm.bind(&resumeCatch);
-  masm.loadPtr(Address(ReturnReg, offsetof(ResumeFromException, framePointer)),
-               FramePointer);
-  // Defer reloading stackPointer until just before the jump, so as to
-  // protect other live data on the stack.
-
-  // When there is a catch handler, HandleThrow passes it the Value needed for
-  // the handler's argument as well.
-#ifdef JS_64BIT
-  ValueOperand val(scratch);
-#else
-  ValueOperand val(scratch, scratch2);
-#endif
-  masm.loadValue(Address(ReturnReg, offsetof(ResumeFromException, exception)),
-                 val);
-  Register obj = masm.extractObject(val, scratch2);
   masm.loadPtr(Address(ReturnReg, offsetof(ResumeFromException, target)),
                scratch);
-  // Now it's safe to reload stackPointer.
+  masm.loadPtr(Address(ReturnReg, offsetof(ResumeFromException, framePointer)),
+               FramePointer);
   masm.loadStackPtr(
       Address(ReturnReg, offsetof(ResumeFromException, stackPointer)));
-  // This move must come after the SP is reloaded because WasmExceptionReg may
-  // alias ReturnReg.
-  masm.movePtr(obj, WasmExceptionReg);
   masm.jump(scratch);
 
   // No catch handler was found, so we will just return out.

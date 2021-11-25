@@ -51,8 +51,6 @@ const MIF1_BRAND: FourCC = FourCC { value: *b"mif1" };
 /// A trait to indicate a type can be infallibly converted to `u64`.
 /// This should only be implemented for infallible conversions, so only unsigned types are valid.
 trait ToU64 {
-    // Remove when https://github.com/rust-lang/rust-clippy/issues/6727 is resolved
-    #[allow(clippy::wrong_self_convention)]
     fn to_u64(self) -> u64;
 }
 
@@ -71,8 +69,6 @@ impl ToU64 for usize {
 /// A trait to indicate a type can be infallibly converted to `usize`.
 /// This should only be implemented for infallible conversions, so only unsigned types are valid.
 pub trait ToUsize {
-    // Remove when https://github.com/rust-lang/rust-clippy/issues/6727 is resolved
-    #[allow(clippy::wrong_self_convention)]
     fn to_usize(self) -> usize;
 }
 
@@ -229,6 +225,12 @@ impl From<fallible_collections::TryReserveError> for Status {
     }
 }
 
+impl From<std::io::Error> for Status {
+    fn from(_: std::io::Error) -> Self {
+        Status::Io
+    }
+}
+
 /// Describes parser failures.
 ///
 /// This enum wraps the standard `io::Error` type, unified with
@@ -322,7 +324,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// four-byte box type which identifies the type of the box. Together these
 /// are enough to interpret the contents of that section of the file.
 ///
-/// See ISOBMFF (ISO 14496-12:2015) § 4.2
+/// See ISOBMFF (ISO 14496-12:2020) § 4.2
 #[derive(Debug, Clone, Copy)]
 struct BoxHeader {
     /// Box type.
@@ -332,6 +334,7 @@ struct BoxHeader {
     /// Offset to the start of the contained data (or header size).
     offset: u64,
     /// Uuid for extended type.
+    #[allow(dead_code)] // See https://github.com/mozilla/mp4parse-rust/issues/340
     uuid: Option<[u8; 16]>,
 }
 
@@ -343,7 +346,9 @@ impl BoxHeader {
 /// File type box 'ftyp'.
 #[derive(Debug)]
 struct FileTypeBox {
+    #[allow(dead_code)] // See https://github.com/mozilla/mp4parse-rust/issues/340
     major_brand: FourCC,
+    #[allow(dead_code)] // See https://github.com/mozilla/mp4parse-rust/issues/340
     minor_version: u32,
     compatible_brands: TryVec<FourCC>,
 }
@@ -352,6 +357,7 @@ struct FileTypeBox {
 #[derive(Debug)]
 struct MovieHeaderBox {
     pub timescale: u32,
+    #[allow(dead_code)] // See https://github.com/mozilla/mp4parse-rust/issues/340
     duration: u64,
 }
 
@@ -389,7 +395,9 @@ struct EditListBox {
 struct Edit {
     segment_duration: u64,
     media_time: i64,
+    #[allow(dead_code)] // See https://github.com/mozilla/mp4parse-rust/issues/340
     media_rate_integer: i16,
+    #[allow(dead_code)] // See https://github.com/mozilla/mp4parse-rust/issues/340
     media_rate_fraction: i16,
 }
 
@@ -513,6 +521,7 @@ pub enum AudioCodecSpecific {
 #[derive(Debug)]
 pub struct AudioSampleEntry {
     pub codec_type: CodecType,
+    #[allow(dead_code)] // See https://github.com/mozilla/mp4parse-rust/issues/340
     data_reference_index: u16,
     pub channelcount: u32,
     pub samplesize: u16,
@@ -533,6 +542,7 @@ pub enum VideoCodecSpecific {
 #[derive(Debug)]
 pub struct VideoSampleEntry {
     pub codec_type: CodecType,
+    #[allow(dead_code)] // See https://github.com/mozilla/mp4parse-rust/issues/340
     data_reference_index: u16,
     pub width: u16,
     pub height: u16,
@@ -545,9 +555,11 @@ pub struct VideoSampleEntry {
 #[derive(Debug)]
 pub struct VPxConfigBox {
     /// An integer that specifies the VP codec profile.
+    #[allow(dead_code)] // See https://github.com/mozilla/mp4parse-rust/issues/340
     profile: u8,
     /// An integer that specifies a VP codec level all samples conform to the following table.
     /// For a description of the various levels, please refer to the VP9 Bitstream Specification.
+    #[allow(dead_code)] // See https://github.com/mozilla/mp4parse-rust/issues/340
     level: u8,
     /// An integer that specifies the bit depth of the luma and color components. Valid values
     /// are 8, 10, and 12.
@@ -557,12 +569,15 @@ pub struct VPxConfigBox {
     /// Really an enum defined by "VP Codec ISO Media File Format Binding".
     pub chroma_subsampling: u8,
     /// Really an enum defined by the "Transfer characteristics" section of ISO 23091-2:2019 § 8.2.
+    #[allow(dead_code)] // See https://github.com/mozilla/mp4parse-rust/issues/340
     transfer_characteristics: u8,
     /// Really an enum defined by the "Matrix coefficients" section of ISO 23091-2:2019 § 8.3.
     /// Available in 'VP Codec ISO Media File Format' version 1 only.
+    #[allow(dead_code)] // See https://github.com/mozilla/mp4parse-rust/issues/340
     matrix_coefficients: Option<u8>,
     /// Indicates the black level and range of the luma and chroma signals. 0 = legal range
     /// (e.g. 16-235 for 8 bit sample depth); 1 = full range (e.g. 0-255 for 8-bit sample depth).
+    #[allow(dead_code)] // See https://github.com/mozilla/mp4parse-rust/issues/340
     video_full_range_flag: bool,
     /// This is not used for VP8 and VP9 . Intended for binary codec initialization data.
     pub codec_init: TryVec<u8>,
@@ -603,6 +618,7 @@ pub struct FLACMetadataBlock {
 /// Represents a FLACSpecificBox 'dfLa'
 #[derive(Debug)]
 pub struct FLACSpecificBox {
+    #[allow(dead_code)] // See https://github.com/mozilla/mp4parse-rust/issues/340
     version: u8,
     pub blocks: TryVec<FLACMetadataBlock>,
 }
@@ -629,6 +645,7 @@ pub struct OpusSpecificBox {
 /// Represent an ALACSpecificBox 'alac'
 #[derive(Debug)]
 pub struct ALACSpecificBox {
+    #[allow(dead_code)] // See https://github.com/mozilla/mp4parse-rust/issues/340
     version: u8,
     pub data: TryVec<u8>,
 }
@@ -851,7 +868,7 @@ pub struct MetadataBox {
     pub xml: Option<XmlBox>,
 }
 
-/// See ISOBMFF (ISO 14496-12:2015) § 8.11.2.1
+/// See ISOBMFF (ISO 14496-12:2020) § 8.11.2.1
 #[cfg(feature = "meta-xml")]
 #[derive(Debug)]
 pub enum XmlBox {
@@ -889,7 +906,7 @@ enum IsobmffItem {
 
 #[derive(Debug)]
 struct AvifItem {
-    /// The `item_ID` from ISOBMFF (ISO 14496-12:2015)
+    /// The `item_ID` from ISOBMFF (ISO 14496-12:2020) § 8.11.3
     ///
     /// See [`read_iloc`]
     id: ItemId,
@@ -920,7 +937,7 @@ pub struct AvifContext {
     strictness: ParseStrictness,
     /// Referred to by the `Location` variants of the `AvifItem`s in this struct
     item_storage: TryVec<MediaDataBox>,
-    /// The item indicated by the `pitm` box, See ISOBMFF (ISO 14496-12:2015) § 8.11.4
+    /// The item indicated by the `pitm` box, See ISOBMFF (ISO 14496-12:2020) § 8.11.4
     primary_item: AvifItem,
     /// Associated alpha channel for the primary item, if any
     alpha_item: Option<AvifItem>,
@@ -981,24 +998,40 @@ impl AvifContext {
     }
 
     pub fn nclx_colour_information_ptr(&self) -> Result<*const NclxColourInformation> {
-        match self
+        let nclx_colr_boxes = self
             .item_properties
-            .get(self.primary_item.id, BoxType::ColourInformationBox)?
-        {
-            Some(ItemProperty::Colour(ColourInformation::Nclx(nclx))) => Ok(nclx),
-            None | Some(ItemProperty::Colour(ColourInformation::Icc(_))) => Ok(std::ptr::null()),
-            Some(other_property) => panic!("property key mismatch: {:?}", other_property),
+            .get_multiple(self.primary_item.id, |prop| {
+                matches!(prop, ItemProperty::Colour(ColourInformation::Nclx(_)))
+            })?;
+
+        match *nclx_colr_boxes.as_slice() {
+            [] => Ok(std::ptr::null()),
+            [ItemProperty::Colour(ColourInformation::Nclx(nclx)), ..] => {
+                if nclx_colr_boxes.len() > 1 {
+                    warn!("Multiple nclx colr boxes, using first");
+                }
+                Ok(nclx)
+            }
+            _ => unreachable!("Expect only ColourInformation::Nclx(_) matches"),
         }
     }
 
     pub fn icc_colour_information(&self) -> Result<&[u8]> {
-        match self
+        let icc_colr_boxes = self
             .item_properties
-            .get(self.primary_item.id, BoxType::ColourInformationBox)?
-        {
-            Some(ItemProperty::Colour(ColourInformation::Icc(icc))) => Ok(icc.bytes.as_slice()),
-            None | Some(ItemProperty::Colour(ColourInformation::Nclx(_))) => Ok(&[]),
-            Some(other_property) => panic!("property key mismatch: {:?}", other_property),
+            .get_multiple(self.primary_item.id, |prop| {
+                matches!(prop, ItemProperty::Colour(ColourInformation::Icc(_, _)))
+            })?;
+
+        match *icc_colr_boxes.as_slice() {
+            [] => Ok(&[]),
+            [ItemProperty::Colour(ColourInformation::Icc(icc, _)), ..] => {
+                if icc_colr_boxes.len() > 1 {
+                    warn!("Multiple ICC profiles in colr boxes, using first");
+                }
+                Ok(icc.bytes.as_slice())
+            }
+            _ => unreachable!("Expect only ColourInformation::Icc(_) matches"),
         }
     }
 
@@ -1051,7 +1084,7 @@ struct AvifMeta {
 }
 
 /// A Media Data Box
-/// See ISOBMFF (ISO 14496-12:2015) § 8.1.1
+/// See ISOBMFF (ISO 14496-12:2020) § 8.1.1
 struct MediaDataBox {
     /// Offset of `data` from the beginning of the "file". See ConstructionMethod::File.
     /// Note: the file may not be an actual file, read_avif supports any `&mut impl Read`
@@ -1252,7 +1285,7 @@ impl ItemId {
 }
 
 /// Used for 'infe' boxes within 'iinf' boxes
-/// See ISOBMFF (ISO 14496-12:2015) § 8.11.6
+/// See ISOBMFF (ISO 14496-12:2020) § 8.11.6
 /// Only versions {2, 3} are supported
 #[derive(Debug)]
 struct ItemInfoEntry {
@@ -1260,7 +1293,7 @@ struct ItemInfoEntry {
     item_type: u32,
 }
 
-/// See ISOBMFF (ISO 14496-12:2015) § 8.11.12
+/// See ISOBMFF (ISO 14496-12:2020) § 8.11.12
 #[derive(Debug)]
 struct SingleItemTypeReferenceBox {
     item_type: FourCC,
@@ -1269,7 +1302,7 @@ struct SingleItemTypeReferenceBox {
 }
 
 /// Potential sizes (in bytes) of variable-sized fields of the 'iloc' box
-/// See ISOBMFF (ISO 14496-12:2015) § 8.11.3
+/// See ISOBMFF (ISO 14496-12:2020) § 8.11.3
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum IlocFieldSize {
     Zero,
@@ -1321,7 +1354,7 @@ impl TryFrom<u8> for IlocVersion {
 }
 
 /// Used for 'iloc' boxes
-/// See ISOBMFF (ISO 14496-12:2015) § 8.11.3
+/// See ISOBMFF (ISO 14496-12:2020) § 8.11.3
 /// `base_offset` is omitted since it is integrated into the ranges in `extents`
 /// `data_reference_index` is omitted, since only 0 (i.e., this file) is supported
 #[derive(Debug)]
@@ -1331,7 +1364,7 @@ struct ItemLocationBoxItem {
     extents: TryVec<Extent>,
 }
 
-/// See ISOBMFF (ISO 14496-12:2015) § 8.11.3
+/// See ISOBMFF (ISO 14496-12:2020) § 8.11.3
 ///
 /// Note: per MIAF (ISO 23000-22:2019) § 7.2.1.7:<br />
 /// > MIAF image items are constrained as follows:<br />
@@ -1478,7 +1511,7 @@ impl Track {
     }
 }
 
-/// See ISOBMFF (ISO 14496-12:2015) § 4.2
+/// See ISOBMFF (ISO 14496-12:2020) § 4.2
 struct BMFFBox<'a, T: 'a> {
     head: BoxHeader,
     content: Take<&'a mut T>,
@@ -1554,7 +1587,7 @@ impl<'a, T> Drop for BMFFBox<'a, T> {
 /// parsers for the internal content, or to get the length to
 /// skip unknown or uninteresting boxes.
 ///
-/// See ISOBMFF (ISO 14496-12:2015) § 4.2
+/// See ISOBMFF (ISO 14496-12:2020) § 4.2
 fn read_box_header<T: ReadBytesExt>(src: &mut T) -> Result<BoxHeader> {
     let size32 = be_u32(src)?;
     let name = BoxType::from(be_u32(src)?);
@@ -1665,7 +1698,7 @@ pub fn read_avif<T: Read>(f: &mut T, strictness: ParseStrictness) -> Result<Avif
 
     let mut iter = BoxIter::new(&mut f);
 
-    // 'ftyp' box must occur first; see ISOBMFF (ISO 14496-12:2015) § 4.3.1
+    // 'ftyp' box must occur first; see ISOBMFF (ISO 14496-12:2020) § 4.3.1
     if let Some(mut b) = iter.next_box()? {
         if b.head.name == BoxType::FileTypeBox {
             let ftyp = read_ftyp(&mut b)?;
@@ -1694,7 +1727,7 @@ pub fn read_avif<T: Read>(f: &mut T, strictness: ParseStrictness) -> Result<Avif
             BoxType::MetadataBox => {
                 if meta.is_some() {
                     return Err(Error::InvalidData(
-                        "There should be zero or one meta boxes per ISOBMFF (ISO 14496-12:2015) § 8.11.1.1",
+                        "There should be zero or one meta boxes per ISOBMFF (ISO 14496-12:2020) § 8.11.1.1",
                     ));
                 }
                 meta = Some(read_avif_meta(&mut b, strictness)?);
@@ -1867,7 +1900,7 @@ pub fn read_avif<T: Read>(f: &mut T, strictness: ParseStrictness) -> Result<Avif
 /// Parse a metadata box in the context of an AVIF
 /// Currently requires the primary item to be an av01 item type and generates
 /// an error otherwise.
-/// See ISOBMFF (ISO 14496-12:2015) § 8.11.1
+/// See ISOBMFF (ISO 14496-12:2020) § 8.11.1
 fn read_avif_meta<T: Read + Offset>(
     src: &mut BMFFBox<T>,
     strictness: ParseStrictness,
@@ -1901,7 +1934,7 @@ fn read_avif_meta<T: Read + Offset>(
             BoxType::HandlerBox => {
                 if read_handler_box {
                     return Err(Error::InvalidData(
-                        "There shall be exactly one hdlr box per ISOBMFF (ISO 14496-12:2015) § 8.4.3.1",
+                        "There shall be exactly one hdlr box per ISOBMFF (ISO 14496-12:2020) § 8.4.3.1",
                     ));
                 }
                 let HandlerBox { handler_type } = read_hdlr(&mut b, strictness)?;
@@ -1917,7 +1950,7 @@ fn read_avif_meta<T: Read + Offset>(
             BoxType::ItemInfoBox => {
                 if item_infos.is_some() {
                     return Err(Error::InvalidData(
-                        "There shall be zero or one iinf boxes per ISOBMFF (ISO 14496-12:2015) § 8.11.6.1",
+                        "There shall be zero or one iinf boxes per ISOBMFF (ISO 14496-12:2020) § 8.11.6.1",
                     ));
                 }
                 item_infos = Some(read_iinf(&mut b, strictness)?);
@@ -1925,7 +1958,7 @@ fn read_avif_meta<T: Read + Offset>(
             BoxType::ItemLocationBox => {
                 if iloc_items.is_some() {
                     return Err(Error::InvalidData(
-                        "There shall be zero or one iloc boxes per ISOBMFF (ISO 14496-12:2015) § 8.11.3.1",
+                        "There shall be zero or one iloc boxes per ISOBMFF (ISO 14496-12:2020) § 8.11.3.1",
                     ));
                 }
                 iloc_items = Some(read_iloc(&mut b)?);
@@ -1933,14 +1966,14 @@ fn read_avif_meta<T: Read + Offset>(
             BoxType::PrimaryItemBox => {
                 if primary_item_id.is_some() {
                     return Err(Error::InvalidData(
-                        "There shall be zero or one pitm boxes per ISOBMFF (ISO 14496-12:2015) § 8.11.4.1",
+                        "There shall be zero or one pitm boxes per ISOBMFF (ISO 14496-12:2020) § 8.11.4.1",
                     ));
                 }
                 primary_item_id = Some(read_pitm(&mut b)?);
             }
             BoxType::ItemReferenceBox => {
                 if item_references.is_some() {
-                    return Err(Error::InvalidData("There shall be zero or one iref boxes per ISOBMFF (ISO 14496-12:2015) § 8.11.12.1"));
+                    return Err(Error::InvalidData("There shall be zero or one iref boxes per ISOBMFF (ISO 14496-12:2020) § 8.11.12.1"));
                 }
                 item_references = Some(read_iref(&mut b)?);
             }
@@ -1988,7 +2021,7 @@ fn read_avif_meta<T: Read + Offset>(
 }
 
 /// Parse a Primary Item Box
-/// See ISOBMFF (ISO 14496-12:2015) § 8.11.4
+/// See ISOBMFF (ISO 14496-12:2020) § 8.11.4
 fn read_pitm<T: Read>(src: &mut BMFFBox<T>) -> Result<ItemId> {
     let version = read_fullbox_version_no_flags(src)?;
 
@@ -2002,7 +2035,7 @@ fn read_pitm<T: Read>(src: &mut BMFFBox<T>) -> Result<ItemId> {
 }
 
 /// Parse an Item Information Box
-/// See ISOBMFF (ISO 14496-12:2015) § 8.11.6
+/// See ISOBMFF (ISO 14496-12:2020) § 8.11.6
 fn read_iinf<T: Read>(
     src: &mut BMFFBox<T>,
     strictness: ParseStrictness,
@@ -2025,7 +2058,7 @@ fn read_iinf<T: Read>(
     while let Some(mut b) = iter.next_box()? {
         if b.head.name != BoxType::ItemInfoEntry {
             return Err(Error::InvalidData(
-                "iinf box shall contain only infe boxes per ISOBMFF (ISO 14496-12:2015) § 8.11.6.2",
+                "iinf box shall contain only infe boxes per ISOBMFF (ISO 14496-12:2020) § 8.11.6.2",
             ));
         }
 
@@ -2051,7 +2084,7 @@ impl std::fmt::Display for U32BE {
 }
 
 /// Parse an Item Info Entry
-/// See ISOBMFF (ISO 14496-12:2015) § 8.11.6.2
+/// See ISOBMFF (ISO 14496-12:2020) § 8.11.6.2
 fn read_infe<T: Read>(src: &mut BMFFBox<T>, strictness: ParseStrictness) -> Result<ItemInfoEntry> {
     let (version, flags) = read_fullbox_extra(src)?;
 
@@ -2062,7 +2095,7 @@ fn read_infe<T: Read>(src: &mut BMFFBox<T>, strictness: ParseStrictness) -> Resu
         fail_if(
             strictness == ParseStrictness::Strict,
             "'infe' flags field shall be 0 \
-             per ISOBMFF (ISO 14496-12:2015) § 8.11.6.2",
+             per ISOBMFF (ISO 14496-12:2020) § 8.11.6.2",
         )?;
     }
 
@@ -2089,7 +2122,7 @@ fn read_infe<T: Read>(src: &mut BMFFBox<T>, strictness: ParseStrictness) -> Resu
 }
 
 /// Parse an Item Reference Box
-/// See ISOBMFF (ISO 14496-12:2015) § 8.11.12
+/// See ISOBMFF (ISO 14496-12:2020) § 8.11.12
 fn read_iref<T: Read>(src: &mut BMFFBox<T>) -> Result<TryVec<SingleItemTypeReferenceBox>> {
     let mut item_references = TryVec::new();
     let version = read_fullbox_version_no_flags(src)?;
@@ -2127,6 +2160,11 @@ fn read_iref<T: Read>(src: &mut BMFFBox<T>) -> Result<TryVec<SingleItemTypeRefer
 ///
 /// Note: HEIF (ISO 23008-12:2017) § 9.3.1 also defines the `iprp` box and
 /// related types, but lacks additional requirements specified in 14496-12:2020.
+///
+/// Note: Currently HEIF (ISO 23008-12:2017) § 6.5.5.1 specifies "At most one"
+/// `colr` box per item, but this is being amended in [DIS 23008-12](https://www.iso.org/standard/83650.html).
+/// The new text is likely to be "At most one for a given value of `colour_type`",
+/// so this implementation adheres to that language for forward compatibility.
 fn read_iprp<T: Read>(
     src: &mut BMFFBox<T>,
     brand: FourCC,
@@ -2198,6 +2236,9 @@ fn read_iprp<T: Read>(
                 BoxType::ImageMirror,
             ];
             let mut prev_transform_index = None;
+            // Realistically, there should only ever be 1 nclx and 1 icc
+            let mut colour_type_indexes: TryHashMap<FourCC, PropertyIndex> =
+                TryHashMap::with_capacity(2)?;
 
             for a in &association_entry.associations {
                 if a.property_index == PropertyIndex(0) {
@@ -2229,6 +2270,28 @@ fn read_iprp<T: Read>(
                                      document shall be marked as essential \
                                      per MIAF (ISO 23000-22:2019) § 7.3.9",
                                 )?;
+                            }
+                        }
+                        // XXX this is contrary to the published specification; see doc comment
+                        // at the beginning of this function for more details
+                        ItemProperty::Colour(colr) => {
+                            let colour_type = colr.colour_type();
+                            if let Some(prev_colr_index) = colour_type_indexes.get(&colour_type) {
+                                warn!(
+                                    "Multiple '{}' type colr associations with {:?}: {:?} and {:?}",
+                                    colour_type,
+                                    association_entry.item_id,
+                                    a.property_index,
+                                    prev_colr_index
+                                );
+                                fail_if(
+                                    strictness != ParseStrictness::Permissive,
+                                    "Each item shall have at most one property association with a
+                                     ColourInformationBox (colr) for a given value of colour_type \
+                                     per HEIF (ISO/IEC DIS 23008-12) § 6.5.5.1",
+                                )?;
+                            } else {
+                                colour_type_indexes.insert(colour_type, a.property_index)?;
                             }
                         }
                         _ => {}
@@ -2365,7 +2428,10 @@ impl ItemPropertiesBox {
     }
 
     fn get(&self, item_id: ItemId, property_type: BoxType) -> Result<Option<&ItemProperty>> {
-        match self.get_multiple(item_id, property_type)?.as_slice() {
+        match self
+            .get_multiple(item_id, |prop| prop.box_type() == property_type)?
+            .as_slice()
+        {
             &[] => Ok(None),
             &[single_value] => Ok(Some(single_value)),
             multiple_values => {
@@ -2382,7 +2448,7 @@ impl ItemPropertiesBox {
     fn get_multiple(
         &self,
         item_id: ItemId,
-        property_type: BoxType,
+        filter: impl Fn(&ItemProperty) -> bool,
     ) -> Result<TryVec<&ItemProperty>> {
         let mut values = TryVec::new();
         for entry in &self.association_entries {
@@ -2390,9 +2456,7 @@ impl ItemPropertiesBox {
                 if entry.item_id == item_id {
                     match self.properties.get(&a.property_index) {
                         Some(ItemProperty::Unsupported(_)) => {}
-                        Some(property) if property.box_type() == property_type => {
-                            values.push(property)?
-                        }
+                        Some(property) if filter(property) => values.push(property)?,
                         _ => {}
                     }
                 }
@@ -2796,7 +2860,16 @@ impl fmt::Debug for IccColourInformation {
 #[derive(Debug)]
 pub enum ColourInformation {
     Nclx(NclxColourInformation),
-    Icc(IccColourInformation),
+    Icc(IccColourInformation, FourCC),
+}
+
+impl ColourInformation {
+    fn colour_type(&self) -> FourCC {
+        match self {
+            Self::Nclx(_) => FourCC::from(*b"nclx"),
+            Self::Icc(_, colour_type) => colour_type.clone(),
+        }
+    }
 }
 
 /// Parse colour information
@@ -2840,9 +2913,12 @@ fn read_colr<T: Read>(
                 full_range_flag,
             }))
         }
-        b"rICC" | b"prof" => Ok(ColourInformation::Icc(IccColourInformation {
-            bytes: src.read_into_try_vec()?,
-        })),
+        b"rICC" | b"prof" => Ok(ColourInformation::Icc(
+            IccColourInformation {
+                bytes: src.read_into_try_vec()?,
+            },
+            FourCC::from(colour_type),
+        )),
         _ => {
             error!("read_colr colour_type: {:?}", colour_type);
             Err(Error::InvalidData(
@@ -2969,7 +3045,7 @@ fn read_auxc<T: Read>(src: &mut BMFFBox<T>) -> Result<AuxiliaryTypeProperty> {
 }
 
 /// Parse an item location box inside a meta box
-/// See ISOBMFF (ISO 14496-12:2015) § 8.11.3
+/// See ISOBMFF (ISO 14496-12:2020) § 8.11.3
 fn read_iloc<T: Read>(src: &mut BMFFBox<T>) -> Result<TryHashMap<ItemId, ItemLocationBoxItem>> {
     let version: IlocVersion = read_fullbox_version_no_flags(src)?.try_into()?;
 
@@ -3014,7 +3090,7 @@ fn read_iloc<T: Read>(src: &mut BMFFBox<T>) -> Result<TryHashMap<ItemId, ItemLoc
                     0 => ConstructionMethod::File,
                     1 => ConstructionMethod::Idat,
                     2 => return Err(Error::Unsupported("construction_method 'item_offset' is not supported")),
-                    _ => return Err(Error::InvalidData("construction_method is taken from the set 0, 1 or 2 per ISOBMFF (ISO 14496-12:2015) § 8.11.3.3"))
+                    _ => return Err(Error::InvalidData("construction_method is taken from the set 0, 1 or 2 per ISOBMFF (ISO 14496-12:2020) § 8.11.3.3"))
                 }
             }
         };
@@ -3032,7 +3108,7 @@ fn read_iloc<T: Read>(src: &mut BMFFBox<T>) -> Result<TryHashMap<ItemId, ItemLoc
 
         if extent_count < 1 {
             return Err(Error::InvalidData(
-                "extent_count must have a value 1 or greater per ISOBMFF (ISO 14496-12:2015) § 8.11.3.3",
+                "extent_count must have a value 1 or greater per ISOBMFF (ISO 14496-12:2020) § 8.11.3.3",
             ));
         }
 
@@ -3042,7 +3118,7 @@ fn read_iloc<T: Read>(src: &mut BMFFBox<T>) -> Result<TryHashMap<ItemId, ItemLoc
             && (offset_size == IlocFieldSize::Zero || length_size == IlocFieldSize::Zero)
         {
             return Err(Error::InvalidData(
-                "extent_count != 1 requires explicit offset and length per ISOBMFF (ISO 14496-12:2015) § 8.11.3.3",
+                "extent_count != 1 requires explicit offset and length per ISOBMFF (ISO 14496-12:2020) § 8.11.3.3",
             ));
         }
 
@@ -3058,7 +3134,7 @@ fn read_iloc<T: Read>(src: &mut BMFFBox<T>) -> Result<TryHashMap<ItemId, ItemLoc
                 }
             };
 
-            // Per ISOBMFF (ISO 14496-12:2015) § 8.11.3.1:
+            // Per ISOBMFF (ISO 14496-12:2020) § 8.11.3.1:
             // "If the offset is not identified (the field has a length of zero), then the
             //  beginning of the source (offset 0) is implied"
             // This behavior will follow from BitReader::read_u64(0) -> 0.
@@ -3159,7 +3235,7 @@ pub fn read_mp4<T: Read>(f: &mut T) -> Result<MediaContext> {
 }
 
 /// Parse a Movie Header Box
-/// See ISOBMFF (ISO 14496-12:2015) § 8.2.2
+/// See ISOBMFF (ISO 14496-12:2020) § 8.2.2
 fn parse_mvhd<T: Read>(f: &mut BMFFBox<T>) -> Result<Option<MediaTimeScale>> {
     let mvhd = read_mvhd(f)?;
     debug!("{:?}", mvhd);
@@ -3171,7 +3247,7 @@ fn parse_mvhd<T: Read>(f: &mut BMFFBox<T>) -> Result<Option<MediaTimeScale>> {
 }
 
 /// Parse a Movie Box
-/// See ISOBMFF (ISO 14496-12:2015) § 8.2.1
+/// See ISOBMFF (ISO 14496-12:2020) § 8.2.1
 /// Note that despite the spec indicating "exactly one" moov box should exist at
 /// the file container level, we support reading and merging multiple moov boxes
 /// such as with tests/test_case_1185230.mp4.
@@ -3270,7 +3346,7 @@ fn read_pssh<T: Read>(src: &mut BMFFBox<T>) -> Result<ProtectionSystemSpecificHe
 }
 
 /// Parse a Movie Extends Box
-/// See ISOBMFF (ISO 14496-12:2015) § 8.8.1
+/// See ISOBMFF (ISO 14496-12:2020) § 8.8.1
 fn read_mvex<T: Read>(src: &mut BMFFBox<T>) -> Result<MovieExtendsBox> {
     let mut iter = src.box_iter();
     let mut fragment_duration = None;
@@ -3297,7 +3373,7 @@ fn read_mehd<T: Read>(src: &mut BMFFBox<T>) -> Result<MediaScaledTime> {
 }
 
 /// Parse a Track Box
-/// See ISOBMFF (ISO 14496-12:2015) § 8.3.1.
+/// See ISOBMFF (ISO 14496-12:2020) § 8.3.1.
 fn read_trak<T: Read>(f: &mut BMFFBox<T>, track: &mut Track) -> Result<()> {
     let mut iter = f.box_iter();
     while let Some(mut b) = iter.next_box()? {
@@ -3472,7 +3548,7 @@ fn read_stbl<T: Read>(f: &mut BMFFBox<T>, track: &mut Track) -> Result<()> {
 }
 
 /// Parse an ftyp box.
-/// See ISOBMFF (ISO 14496-12:2015) § 4.3
+/// See ISOBMFF (ISO 14496-12:2020) § 4.3
 fn read_ftyp<T: Read>(src: &mut BMFFBox<T>) -> Result<FileTypeBox> {
     let major = be_u32(src)?;
     let minor = be_u32(src)?;
@@ -3578,7 +3654,7 @@ fn read_tkhd<T: Read>(src: &mut BMFFBox<T>) -> Result<TrackHeaderBox> {
 }
 
 /// Parse a elst box.
-/// See ISOBMFF (ISO 14496-12:2015) § 8.6.6
+/// See ISOBMFF (ISO 14496-12:2020) § 8.6.6
 fn read_elst<T: Read>(src: &mut BMFFBox<T>) -> Result<EditListBox> {
     let (version, _) = read_fullbox_extra(src)?;
     let edit_count = be_u32(src)?;
@@ -3654,7 +3730,7 @@ fn read_mdhd<T: Read>(src: &mut BMFFBox<T>) -> Result<MediaHeaderBox> {
 }
 
 /// Parse a stco box.
-/// See ISOBMFF (ISO 14496-12:2015) § 8.7.5
+/// See ISOBMFF (ISO 14496-12:2020) § 8.7.5
 fn read_stco<T: Read>(src: &mut BMFFBox<T>) -> Result<ChunkOffsetBox> {
     let (_, _) = read_fullbox_extra(src)?;
     let offset_count = be_u32(src)?;
@@ -3670,7 +3746,7 @@ fn read_stco<T: Read>(src: &mut BMFFBox<T>) -> Result<ChunkOffsetBox> {
 }
 
 /// Parse a co64 box.
-/// See ISOBMFF (ISO 14496-12:2015) § 8.7.5
+/// See ISOBMFF (ISO 14496-12:2020) § 8.7.5
 fn read_co64<T: Read>(src: &mut BMFFBox<T>) -> Result<ChunkOffsetBox> {
     let (_, _) = read_fullbox_extra(src)?;
     let offset_count = be_u32(src)?;
@@ -3686,7 +3762,7 @@ fn read_co64<T: Read>(src: &mut BMFFBox<T>) -> Result<ChunkOffsetBox> {
 }
 
 /// Parse a stss box.
-/// See ISOBMFF (ISO 14496-12:2015) § 8.6.2
+/// See ISOBMFF (ISO 14496-12:2020) § 8.6.2
 fn read_stss<T: Read>(src: &mut BMFFBox<T>) -> Result<SyncSampleBox> {
     let (_, _) = read_fullbox_extra(src)?;
     let sample_count = be_u32(src)?;
@@ -3702,7 +3778,7 @@ fn read_stss<T: Read>(src: &mut BMFFBox<T>) -> Result<SyncSampleBox> {
 }
 
 /// Parse a stsc box.
-/// See ISOBMFF (ISO 14496-12:2015) § 8.7.4
+/// See ISOBMFF (ISO 14496-12:2020) § 8.7.4
 fn read_stsc<T: Read>(src: &mut BMFFBox<T>) -> Result<SampleToChunkBox> {
     let (_, _) = read_fullbox_extra(src)?;
     let sample_count = be_u32(src)?;
@@ -3725,7 +3801,7 @@ fn read_stsc<T: Read>(src: &mut BMFFBox<T>) -> Result<SampleToChunkBox> {
 }
 
 /// Parse a Composition Time to Sample Box
-/// See ISOBMFF (ISO 14496-12:2015) § 8.6.1.3
+/// See ISOBMFF (ISO 14496-12:2020) § 8.6.1.3
 fn read_ctts<T: Read>(src: &mut BMFFBox<T>) -> Result<CompositionOffsetBox> {
     let (version, _) = read_fullbox_extra(src)?;
 
@@ -3765,7 +3841,7 @@ fn read_ctts<T: Read>(src: &mut BMFFBox<T>) -> Result<CompositionOffsetBox> {
 }
 
 /// Parse a stsz box.
-/// See ISOBMFF (ISO 14496-12:2015) § 8.7.3.2
+/// See ISOBMFF (ISO 14496-12:2020) § 8.7.3.2
 fn read_stsz<T: Read>(src: &mut BMFFBox<T>) -> Result<SampleSizeBox> {
     let (_, _) = read_fullbox_extra(src)?;
     let sample_size = be_u32(src)?;
@@ -3788,7 +3864,7 @@ fn read_stsz<T: Read>(src: &mut BMFFBox<T>) -> Result<SampleSizeBox> {
 }
 
 /// Parse a stts box.
-/// See ISOBMFF (ISO 14496-12:2015) § 8.6.1.2
+/// See ISOBMFF (ISO 14496-12:2020) § 8.6.1.2
 fn read_stts<T: Read>(src: &mut BMFFBox<T>) -> Result<TimeToSampleBox> {
     let (_, _) = read_fullbox_extra(src)?;
     let sample_count = be_u32(src)?;
@@ -4214,7 +4290,7 @@ fn read_dc_descriptor(data: &[u8], esds: &mut ES_Descriptor) -> Result<()> {
     }
 
     esds.audio_codec = match object_profile {
-        0x40 | 0x41 => CodecType::AAC,
+        0x40 | 0x66 | 0x67 => CodecType::AAC,
         0x69 | 0x6B => CodecType::MP3,
         _ => CodecType::Unknown,
     };
@@ -4442,12 +4518,23 @@ fn read_hdlr<T: Read>(src: &mut BMFFBox<T>, strictness: ParseStrictness) -> Resu
 
     match std::str::from_utf8(src.read_into_try_vec()?.as_slice()) {
         Ok(name) => {
-            if name.bytes().last() != Some(b'\0') {
-                fail_if(
+            match name.bytes().filter(|&b| b == b'\0').count() {
+                0 => fail_if(
                     strictness != ParseStrictness::Permissive,
                     "The HandlerBox 'name' field shall be null-terminated \
                      per ISOBMFF (ISO 14496-12:2020) § 8.4.3.2",
-                )?
+                )?,
+                1 => (),
+                _ =>
+                // See https://github.com/MPEGGroup/FileFormat/issues/35
+                {
+                    fail_if(
+                        strictness == ParseStrictness::Strict,
+                        "The HandlerBox 'name' field shall have a NUL byte \
+                         only in the final position \
+                         per ISOBMFF (ISO 14496-12:2020) § 8.4.3.2",
+                    )?
+                }
             }
         }
         Err(_) => fail_if(
@@ -4621,7 +4708,7 @@ fn read_qt_wave_atom<T: Read>(src: &mut BMFFBox<T>) -> Result<ES_Descriptor> {
 }
 
 /// Parse an audio description inside an stsd box.
-/// See ISOBMFF (ISO 14496-12:2015) § 12.2.3
+/// See ISOBMFF (ISO 14496-12:2020) § 12.2.3
 fn read_audio_sample_entry<T: Read>(src: &mut BMFFBox<T>) -> Result<SampleEntry> {
     let name = src.get_header().name;
 
@@ -4780,7 +4867,7 @@ fn read_audio_sample_entry<T: Read>(src: &mut BMFFBox<T>) -> Result<SampleEntry>
 }
 
 /// Parse a stsd box.
-/// See ISOBMFF (ISO 14496-12:2015) § 8.5.2
+/// See ISOBMFF (ISO 14496-12:2020) § 8.5.2
 /// See MP4 (ISO 14496-14:2020) § 6.7.2
 fn read_stsd<T: Read>(src: &mut BMFFBox<T>, track: &mut Track) -> Result<SampleDescriptionBox> {
     let (_, _) = read_fullbox_extra(src)?;
@@ -4922,7 +5009,7 @@ fn read_schm<T: Read>(src: &mut BMFFBox<T>) -> Result<SchemeTypeBox> {
 }
 
 /// Parse a metadata box inside a moov, trak, or mdia box.
-/// See ISOBMFF (ISO 14496-12:2015) § 8.10.1.
+/// See ISOBMFF (ISO 14496-12:2020) § 8.10.1.
 fn read_udta<T: Read>(src: &mut BMFFBox<T>) -> Result<UserdataBox> {
     let mut iter = src.box_iter();
     let mut udta = UserdataBox { meta: None };
@@ -4941,7 +5028,7 @@ fn read_udta<T: Read>(src: &mut BMFFBox<T>) -> Result<UserdataBox> {
 }
 
 /// Parse the meta box
-/// See ISOBMFF (ISO 14496-12:2015) § 8.111.
+/// See ISOBMFF (ISO 14496-12:2020) § 8.11.1
 fn read_meta<T: Read>(src: &mut BMFFBox<T>) -> Result<MetadataBox> {
     let (_, _) = read_fullbox_extra(src)?;
     let mut iter = src.box_iter();
@@ -4961,7 +5048,7 @@ fn read_meta<T: Read>(src: &mut BMFFBox<T>) -> Result<MetadataBox> {
 }
 
 /// Parse a XML box inside a meta box
-/// See ISOBMFF (ISO 14496-12:2015) § 8.11.2
+/// See ISOBMFF (ISO 14496-12:2020) § 8.11.2
 #[cfg(feature = "meta-xml")]
 fn read_xml_<T: Read>(src: &mut BMFFBox<T>, meta: &mut MetadataBox) -> Result<()> {
     if read_fullbox_version_no_flags(src)? != 0 {
@@ -4972,7 +5059,7 @@ fn read_xml_<T: Read>(src: &mut BMFFBox<T>, meta: &mut MetadataBox) -> Result<()
 }
 
 /// Parse a Binary XML box inside a meta box
-/// See ISOBMFF (ISO 14496-12:2015) § 8.11.2
+/// See ISOBMFF (ISO 14496-12:2020) § 8.11.2
 #[cfg(feature = "meta-xml")]
 fn read_bxml<T: Read>(src: &mut BMFFBox<T>, meta: &mut MetadataBox) -> Result<()> {
     if read_fullbox_version_no_flags(src)? != 0 {

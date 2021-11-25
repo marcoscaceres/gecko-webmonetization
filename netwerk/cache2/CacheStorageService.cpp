@@ -18,6 +18,7 @@
 #include "nsIObserverService.h"
 #include "nsIFile.h"
 #include "nsIURI.h"
+#include "nsINetworkPredictor.h"
 #include "nsCOMPtr.h"
 #include "nsContentUtils.h"
 #include "nsNetCID.h"
@@ -71,8 +72,7 @@ void CacheMemoryConsumer::DoMemoryReport(uint32_t aCurrentSize) {
   }
 }
 
-CacheStorageService::MemoryPool::MemoryPool(EType aType)
-    : mType(aType), mMemorySize(0) {}
+CacheStorageService::MemoryPool::MemoryPool(EType aType) : mType(aType) {}
 
 CacheStorageService::MemoryPool::~MemoryPool() {
   if (mMemorySize != 0) {
@@ -112,17 +112,7 @@ NS_IMPL_ISUPPORTS(CacheStorageService, nsICacheStorageService,
 
 CacheStorageService* CacheStorageService::sSelf = nullptr;
 
-CacheStorageService::CacheStorageService()
-    : mLock("CacheStorageService.mLock"),
-      mForcedValidEntriesLock("CacheStorageService.mForcedValidEntriesLock"),
-      mShutdown(false),
-      mDiskPool(MemoryPool::DISK),
-      mMemoryPool(MemoryPool::MEMORY)
-#ifdef MOZ_TSAN
-      ,
-      mPurgeTimerActive(false)
-#endif
-{
+CacheStorageService::CacheStorageService() {
   CacheFileIOManager::Init();
 
   MOZ_ASSERT(XRE_IsParentProcess());
@@ -199,9 +189,7 @@ class WalkCacheRunnable : public Runnable,
   WalkCacheRunnable(nsICacheStorageVisitor* aVisitor, bool aVisitEntries)
       : Runnable("net::WalkCacheRunnable"),
         mService(CacheStorageService::Self()),
-        mCallback(aVisitor),
-        mSize(0),
-        mCancel(false) {
+        mCallback(aVisitor) {
     MOZ_ASSERT(NS_IsMainThread());
     StoreNotifyStorage(true);
     StoreVisitEntries(aVisitEntries);
@@ -216,7 +204,7 @@ class WalkCacheRunnable : public Runnable,
   RefPtr<CacheStorageService> mService;
   nsCOMPtr<nsICacheStorageVisitor> mCallback;
 
-  uint64_t mSize;
+  uint64_t mSize{0};
 
   // clang-format off
   MOZ_ATOMIC_BITFIELDS(mAtomicBitfields, 8, (
@@ -225,7 +213,7 @@ class WalkCacheRunnable : public Runnable,
   ))
   // clang-format on
 
-  Atomic<bool> mCancel;
+  Atomic<bool> mCancel{false};
 };
 
 // WalkMemoryCacheRunnable
@@ -380,12 +368,7 @@ class WalkDiskCacheRunnable : public WalkCacheRunnable {
    public:
     explicit OnCacheEntryInfoRunnable(WalkDiskCacheRunnable* aWalker)
         : Runnable("net::WalkDiskCacheRunnable::OnCacheEntryInfoRunnable"),
-          mWalker(aWalker),
-          mDataSize(0),
-          mFetchCount(0),
-          mLastModifiedTime(0),
-          mExpirationTime(0),
-          mPinned(false) {}
+          mWalker(aWalker) {}
 
     NS_IMETHOD Run() override {
       MOZ_ASSERT(NS_IsMainThread());
@@ -412,11 +395,11 @@ class WalkDiskCacheRunnable : public WalkCacheRunnable {
 
     nsCString mURISpec;
     nsCString mIdEnhance;
-    int64_t mDataSize;
-    int32_t mFetchCount;
-    uint32_t mLastModifiedTime;
-    uint32_t mExpirationTime;
-    bool mPinned;
+    int64_t mDataSize{0};
+    int32_t mFetchCount{0};
+    uint32_t mLastModifiedTime{0};
+    uint32_t mExpirationTime{0};
+    bool mPinned{false};
     nsCOMPtr<nsILoadContextInfo> mInfo;
   };
 
@@ -664,19 +647,6 @@ NS_IMETHODIMP CacheStorageService::PinningCacheStorage(
   nsCOMPtr<nsICacheStorage> storage =
       new CacheStorage(aLoadContextInfo, true /* use disk */,
                        true /* ignore size checks */, true /* pin */);
-  storage.forget(_retval);
-  return NS_OK;
-}
-
-NS_IMETHODIMP CacheStorageService::SynthesizedCacheStorage(
-    nsILoadContextInfo* aLoadContextInfo, nsICacheStorage** _retval) {
-  NS_ENSURE_ARG(aLoadContextInfo);
-  NS_ENSURE_ARG(_retval);
-
-  nsCOMPtr<nsICacheStorage> storage =
-      new CacheStorage(aLoadContextInfo, false,
-                       true /* skip size checks for synthesized cache */,
-                       false /* no pinning */);
   storage.forget(_retval);
   return NS_OK;
 }
@@ -1190,24 +1160,44 @@ bool CacheStorageService::IsForcedValidEntry(
     nsACString const& aContextEntryKey) {
   mozilla::MutexAutoLock lock(mForcedValidEntriesLock);
 
-  TimeStamp validUntil;
+  ForcedValidData data;
 
-  if (!mForcedValidEntries.Get(aContextEntryKey, &validUntil)) {
+  if (!mForcedValidEntries.Get(aContextEntryKey, &data)) {
     return false;
   }
 
-  if (validUntil.IsNull()) {
+  if (data.validUntil.IsNull()) {
+    MOZ_ASSERT_UNREACHABLE("the timeStamp should never be null");
     return false;
   }
 
   // Entry timeout not reached yet
-  if (TimeStamp::NowLoRes() <= validUntil) {
+  if (TimeStamp::NowLoRes() <= data.validUntil) {
     return true;
   }
 
   // Entry timeout has been reached
   mForcedValidEntries.Remove(aContextEntryKey);
+
+  if (!data.viewed) {
+    Telemetry::AccumulateCategorical(
+        Telemetry::LABELS_PREDICTOR_PREFETCH_USE_STATUS::WaitedTooLong);
+  }
   return false;
+}
+
+void CacheStorageService::MarkForcedValidEntryUse(nsACString const& aContextKey,
+                                                  nsACString const& aEntryKey) {
+  mozilla::MutexAutoLock lock(mForcedValidEntriesLock);
+
+  ForcedValidData data;
+
+  if (!mForcedValidEntries.Get(aContextKey + aEntryKey, &data)) {
+    return;
+  }
+
+  data.viewed = true;
+  mForcedValidEntries.InsertOrUpdate(aContextKey + aEntryKey, data);
 }
 
 // Allows a cache entry to be loaded directly from cache without further
@@ -1220,10 +1210,11 @@ void CacheStorageService::ForceEntryValidFor(nsACString const& aContextKey,
   TimeStamp now = TimeStamp::NowLoRes();
   ForcedValidEntriesPrune(now);
 
-  // This will be the timeout
-  TimeStamp validUntil = now + TimeDuration::FromSeconds(aSecondsToTheFuture);
+  ForcedValidData data;
+  data.validUntil = now + TimeDuration::FromSeconds(aSecondsToTheFuture);
+  data.viewed = false;
 
-  mForcedValidEntries.InsertOrUpdate(aContextKey + aEntryKey, validUntil);
+  mForcedValidEntries.InsertOrUpdate(aContextKey + aEntryKey, data);
 }
 
 void CacheStorageService::RemoveEntryForceValid(nsACString const& aContextKey,
@@ -1232,6 +1223,12 @@ void CacheStorageService::RemoveEntryForceValid(nsACString const& aContextKey,
 
   LOG(("CacheStorageService::RemoveEntryForceValid context='%s' entryKey=%s",
        aContextKey.BeginReading(), aEntryKey.BeginReading()));
+  ForcedValidData data;
+  bool ok = mForcedValidEntries.Get(aContextKey + aEntryKey, &data);
+  if (ok && !data.viewed) {
+    Telemetry::AccumulateCategorical(
+        Telemetry::LABELS_PREDICTOR_PREFETCH_USE_STATUS::WaitedTooLong);
+  }
   mForcedValidEntries.Remove(aContextKey + aEntryKey);
 }
 
@@ -1242,7 +1239,11 @@ void CacheStorageService::ForcedValidEntriesPrune(TimeStamp& now) {
   if (now < dontPruneUntil) return;
 
   for (auto iter = mForcedValidEntries.Iter(); !iter.Done(); iter.Next()) {
-    if (iter.Data() < now) {
+    if (iter.Data().validUntil < now) {
+      if (!iter.Data().viewed) {
+        Telemetry::AccumulateCategorical(
+            Telemetry::LABELS_PREDICTOR_PREFETCH_USE_STATUS::WaitedTooLong);
+      }
       iter.Remove();
     }
   }
@@ -1548,7 +1549,8 @@ nsresult CacheStorageService::AddStorageEntry(
             .get();
 
     bool entryExists = entries->Get(entryKey, getter_AddRefs(entry));
-    if (!entryExists && aFlags & nsICacheStorage::OPEN_READONLY &&
+    if (!entryExists && (aFlags & nsICacheStorage::OPEN_READONLY) &&
+        (aFlags & nsICacheStorage::OPEN_SECRETLY) &&
         StaticPrefs::network_cache_bug1708673()) {
       return NS_ERROR_CACHE_KEY_NOT_FOUND;
     }

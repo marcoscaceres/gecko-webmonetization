@@ -19,6 +19,7 @@ class ChildProfilerController;
 namespace mozilla {
 namespace net {
 
+class ProxyAutoConfigChild;
 class SocketProcessBridgeParent;
 class BackgroundDataBridgeParent;
 
@@ -140,6 +141,12 @@ class SocketProcessChild final
       GetDNSCacheEntriesResolver&& aResolve);
   mozilla::ipc::IPCResult RecvGetHttpConnectionData(
       GetHttpConnectionDataResolver&& aResolve);
+
+  mozilla::ipc::IPCResult RecvInitProxyAutoConfigChild(
+      Endpoint<PProxyAutoConfigChild>&& aEndpoint);
+
+  mozilla::ipc::IPCResult RecvRecheckIPConnectivity();
+  mozilla::ipc::IPCResult RecvRecheckDNS();
 
  protected:
   friend class SocketProcessImpl;

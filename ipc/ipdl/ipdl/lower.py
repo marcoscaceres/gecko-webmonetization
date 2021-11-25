@@ -269,10 +269,6 @@ def _refptr(T):
     return Type("RefPtr", T=T)
 
 
-def _uniqueptr(T):
-    return Type("UniquePtr", T=T)
-
-
 def _alreadyaddrefed(T):
     return Type("already_AddRefed", T=T)
 
@@ -300,8 +296,8 @@ def _makePromise(returns, side, resolver=False):
 
 def _resolveType(returns, side):
     if len(returns) > 1:
-        return _tuple([d.moveType(side) for d in returns])
-    return returns[0].moveType(side)
+        return _tuple([d.inType(side) for d in returns])
+    return returns[0].inType(side)
 
 
 def _makeResolver(returns, side):
@@ -467,6 +463,7 @@ class _DestroyReason:
     NormalShutdown = ExprVar("NormalShutdown")
     AbnormalShutdown = ExprVar("AbnormalShutdown")
     FailedConstructor = ExprVar("FailedConstructor")
+    ManagedEndpointDropped = ExprVar("ManagedEndpointDropped")
 
 
 class _ResponseRejectReason:
@@ -562,16 +559,13 @@ def _cxxConstRefType(ipdltype, side):
     if ipdltype.isIPDL() and ipdltype.isShmem():
         t.ref = True
         return t
-    if ipdltype.isIPDL() and ipdltype.isByteBuf():
-        t.ref = True
-        return t
     if ipdltype.isIPDL() and ipdltype.hasBaseType():
         # Keep same constness as inner type.
         inner = _cxxConstRefType(ipdltype.basetype, side)
         t.const = inner.const or not inner.ref
         t.ref = True
         return t
-    if ipdltype.isCxx() and ipdltype.isMoveonly():
+    if ipdltype.isCxx() and (ipdltype.isSendMoveOnly() or ipdltype.isDataMoveOnly()):
         t.const = True
         t.ref = True
         return t
@@ -580,41 +574,46 @@ def _cxxConstRefType(ipdltype, side):
         t = t.T
         t.ptr = True
         return t
-    if ipdltype.isUniquePtr():
-        t.ref = True
-        return t
     t.const = True
     t.ref = True
     return t
 
 
-def _cxxTypeCanMoveSend(ipdltype):
-    return ipdltype.isUniquePtr()
+def _cxxTypeNeedsMoveForSend(ipdltype, context="root", visited=None):
+    """Returns `True` if serializing ipdltype requires a mutable reference, e.g.
+    because the underlying resource represented by the value is being
+    transferred to another process. This is occasionally distinct from whether
+    the C++ type exposes a copy constructor, such as for types which are not
+    cheaply copiable, but are not mutated when serialized."""
 
+    if visited is None:
+        visited = set()
 
-def _cxxTypeNeedsMove(ipdltype):
-    if _cxxTypeNeedsMoveForSend(ipdltype):
-        return True
-
-    if ipdltype.isIPDL():
-        return ipdltype.isArray()
-
-    return False
-
-
-def _cxxTypeNeedsMoveForSend(ipdltype):
-    if ipdltype.isUniquePtr():
-        return True
+    visited.add(ipdltype)
 
     if ipdltype.isCxx():
-        return ipdltype.isMoveonly()
+        return ipdltype.isSendMoveOnly()
 
     if ipdltype.isIPDL():
         if ipdltype.hasBaseType():
-            return _cxxTypeNeedsMove(ipdltype.basetype)
+            return _cxxTypeNeedsMoveForSend(ipdltype.basetype, "wrapper", visited)
+        if ipdltype.isStruct() or ipdltype.isUnion():
+            return any(
+                _cxxTypeNeedsMoveForSend(t, "compound", visited)
+                for t in ipdltype.itercomponents()
+                if t not in visited
+            )
+
+        # For historical reasons, shmem is `const_cast` to a mutable reference
+        # when being stored in a struct or union (see
+        # `_StructField.constRefExpr` and `_UnionMember.getConstValue`), meaning
+        # that they do not cause the containing struct to require move for
+        # sending.
+        if ipdltype.isShmem():
+            return context != "compound"
+
         return (
-            ipdltype.isShmem()
-            or ipdltype.isByteBuf()
+            ipdltype.isByteBuf()
             or ipdltype.isEndpoint()
             or ipdltype.isManagedEndpoint()
         )
@@ -622,42 +621,46 @@ def _cxxTypeNeedsMoveForSend(ipdltype):
     return False
 
 
-# FIXME Bug 1547019 This should be the same as _cxxTypeNeedsMoveForSend, but
-#                   a lot of existing code needs to be updated and fixed before
-#                   we can do that.
-def _cxxTypeCanOnlyMove(ipdltype, visited=None):
+def _cxxTypeNeedsMoveForData(ipdltype, context="root", visited=None):
+    """Returns `True` if the bare C++ type corresponding to ipdltype does not
+    satisfy std::is_copy_constructible_v<T>. All C++ types supported by IPDL
+    must support std::is_move_constructible_v<T>, so non-movable types must be
+    passed behind a `UniquePtr`."""
+
     if visited is None:
         visited = set()
 
     visited.add(ipdltype)
 
+    if ipdltype.isUniquePtr():
+        return True
+
     if ipdltype.isCxx():
-        return ipdltype.isMoveonly()
+        return ipdltype.isDataMoveOnly()
 
     if ipdltype.isIPDL():
-        if ipdltype.isMaybe() or ipdltype.isArray():
-            return _cxxTypeCanOnlyMove(ipdltype.basetype, visited)
+        # When nested within a maybe or array, arrays are no longer copyable.
+        if context == "wrapper" and ipdltype.isArray():
+            return True
+        if ipdltype.hasBaseType():
+            return _cxxTypeNeedsMoveForData(ipdltype.basetype, "wrapper", visited)
         if ipdltype.isStruct() or ipdltype.isUnion():
             return any(
-                _cxxTypeCanOnlyMove(t, visited)
+                _cxxTypeNeedsMoveForData(t, "compound", visited)
                 for t in ipdltype.itercomponents()
                 if t not in visited
             )
-        return ipdltype.isManagedEndpoint()
+        return (
+            ipdltype.isByteBuf()
+            or ipdltype.isEndpoint()
+            or ipdltype.isManagedEndpoint()
+        )
 
     return False
 
 
 def _cxxTypeCanMove(ipdltype):
     return not (ipdltype.isIPDL() and ipdltype.isActor())
-
-
-def _cxxMoveRefType(ipdltype, side):
-    t = _cxxBareType(ipdltype, side)
-    if _cxxTypeNeedsMove(ipdltype):
-        t.rvalref = True
-        return t
-    return _cxxConstRefType(ipdltype, side)
 
 
 def _cxxForceMoveRefType(ipdltype, side):
@@ -685,6 +688,23 @@ def _cxxConstPtrToType(ipdltype, side):
         return t
     t.const = True
     t.ptr = True
+    return t
+
+
+def _cxxInType(ipdltype, side):
+    t = _cxxBareType(ipdltype, side)
+    if ipdltype.isIPDL() and ipdltype.isActor():
+        return t
+    if _cxxTypeNeedsMoveForSend(ipdltype):
+        t.rvalref = True
+        return t
+    if ipdltype.isCxx() and ipdltype.isRefcounted():
+        # Use T* instead of const RefPtr<T>&
+        t = t.T
+        t.ptr = True
+        return t
+    t.const = True
+    t.ref = True
     return t
 
 
@@ -728,10 +748,6 @@ class _HybridDecl:
         """Return this decl's C++ type as a const, 'reference' type."""
         return _cxxConstRefType(self.ipdltype, side)
 
-    def rvalueRefType(self, side):
-        """Return this decl's C++ type as an r-value 'reference' type."""
-        return _cxxMoveRefType(self.ipdltype, side)
-
     def ptrToType(self, side):
         return _cxxPtrToType(self.ipdltype, side)
 
@@ -739,18 +755,8 @@ class _HybridDecl:
         return _cxxConstPtrToType(self.ipdltype, side)
 
     def inType(self, side):
-        """Return this decl's C++ Type with inparam semantics."""
-        if self.ipdltype.isIPDL() and self.ipdltype.isActor():
-            return self.bareType(side)
-        elif _cxxTypeNeedsMoveForSend(self.ipdltype):
-            return self.rvalueRefType(side)
-        return self.constRefType(side)
-
-    def moveType(self, side):
-        """Return this decl's C++ Type with move semantics."""
-        if self.ipdltype.isIPDL() and self.ipdltype.isActor():
-            return self.bareType(side)
-        return self.rvalueRefType(side)
+        """Return this decl's C++ Type with sending inparam semantics."""
+        return _cxxInType(self.ipdltype, side)
 
     def outType(self, side):
         """Return this decl's C++ Type with outparam semantics."""
@@ -851,10 +857,6 @@ class _StructField(_CompoundTypeComponent):
         refexpr = self.refExpr(thisexpr)
         if "Shmem" == self.ipdltype.name():
             refexpr = ExprCast(refexpr, Type("Shmem", ref=True), const=True)
-        if "ByteBuf" == self.ipdltype.name():
-            refexpr = ExprCast(refexpr, Type("ByteBuf", ref=True), const=True)
-        if "FileDescriptor" == self.ipdltype.name():
-            refexpr = ExprCast(refexpr, Type("FileDescriptor", ref=True), const=True)
         return refexpr
 
     def argVar(self):
@@ -1028,12 +1030,8 @@ class _UnionMember(_CompoundTypeComponent):
     def getConstValue(self):
         v = ExprDeref(self.callGetConstPtr())
         # sigh
-        if "ByteBuf" == self.ipdltype.name():
-            v = ExprCast(v, Type("ByteBuf", ref=True), const=True)
         if "Shmem" == self.ipdltype.name():
             v = ExprCast(v, Type("Shmem", ref=True), const=True)
-        if "FileDescriptor" == self.ipdltype.name():
-            v = ExprCast(v, Type("FileDescriptor", ref=True), const=True)
         return v
 
 
@@ -1126,9 +1124,23 @@ class MessageDecl(ipdl.ast.MessageDecl):
                 return Decl(Type("Tainted", T=d.bareType(side)), d.name)
 
             if sems == "in":
-                return Decl(d.inType(side), d.name)
+                t = d.inType(side)
+                # If this is the `recv` side, and we're not using "move"
+                # semantics, that means we're an alloc method, and cannot accept
+                # values by rvalue reference. Downgrade to an lvalue reference.
+                if direction == "recv" and t.rvalref:
+                    t.rvalref = False
+                    t.ref = True
+                return Decl(t, d.name)
             elif sems == "move":
-                return Decl(d.moveType(side), d.name)
+                assert direction == "recv"
+                # For legacy reasons, use an rvalue reference when generating
+                # parameters for recv methods which accept arrays.
+                if d.ipdltype.isIPDL() and d.ipdltype.isArray():
+                    t = d.bareType(side)
+                    t.rvalref = True
+                    return Decl(t, d.name)
+                return Decl(d.inType(side), d.name)
             elif sems == "out":
                 return Decl(d.outType(side), d.name)
             else:
@@ -2009,8 +2021,6 @@ class _ParamTraits:
 
     @classmethod
     def write(cls, var, msgvar, actor, ipdltype=None):
-        # WARNING: This doesn't set AutoForActor for you, make sure this is
-        # only called when the actor is already correctly set.
         if ipdltype and _cxxTypeNeedsMoveForSend(ipdltype):
             var = ExprMove(var)
         return ExprCall(ExprVar("WriteIPDLParam"), args=[msgvar, actor, var])
@@ -2157,7 +2167,7 @@ class _ParamTraits:
         )
 
     @classmethod
-    def generateDecl(cls, fortype, write, read, constin=True):
+    def generateDecl(cls, fortype, write, read, needsmove=False):
         # IPDLParamTraits impls are selected ignoring constness, and references.
         pt = Class(
             "IPDLParamTraits",
@@ -2173,7 +2183,10 @@ class _ParamTraits:
         iprotocoltype = Type("mozilla::ipc::IProtocol", ptr=True)
 
         # static void Write(Message*, const T&);
-        intype = Type("paramType", ref=True, const=constin)
+        if needsmove:
+            intype = Type("paramType", rvalref=True)
+        else:
+            intype = Type("paramType", ref=True, const=True)
         writemthd = MethodDefn(
             MethodDecl(
                 "Write",
@@ -2330,7 +2343,9 @@ class _ParamTraits:
 
         read.append(StmtReturn.TRUE)
 
-        return cls.generateDecl(cxxtype, write, read)
+        return cls.generateDecl(
+            cxxtype, write, read, needsmove=_cxxTypeNeedsMoveForSend(structtype)
+        )
 
     @classmethod
     def unionPickling(cls, uniontype):
@@ -2430,7 +2445,9 @@ class _ParamTraits:
             StmtBlock([cls.fatalError("unknown union type"), StmtReturn.FALSE]),
         )
 
-        return cls.generateDecl(cxxtype, write, read)
+        return cls.generateDecl(
+            cxxtype, write, read, needsmove=_cxxTypeNeedsMoveForSend(uniontype)
+        )
 
 
 # --------------------------------------------------
@@ -2604,12 +2621,11 @@ def _generateCxxStruct(sd):
     constreftype = Type(sd.name, const=True, ref=True)
 
     def fieldsAsParamList():
-        # FIXME Bug 1547019 inType() should do the right thing once
-        #                   _cxxTypeCanOnlyMove is replaced with
-        #                   _cxxTypeNeedsMoveForSend
         return [
             Decl(
-                f.forceMoveType() if _cxxTypeCanOnlyMove(f.ipdltype) else f.inType(),
+                f.forceMoveType()
+                if _cxxTypeNeedsMoveForData(f.ipdltype)
+                else f.constRefType(),
                 f.argVar().name,
             )
             for f in sd.fields_ipdl_order()
@@ -2641,7 +2657,7 @@ def _generateCxxStruct(sd):
     valctor.memberinits = []
     for f in sd.fields_member_order():
         arg = f.argVar()
-        if _cxxTypeCanOnlyMove(f.ipdltype):
+        if _cxxTypeNeedsMoveForData(f.ipdltype):
             arg = ExprMove(arg)
         valctor.memberinits.append(ExprMemberInit(f.memberVar(), args=[arg]))
 
@@ -2952,9 +2968,9 @@ def _generateCxxUnion(ud):
     # Union(const T&) copy & Union(T&&) move ctors
     othervar = ExprVar("aOther")
     for c in ud.components:
-        if not _cxxTypeCanOnlyMove(c.ipdltype):
+        if not _cxxTypeNeedsMoveForData(c.ipdltype):
             copyctor = ConstructorDefn(
-                ConstructorDecl(ud.name, params=[Decl(c.inType(), othervar.name)])
+                ConstructorDecl(ud.name, params=[Decl(c.constRefType(), othervar.name)])
             )
             copyctor.addstmts(
                 [
@@ -2964,7 +2980,7 @@ def _generateCxxUnion(ud):
             )
             cls.addstmts([copyctor, Whitespace.NL])
 
-        if not _cxxTypeCanMove(c.ipdltype) or _cxxTypeNeedsMoveForSend(c.ipdltype):
+        if not _cxxTypeCanMove(c.ipdltype):
             continue
         movector = ConstructorDefn(
             ConstructorDecl(ud.name, params=[Decl(c.forceMoveType(), othervar.name)])
@@ -2977,7 +2993,7 @@ def _generateCxxUnion(ud):
         )
         cls.addstmts([movector, Whitespace.NL])
 
-    unionNeedsMove = any(_cxxTypeCanOnlyMove(c.ipdltype) for c in ud.components)
+    unionNeedsMove = any(_cxxTypeNeedsMoveForData(c.ipdltype) for c in ud.components)
 
     # Union(const Union&) copy ctor
     if not unionNeedsMove:
@@ -3094,11 +3110,13 @@ def _generateCxxUnion(ud):
     # Union& operator= methods
     rhsvar = ExprVar("aRhs")
     for c in ud.components:
-        if not _cxxTypeCanOnlyMove(c.ipdltype):
+        if not _cxxTypeNeedsMoveForData(c.ipdltype):
             # Union& operator=(const T&)
             opeq = MethodDefn(
                 MethodDecl(
-                    "operator=", params=[Decl(c.inType(), rhsvar.name)], ret=refClsType
+                    "operator=",
+                    params=[Decl(c.constRefType(), rhsvar.name)],
+                    ret=refClsType,
                 )
             )
             opeq.addstmts(
@@ -3113,7 +3131,7 @@ def _generateCxxUnion(ud):
             cls.addstmts([opeq, Whitespace.NL])
 
         # Union& operator=(T&&)
-        if not _cxxTypeCanMove(c.ipdltype) or _cxxTypeNeedsMoveForSend(c.ipdltype):
+        if not _cxxTypeCanMove(c.ipdltype):
             continue
 
         opeq = MethodDefn(
@@ -3254,7 +3272,7 @@ def _generateCxxUnion(ud):
             opeqeq = MethodDefn(
                 MethodDecl(
                     "operator==",
-                    params=[Decl(c.inType(), rhsvar.name)],
+                    params=[Decl(c.constRefType(), rhsvar.name)],
                     ret=Type.BOOL,
                     const=True,
                 )
@@ -4004,6 +4022,40 @@ class _GenerateProtocolActorCode(ipdl.ast.Visitor):
             if toplevel.isInterrupt():
                 self.interruptSwitch = StmtSwitch(msgtype)
 
+        # Add a handler for the MANAGED_ENDPOINT_BOUND and
+        # MANAGED_ENDPOINT_DROPPED message types for managed actors.
+        if not ptype.isToplevel():
+            clearawaitingmanagedendpointbind = """
+                if (!mAwaitingManagedEndpointBind) {
+                    NS_WARNING("Unexpected managed endpoint lifecycle message after actor bound!");
+                    return MsgNotAllowed;
+                }
+                mAwaitingManagedEndpointBind = false;
+                """
+            self.asyncSwitch.addcase(
+                CaseLabel("MANAGED_ENDPOINT_BOUND_MESSAGE_TYPE"),
+                StmtBlock(
+                    [
+                        StmtCode(clearawaitingmanagedendpointbind),
+                        StmtReturn(_Result.Processed),
+                    ]
+                ),
+            )
+            self.asyncSwitch.addcase(
+                CaseLabel("MANAGED_ENDPOINT_DROPPED_MESSAGE_TYPE"),
+                StmtBlock(
+                    [
+                        StmtCode(clearawaitingmanagedendpointbind),
+                        *self.destroyActor(
+                            None,
+                            ExprVar.THIS,
+                            why=_DestroyReason.ManagedEndpointDropped,
+                        ),
+                        StmtReturn(_Result.Processed),
+                    ]
+                ),
+            )
+
         # implement Send*() methods and add dispatcher cases to
         # message switch()es
         for md in p.messageDecls:
@@ -4199,6 +4251,17 @@ class _GenerateProtocolActorCode(ipdl.ast.Visitor):
         # or we're toplevel
         self.cls.addstmts([clearsubtree, Whitespace.NL])
 
+        if not ptype.isToplevel():
+            self.cls.addstmts(
+                [
+                    StmtDecl(
+                        Decl(Type.BOOL, "mAwaitingManagedEndpointBind"),
+                        init=ExprLiteral.FALSE,
+                    ),
+                    Whitespace.NL,
+                ]
+            )
+
         for managed in ptype.manages:
             self.cls.addstmts(
                 [
@@ -4232,7 +4295,11 @@ class _GenerateProtocolActorCode(ipdl.ast.Visitor):
         openmeth.addcode(
             """
             $*{bind}
-            return ${thereEp}(mozilla::ipc::PrivateIPDLInterface(), aActor->Id());
+            // Mark our actor as awaiting the other side to be bound. This will
+            // be cleared when a `MANAGED_ENDPOINT_{DROPPED,BOUND}` message is
+            // received.
+            aActor->mAwaitingManagedEndpointBind = true;
+            return ${thereEp}(mozilla::ipc::PrivateIPDLInterface(), aActor);
             """,
             bind=self.bindManagedActor(actor, errfn=ExprCall(ExprVar(thereEp))),
             thereEp=thereEp,
@@ -4251,13 +4318,9 @@ class _GenerateProtocolActorCode(ipdl.ast.Visitor):
         )
         bindmeth.addcode(
             """
-            MOZ_RELEASE_ASSERT(aEndpoint.ActorId(), "Invalid Endpoint!");
-            $*{bind}
-            return true;
+            return aEndpoint.Bind(mozilla::ipc::PrivateIPDLInterface(), aActor, this, ${container});
             """,
-            bind=self.bindManagedActor(
-                actor, errfn=ExprLiteral.FALSE, idexpr=ExprCode("*aEndpoint.ActorId()")
-            ),
+            container=self.protocol.managedVar(managed, self.side),
         )
 
         self.cls.addstmts([openmeth, bindmeth, Whitespace.NL])
@@ -4684,7 +4747,11 @@ class _GenerateProtocolActorCode(ipdl.ast.Visitor):
         helper.addstmts(
             [
                 self.callAllocActor(md, retsems="out", side=self.side),
-                StmtReturn(ExprCall(ExprVar(helperdecl.name), args=md.makeCxxArgs())),
+                StmtReturn(
+                    ExprCall(
+                        ExprVar(helperdecl.name), args=md.makeCxxArgs(paramsems="move")
+                    )
+                ),
             ]
         )
         return helper
@@ -4749,7 +4816,7 @@ class _GenerateProtocolActorCode(ipdl.ast.Visitor):
         return method
 
     def destroyActor(self, md, actorexpr, why=_DestroyReason.Deletion):
-        if md.decl.type.isCtor():
+        if md and md.decl.type.isCtor():
             destroyedType = md.decl.type.constructedType()
         else:
             destroyedType = self.protocol.decl.type
@@ -4757,11 +4824,11 @@ class _GenerateProtocolActorCode(ipdl.ast.Visitor):
         return [
             StmtCode(
                 """
-            IProtocol* mgr = ${actor}->Manager();
-            ${actor}->DestroySubtree(${why});
-            ${actor}->ClearSubtree();
-            mgr->RemoveManagee(${protoId}, ${actor});
-            """,
+                IProtocol* mgr = ${actor}->Manager();
+                ${actor}->DestroySubtree(${why});
+                ${actor}->ClearSubtree();
+                mgr->RemoveManagee(${protoId}, ${actor});
+                """,
                 actor=actorexpr,
                 why=why,
                 protoId=_protocolId(destroyedType),

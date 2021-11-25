@@ -59,13 +59,15 @@ namespace {
 // starts approaching its 65,536th message.
 enum {
   // Message types used by NodeChannel
-  ACCEPT_INVITE_MESSAGE_TYPE = kuint16max - 14,
-  REQUEST_INTRODUCTION_MESSAGE_TYPE = kuint16max - 13,
-  INTRODUCE_MESSAGE_TYPE = kuint16max - 12,
-  BROADCAST_MESSAGE_TYPE = kuint16max - 11,
-  EVENT_MESSAGE_TYPE = kuint16max - 10,
+  ACCEPT_INVITE_MESSAGE_TYPE = kuint16max - 16,
+  REQUEST_INTRODUCTION_MESSAGE_TYPE = kuint16max - 15,
+  INTRODUCE_MESSAGE_TYPE = kuint16max - 14,
+  BROADCAST_MESSAGE_TYPE = kuint16max - 13,
+  EVENT_MESSAGE_TYPE = kuint16max - 12,
 
   // Message types used by MessageChannel
+  MANAGED_ENDPOINT_DROPPED_MESSAGE_TYPE = kuint16max - 11,
+  MANAGED_ENDPOINT_BOUND_MESSAGE_TYPE = kuint16max - 10,
   IMPENDING_SHUTDOWN_MESSAGE_TYPE = kuint16max - 9,
   BUILD_IDS_MATCH_MESSAGE_TYPE = kuint16max - 8,
   BUILD_ID_MESSAGE_TYPE = kuint16max - 7,  // unused
@@ -175,6 +177,7 @@ class IToplevelProtocol;
 class ActorLifecycleProxy;
 class WeakActorLifecycleProxy;
 class IPDLResolverInner;
+class UntypedManagedEndpoint;
 
 class IProtocol : public HasResultCodes {
  public:
@@ -183,7 +186,8 @@ class IProtocol : public HasResultCodes {
     Deletion,
     AncestorDeletion,
     NormalShutdown,
-    AbnormalShutdown
+    AbnormalShutdown,
+    ManagedEndpointDropped
   };
 
   typedef base::ProcessId ProcessId;
@@ -246,6 +250,7 @@ class IProtocol : public HasResultCodes {
   IProtocol* Manager() const { return mManager; }
 
   ActorLifecycleProxy* GetLifecycleProxy() { return mLifecycleProxy; }
+  WeakActorLifecycleProxy* GetWeakLifecycleProxy();
 
   Side GetSide() const { return mSide; }
   bool CanSend() const { return mLinkStatus == LinkStatus::Connected; }
@@ -283,6 +288,7 @@ class IProtocol : public HasResultCodes {
   friend class IToplevelProtocol;
   friend class ActorLifecycleProxy;
   friend class IPDLResolverInner;
+  friend class UntypedManagedEndpoint;
 
   void SetId(int32_t aId);
 
@@ -308,7 +314,7 @@ class IProtocol : public HasResultCodes {
       GetIPCChannel()->Send(std::move(msg), this, std::move(aResolve),
                             std::move(aReject));
     } else {
-      NS_WARNING("IPC message discarded: actor cannot send");
+      WarnMessageDiscarded(msg.get());
       aReject(ResponseRejectReason::SendError);
     }
   }
@@ -352,6 +358,12 @@ class IProtocol : public HasResultCodes {
   static const int32_t kFreedActorId = 1;
 
  private:
+#ifdef DEBUG
+  void WarnMessageDiscarded(IPC::Message* aMsg);
+#else
+  void WarnMessageDiscarded(IPC::Message*) {}
+#endif
+
   int32_t mId;
   ProtocolId mProtocolId;
   Side mSide;
@@ -632,16 +644,6 @@ MOZ_NEVER_INLINE void UnionTypeReadError(const char* aUnionName);
 MOZ_NEVER_INLINE void ArrayLengthReadError(const char* aElementName);
 
 MOZ_NEVER_INLINE void SentinelReadError(const char* aElementName);
-
-#if defined(XP_WIN)
-// This is a restricted version of Windows' DuplicateHandle() function
-// that works inside the sandbox and can send handles but not retrieve
-// them.  Unlike DuplicateHandle(), it takes a process ID rather than
-// a process handle.  It returns true on success, false otherwise.
-bool DuplicateHandle(HANDLE aSourceHandle, DWORD aTargetProcessId,
-                     HANDLE* aTargetHandle, DWORD aDesiredAccess,
-                     DWORD aOptions);
-#endif
 
 /**
  * Annotate the crash reporter with the error code from the most recent system

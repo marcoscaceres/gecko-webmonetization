@@ -43,10 +43,6 @@ async function checkBreakpointBeforeWatchResources() {
     tab
   );
 
-  // Attach the thread actor before running the debugger statement,
-  // so that it is correctly catched by the thread actor.
-  info("Attach the top level target");
-  await targetCommand.targetFront.attach();
   // Init the Thread actor via attachAndInitThread in order to ensure
   // memoizing the thread front and avoid attaching it twice
   info("Attach the top level thread actor");
@@ -348,9 +344,6 @@ async function checkSetBeforeWatch() {
     tab
   );
 
-  // Attach the target in order to create the thread actor
-  info("Attach the top level target");
-  await targetCommand.targetFront.attach();
   // Instantiate the thread front in order to be able to set a breakpoint before watching for thread state
   info("Attach the top level thread actor");
   await targetCommand.targetFront.attachAndInitThread(targetCommand);
@@ -485,17 +478,17 @@ async function checkDebuggerStatementInIframes() {
   });
 
   const iframeTarget = threadState.targetFront;
-  if (isFissionEnabled()) {
+  if (isFissionEnabled() || isEveryFrameTargetEnabled()) {
     is(
       iframeTarget.url,
       REMOTE_IFRAME_URL,
-      "With fission, the pause is from the iframe's target"
+      "With fission/EFT, the pause is from the iframe's target"
     );
   } else {
     is(
       iframeTarget,
       targetCommand.targetFront,
-      "Without fission, the pause is from the top level target"
+      "Without fission/EFT, the pause is from the top level target"
     );
   }
   const { threadFront } = iframeTarget;

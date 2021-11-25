@@ -7,6 +7,7 @@
 #include "jit/BaselineCacheIRCompiler.h"
 
 #include "jit/CacheIR.h"
+#include "jit/CacheIRWriter.h"
 #include "jit/JitFrames.h"
 #include "jit/JitRuntime.h"
 #include "jit/JitZone.h"
@@ -19,6 +20,7 @@
 #include "proxy/Proxy.h"
 #include "util/Unicode.h"
 #include "vm/JSAtom.h"
+#include "vm/StaticStrings.h"
 
 #include "jit/MacroAssembler-inl.h"
 #include "jit/SharedICHelpers-inl.h"
@@ -1355,27 +1357,29 @@ bool BaselineCacheIRCompiler::emitHasClassResult(ObjOperandId objId,
 }
 
 void BaselineCacheIRCompiler::emitAtomizeString(Register str, Register temp,
-                                                LiveGeneralRegisterSet save) {
-  allocator.discardStack(masm);
-
+                                                Label* failure) {
   Label isAtom;
   masm.branchTest32(Assembler::NonZero, Address(str, JSString::offsetOfFlags()),
                     Imm32(JSString::ATOM_BIT), &isAtom);
   {
+    LiveRegisterSet save(GeneralRegisterSet::Volatile(),
+                         liveVolatileFloatRegs());
     masm.PushRegsInMask(save);
 
-    AutoStubFrame stubFrame(*this);
-    stubFrame.enter(masm, temp);
+    using Fn = JSAtom* (*)(JSContext * cx, JSString * str);
+    masm.setupUnalignedABICall(temp);
+    masm.loadJSContext(temp);
+    masm.passABIArg(temp);
+    masm.passABIArg(str);
+    masm.callWithABI<Fn, jit::AtomizeStringNoGC>();
+    masm.storeCallPointerResult(temp);
 
-    masm.Push(str);
+    LiveRegisterSet ignore;
+    ignore.add(temp);
+    masm.PopRegsInMaskIgnore(save, ignore);
 
-    using Fn = JSAtom* (*)(JSContext*, JSString*);
-    callVM<Fn, jit::AtomizeStringNoGC>(masm);
-
-    stubFrame.leave(masm);
-
-    masm.storeCallPointerResult(str);
-    masm.PopRegsInMask(save);
+    masm.branchPtr(Assembler::Equal, temp, ImmWord(0), failure);
+    masm.mov(temp, str);
   }
   masm.bind(&isAtom);
 }
@@ -1393,11 +1397,12 @@ bool BaselineCacheIRCompiler::emitSetHasStringResult(ObjOperandId setId,
   AutoScratchRegister scratch3(allocator, masm);
   AutoScratchRegister scratch4(allocator, masm);
 
-  LiveGeneralRegisterSet save;
-  save.add(set);
-  save.add(ICStubReg);
+  FailurePath* failure;
+  if (!addFailurePath(&failure)) {
+    return false;
+  }
 
-  emitAtomizeString(str, scratch1, save);
+  emitAtomizeString(str, scratch1, failure->label());
   masm.prepareHashString(str, scratch1, scratch2);
 
   masm.tagValue(JSVAL_TYPE_STRING, str, output.valueReg());
@@ -1420,11 +1425,12 @@ bool BaselineCacheIRCompiler::emitMapHasStringResult(ObjOperandId mapId,
   AutoScratchRegister scratch3(allocator, masm);
   AutoScratchRegister scratch4(allocator, masm);
 
-  LiveGeneralRegisterSet save;
-  save.add(map);
-  save.add(ICStubReg);
+  FailurePath* failure;
+  if (!addFailurePath(&failure)) {
+    return false;
+  }
 
-  emitAtomizeString(str, scratch1, save);
+  emitAtomizeString(str, scratch1, failure->label());
   masm.prepareHashString(str, scratch1, scratch2);
 
   masm.tagValue(JSVAL_TYPE_STRING, str, output.valueReg());
@@ -1447,11 +1453,12 @@ bool BaselineCacheIRCompiler::emitMapGetStringResult(ObjOperandId mapId,
   AutoScratchRegister scratch3(allocator, masm);
   AutoScratchRegister scratch4(allocator, masm);
 
-  LiveGeneralRegisterSet save;
-  save.add(map);
-  save.add(ICStubReg);
+  FailurePath* failure;
+  if (!addFailurePath(&failure)) {
+    return false;
+  }
 
-  emitAtomizeString(str, scratch1, save);
+  emitAtomizeString(str, scratch1, failure->label());
   masm.prepareHashString(str, scratch1, scratch2);
 
   masm.tagValue(JSVAL_TYPE_STRING, str, output.valueReg());
@@ -2049,19 +2056,20 @@ static ICStubSpace* StubSpaceForStub(bool makesGCCalls, JSScript* script,
   return script->zone()->jitZone()->optimizedStubSpace();
 }
 
-ICCacheIRStub* js::jit::AttachBaselineCacheIRStub(
+ICAttachResult js::jit::AttachBaselineCacheIRStub(
     JSContext* cx, const CacheIRWriter& writer, CacheKind kind,
-    JSScript* outerScript, ICScript* icScript, ICFallbackStub* stub,
-    bool* attached) {
+    JSScript* outerScript, ICScript* icScript, ICFallbackStub* stub) {
   // We shouldn't GC or report OOM (or any other exception) here.
   AutoAssertNoPendingException aanpe(cx);
   JS::AutoCheckCannotGC nogc;
 
-  MOZ_ASSERT(!*attached);
-
-  if (writer.failed()) {
-    return nullptr;
+  if (writer.tooLarge()) {
+    return ICAttachResult::TooLarge;
   }
+  if (writer.oom()) {
+    return ICAttachResult::OOM;
+  }
+  MOZ_ASSERT(!writer.failed());
 
   // Just a sanity check: the caller should ensure we don't attach an
   // unlimited number of stubs.
@@ -2086,12 +2094,12 @@ ICCacheIRStub* js::jit::AttachBaselineCacheIRStub(
     JitContext jctx(cx, nullptr);
     BaselineCacheIRCompiler comp(cx, writer, stubDataOffset);
     if (!comp.init(kind)) {
-      return nullptr;
+      return ICAttachResult::OOM;
     }
 
     code = comp.compile();
     if (!code) {
-      return nullptr;
+      return ICAttachResult::OOM;
     }
 
     // Allocate the shared CacheIRStubInfo. Note that the
@@ -2103,12 +2111,12 @@ ICCacheIRStub* js::jit::AttachBaselineCacheIRStub(
         CacheIRStubInfo::New(kind, ICStubEngine::Baseline, comp.makesGCCalls(),
                              stubDataOffset, writer);
     if (!stubInfo) {
-      return nullptr;
+      return ICAttachResult::OOM;
     }
 
     CacheIRStubKey key(stubInfo);
     if (!jitZone->putBaselineCacheIRStubCode(lookup, key, code)) {
-      return nullptr;
+      return ICAttachResult::OOM;
     }
   }
 
@@ -2138,7 +2146,7 @@ ICCacheIRStub* js::jit::AttachBaselineCacheIRStub(
             "Tried attaching identical stub for (%s:%u:%u)",
             outerScript->filename(), outerScript->lineno(),
             outerScript->column());
-    return nullptr;
+    return ICAttachResult::DuplicateStub;
   }
 
   // Time to allocate and attach a new stub.
@@ -2149,7 +2157,7 @@ ICCacheIRStub* js::jit::AttachBaselineCacheIRStub(
       StubSpaceForStub(stubInfo->makesGCCalls(), outerScript, icScript);
   void* newStubMem = stubSpace->alloc(bytesNeeded);
   if (!newStubMem) {
-    return nullptr;
+    return ICAttachResult::OOM;
   }
 
   // Resetting the entered counts on the IC chain makes subsequent reasoning
@@ -2172,8 +2180,7 @@ ICCacheIRStub* js::jit::AttachBaselineCacheIRStub(
   writer.copyStubData(newStub->stubDataStart());
   newStub->setTypeData(writer.typeData());
   stub->addNewStub(icEntry, newStub);
-  *attached = true;
-  return newStub;
+  return ICAttachResult::Attached;
 }
 
 uint8_t* ICCacheIRStub::stubDataStart() {

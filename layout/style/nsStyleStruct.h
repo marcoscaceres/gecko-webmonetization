@@ -685,8 +685,6 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleList {
 
   // the rect to use within an image.
   mozilla::StyleClipRectOrAuto mImageRegion;
-  // true in an <ol reversed> scope.
-  mozilla::StyleMozListReversed mMozListReversed;
 };
 
 struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStylePage {
@@ -841,7 +839,7 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStylePosition {
     if (aCoord.IsLengthPercentage()) {
       return aCoord.AsLengthPercentage().HasPercent();
     }
-    return aCoord.IsMozFitContent() || aCoord.IsMozAvailable();
+    return aCoord.IsFitContent() || aCoord.IsMozAvailable();
   }
 
   template <typename SizeOrMaxSize>
@@ -1168,6 +1166,7 @@ struct StyleAnimation {
   dom::FillMode mFillMode;
   StyleAnimationPlayState mPlayState;
   float mIterationCount;  // mozilla::PositiveInfinity<float>() means infinite
+  StyleAnimationTimeline mTimeline;
 };
 
 }  // namespace mozilla
@@ -1203,6 +1202,7 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleDisplay {
   uint32_t mAnimationFillModeCount;
   uint32_t mAnimationPlayStateCount;
   uint32_t mAnimationIterationCountCount;
+  uint32_t mAnimationTimelineCount;
 
   mozilla::StyleWillChange mWillChange;
   mozilla::StyleDisplay mDisplay;
@@ -1229,6 +1229,7 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleDisplay {
   mozilla::StyleOverflow mOverflowY;
   mozilla::StyleOverflowClipBox mOverflowClipBoxBlock;
   mozilla::StyleOverflowClipBox mOverflowClipBoxInline;
+  mozilla::StyleScrollbarGutter mScrollbarGutter;
   mozilla::StyleResize mResize;
   mozilla::StyleOrient mOrient;
   mozilla::StyleIsolation mIsolation;
@@ -1702,8 +1703,8 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleContent {
 
   mozilla::StyleContent mContent;
   mozilla::StyleCounterIncrement mCounterIncrement;
-  mozilla::StyleCounterSetOrReset mCounterReset;
-  mozilla::StyleCounterSetOrReset mCounterSet;
+  mozilla::StyleCounterReset mCounterReset;
+  mozilla::StyleCounterSet mCounterSet;
 };
 
 struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleUIReset {
@@ -1714,7 +1715,12 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleUIReset {
 
   nsChangeHint CalcDifference(const nsStyleUIReset& aNewData) const;
 
-  mozilla::StyleUserSelect mUserSelect;  // [reset](selection-style)
+ private:
+  mozilla::StyleUserSelect mUserSelect;  // Use ComputedStyle::UserSelect()
+
+ public:
+  mozilla::StyleUserSelect ComputedUserSelect() const { return mUserSelect; }
+
   mozilla::StyleScrollbarWidth mScrollbarWidth;
   uint8_t mMozForceBrokenImageIcon;  // (0 if not forcing, otherwise forcing)
   mozilla::StyleImeMode mIMEMode;
@@ -1736,20 +1742,44 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleUI {
   nsChangeHint CalcDifference(const nsStyleUI& aNewData) const;
 
   mozilla::StyleInert mInert;
-  mozilla::StyleUserInput mUserInput;
-  mozilla::StyleUserModify mUserModify;  // (modify-content)
-  mozilla::StyleUserFocus mUserFocus;    // (auto-select)
-  mozilla::StylePointerEvents mPointerEvents;
 
+ private:
+  mozilla::StyleUserInput mUserInput;
+  mozilla::StyleUserModify mUserModify;
+  mozilla::StyleUserFocus mUserFocus;
+  mozilla::StylePointerEvents mPointerEvents;
   mozilla::StyleCursor mCursor;
+
+ public:
+  bool IsInert() const { return mInert == mozilla::StyleInert::Inert; }
+
+  mozilla::StyleUserInput UserInput() const {
+    return IsInert() ? mozilla::StyleUserInput::None : mUserInput;
+  }
+
+  mozilla::StyleUserModify UserModify() const {
+    return IsInert() ? mozilla::StyleUserModify::ReadOnly : mUserModify;
+  }
+
+  mozilla::StyleUserFocus UserFocus() const {
+    return IsInert() ? mozilla::StyleUserFocus::None : mUserFocus;
+  }
+
+  // This is likely not the getter you want (you probably want
+  // ComputedStyle::PointerEvents().
+  mozilla::StylePointerEvents ComputedPointerEvents() const {
+    return mPointerEvents;
+  }
+
+  const mozilla::StyleCursor& Cursor() const {
+    static mozilla::StyleCursor sAuto{{}, mozilla::StyleCursorKind::Auto};
+    return IsInert() ? sAuto : mCursor;
+  }
 
   mozilla::StyleColorOrAuto mAccentColor;
   mozilla::StyleCaretColor mCaretColor;
   mozilla::StyleScrollbarColor mScrollbarColor;
   mozilla::StyleColorScheme mColorScheme;
-
-  inline mozilla::StylePointerEvents GetEffectivePointerEvents(
-      const nsIFrame*) const;
 
   bool HasCustomScrollbars() const { return !mScrollbarColor.IsAuto(); }
 };

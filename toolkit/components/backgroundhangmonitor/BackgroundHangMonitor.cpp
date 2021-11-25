@@ -541,7 +541,8 @@ void BackgroundHangThread::ReportHang(TimeDuration aHangTime,
 
   // If the profiler is enabled, add a marker.
 #ifdef MOZ_GECKO_PROFILER
-  if (profiler_can_accept_markers()) {
+  if (profiler_thread_is_being_profiled_for_markers(
+          mStackHelper.GetThreadId())) {
     struct HangMarker {
       static constexpr Span<const char> MarkerTypeName() {
         return MakeStringSpan("BHR-detected hang");

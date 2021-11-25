@@ -5,6 +5,11 @@
 
 #include "HTMLEditor.h"
 
+#include "CreateElementTransaction.h"  // for CreateElementTransaction
+#include "EditAction.h"
+#include "EditorBase.h"
+#include "EditorDOMPoint.h"
+#include "EditorUtils.h"
 #include "HTMLEditorEventListener.h"
 #include "HTMLEditUtils.h"
 #include "JoinNodeTransaction.h"
@@ -16,9 +21,6 @@
 #include "mozilla/ComposerCommandsUpdater.h"
 #include "mozilla/ContentIterator.h"
 #include "mozilla/DebugOnly.h"
-#include "mozilla/EditAction.h"
-#include "mozilla/EditorDOMPoint.h"
-#include "mozilla/EditorUtils.h"
 #include "mozilla/Encoding.h"  // for Encoding
 #include "mozilla/EventStates.h"
 #include "mozilla/InternalMutationEvent.h"
@@ -52,6 +54,7 @@
 #include "nsGkAtoms.h"
 #include "nsHTMLDocument.h"
 #include "nsIContent.h"
+#include "nsIContentInlines.h"
 #include "nsIEditActionListener.h"
 #include "nsIFrame.h"
 #include "nsIPrincipal.h"
@@ -464,17 +467,17 @@ NS_IMETHODIMP HTMLEditor::SetDocumentCharacterSet(
 
   // Create a new meta charset tag
   Result<RefPtr<Element>, nsresult> maybeNewMetaElement =
-      CreateNodeWithTransaction(*nsGkAtoms::meta,
-                                EditorDOMPoint(primaryHeadElement, 0));
+      CreateAndInsertElementWithTransaction(
+          *nsGkAtoms::meta, EditorDOMPoint(primaryHeadElement, 0));
   if (maybeNewMetaElement.isErr()) {
     NS_WARNING(
-        "EditorBase::CreateNodeWithTransaction(nsGkAtoms::meta) failed, but "
-        "ignored");
+        "HTMLEditor::CreateAndInsertElementWithTransaction(nsGkAtoms::meta) "
+        "failed, but ignored");
     return NS_OK;
   }
   MOZ_ASSERT(maybeNewMetaElement.inspect());
 
-  // not undoable, undo should undo CreateNodeWithTransaction().
+  // not undoable, undo should undo CreateAndInsertElementWithTransaction().
   DebugOnly<nsresult> rvIgnored = NS_OK;
   rvIgnored = maybeNewMetaElement.inspect()->SetAttr(
       kNameSpaceID_None, nsGkAtoms::httpEquiv, u"Content-Type"_ns, true);
@@ -607,14 +610,12 @@ Element* HTMLEditor::FindSelectionRoot(nsINode* aNode) const {
   MOZ_ASSERT(aNode->IsDocument() || aNode->IsContent(),
              "aNode must be content or document node");
 
-  Document* document = aNode->GetComposedDoc();
-  if (NS_WARN_IF(!document)) {
+  if (MOZ_UNLIKELY(NS_WARN_IF(!aNode->IsInComposedDoc()))) {
     return nullptr;
   }
 
-  if (aNode->IsInUncomposedDoc() &&
-      (document->HasFlag(NODE_IS_EDITABLE) || !aNode->IsContent())) {
-    return document->GetRootElement();
+  if (aNode->IsInDesignMode()) {
+    return GetDocument()->GetRootElement();
   }
 
   // XXX If we have readonly flag, shouldn't return the element which has
@@ -639,6 +640,18 @@ Element* HTMLEditor::FindSelectionRoot(nsINode* aNode) const {
   // For non-readonly editors we want to find the root of the editable subtree
   // containing aContent.
   return content->GetEditingHost();
+}
+
+bool HTMLEditor::IsInDesignMode() const {
+  // TODO: If active editing host is in a shadow tree, it means that we should
+  //       behave exactly same as contenteditable mode because shadow tree
+  //       content is not editable even if composed document is in design mode,
+  //       but contenteditable elements in shoadow trees are focusable and
+  //       their content is editable.  Changing this affects to drop event
+  //       handler and blur event handler, so please add new tests for them
+  //       when you change here.
+  Document* document = GetDocument();
+  return document && document->IsInDesignMode();
 }
 
 void HTMLEditor::CreateEventListeners() {
@@ -1907,11 +1920,11 @@ EditorDOMPoint HTMLEditor::InsertNodeIntoProperAncestorWithTransaction(
     SplitNodeResult splitNodeResult =
         SplitNodeDeepWithTransaction(MOZ_KnownLive(*pointToInsert.GetChild()),
                                      aPointToInsert, aSplitAtEdges);
-    if (splitNodeResult.Failed()) {
+    if (MOZ_UNLIKELY(splitNodeResult.Failed())) {
       NS_WARNING("HTMLEditor::SplitNodeDeepWithTransaction() failed");
-      return EditorDOMPoint();
+      return EditorDOMPoint();  // TODO: Should return error with `Result`
     }
-    pointToInsert = splitNodeResult.SplitPoint();
+    pointToInsert = splitNodeResult.AtSplitPoint<EditorDOMPoint>();
     MOZ_ASSERT(pointToInsert.IsSet());
   }
 
@@ -2925,6 +2938,84 @@ already_AddRefed<Element> HTMLEditor::GetSelectedElement(const nsAtom* aTagName,
   return lastElementInRange.forget();
 }
 
+Result<RefPtr<Element>, nsresult>
+HTMLEditor::CreateAndInsertElementWithTransaction(
+    nsAtom& aTagName, const EditorDOMPoint& aPointToInsert) {
+  MOZ_ASSERT(IsEditActionDataAvailable());
+  MOZ_ASSERT(aPointToInsert.IsSetAndValid());
+
+  // XXX We need offset at new node for RangeUpdaterRef().  Therefore, we need
+  //     to compute the offset now but this is expensive.  So, if it's possible,
+  //     we need to redesign RangeUpdaterRef() as avoiding using indices.
+  Unused << aPointToInsert.Offset();
+
+  IgnoredErrorResult ignoredError;
+  AutoEditSubActionNotifier startToHandleEditSubAction(
+      *this, EditSubAction::eCreateNode, nsIEditor::eNext, ignoredError);
+  if (NS_WARN_IF(ignoredError.ErrorCodeIs(NS_ERROR_EDITOR_DESTROYED))) {
+    return Err(NS_ERROR_EDITOR_DESTROYED);
+  }
+  NS_WARNING_ASSERTION(
+      !ignoredError.Failed(),
+      "HTMLEditor::OnStartToHandleTopLevelEditSubAction() failed, but ignored");
+
+  // TODO: This method should have a callback function which is called
+  //       immediately after creating an element but before it's inserted into
+  //       the DOM tree.  Then, caller can init the new element's attributes
+  //       and children **without** transactions (it'll reduce the number of
+  //       legacy mutation events).  Finally, we can get rid of
+  //       CreatElementTransaction since we can use InsertNodeTransaction
+  //       instead.
+
+  RefPtr<CreateElementTransaction> transaction =
+      CreateElementTransaction::Create(*this, aTagName, aPointToInsert);
+  nsresult rv = DoTransactionInternal(transaction);
+  if (NS_WARN_IF(Destroyed())) {
+    rv = NS_ERROR_EDITOR_DESTROYED;
+  } else if (transaction->GetNewElement() &&
+             transaction->GetNewElement()->GetParentNode() !=
+                 aPointToInsert.GetContainer()) {
+    NS_WARNING("The new element was not inserted into the expected node");
+    rv = NS_ERROR_EDITOR_UNEXPECTED_DOM_TREE;
+  }
+
+  RefPtr<Element> newElement;
+  if (NS_FAILED(rv)) {
+    NS_WARNING("EditorBase::DoTransactionInternal() failed");
+    // XXX Why do we do this even when DoTransaction() returned error?
+    DebugOnly<nsresult> rvIgnored =
+        RangeUpdaterRef().SelAdjCreateNode(aPointToInsert);
+    NS_WARNING_ASSERTION(
+        NS_SUCCEEDED(rvIgnored),
+        "Rangeupdater::SelAdjCreateNode() failed, but ignored");
+  } else {
+    newElement = transaction->GetNewElement();
+    MOZ_ASSERT(newElement);
+
+    // If we succeeded to create and insert new element, we need to adjust
+    // ranges in RangeUpdaterRef().  It currently requires offset of the new
+    // node.  So, let's call it with original offset.  Note that if
+    // aPointToInsert stores child node, it may not be at the offset since new
+    // element must be inserted before the old child.  Although, mutation
+    // observer can do anything, but currently, we don't check it.
+    DebugOnly<nsresult> rvIgnored =
+        RangeUpdaterRef().SelAdjCreateNode(EditorRawDOMPoint(
+            aPointToInsert.GetContainer(), aPointToInsert.Offset()));
+    NS_WARNING_ASSERTION(
+        NS_SUCCEEDED(rvIgnored),
+        "Rangeupdater::SelAdjCreateNode() failed, but ignored");
+    if (newElement) {
+      TopLevelEditSubActionDataRef().DidCreateElement(*this, *newElement);
+    }
+  }
+
+  if (NS_FAILED(rv)) {
+    return Err(rv);
+  }
+
+  return newElement;
+}
+
 already_AddRefed<Element> HTMLEditor::CreateElementWithDefaults(
     const nsAtom& aTagName) {
   // NOTE: Despite of public method, this can be called for internal use.
@@ -3405,8 +3496,7 @@ nsresult HTMLEditor::ReplaceTextWithTransaction(
                        "EditorBase::DoTransactionInternal() failed");
 
   if (pointToInsert.IsSet()) {
-    EditorDOMPointInText begin, end;
-    Tie(begin, end) = ComputeInsertedRange(pointToInsert, aStringToInsert);
+    auto [begin, end] = ComputeInsertedRange(pointToInsert, aStringToInsert);
     if (begin.IsSet() && end.IsSet()) {
       TopLevelEditSubActionDataRef().DidDeleteText(*this, begin);
       TopLevelEditSubActionDataRef().DidInsertText(*this, begin, end);
@@ -3486,15 +3576,16 @@ Result<EditorDOMPoint, nsresult> HTMLEditor::PrepareToInsertBRElement(
 
   MOZ_DIAGNOSTIC_ASSERT(aPointToInsert.IsSetAndValid());
 
-  // Unfortunately, we need to split the text node at the offset.
-  ErrorResult error;
-  nsCOMPtr<nsIContent> newLeftNode =
-      SplitNodeWithTransaction(aPointToInsert, error);
-  if (error.Failed()) {
-    NS_WARNING("HTMLEditor::SplitNodeWithTransaction() failed");
-    return Err(error.StealNSResult());
+  {
+    // Unfortunately, we need to split the text node at the offset.
+    SplitNodeResult splitTextNodeResult =
+        SplitNodeWithTransaction(aPointToInsert);
+    if (MOZ_UNLIKELY(splitTextNodeResult.Failed())) {
+      NS_WARNING("HTMLEditor::SplitNodeWithTransaction() failed");
+      return Err(splitTextNodeResult.Rv());
+    }
   }
-  Unused << newLeftNode;
+
   // Insert new <br> before the right node.
   EditorDOMPoint pointInContainer(aPointToInsert.GetContainer());
   if (!pointInContainer.IsSet()) {
@@ -3517,9 +3608,10 @@ Result<RefPtr<Element>, nsresult> HTMLEditor::InsertBRElementWithTransaction(
   MOZ_ASSERT(maybePointToInsert.inspect().IsSetAndValid());
 
   Result<RefPtr<Element>, nsresult> maybeNewBRElement =
-      CreateNodeWithTransaction(*nsGkAtoms::br, maybePointToInsert.inspect());
+      CreateAndInsertElementWithTransaction(*nsGkAtoms::br,
+                                            maybePointToInsert.inspect());
   if (maybeNewBRElement.isErr()) {
-    NS_WARNING("EditorBase::CreateNodeWithTransaction() failed");
+    NS_WARNING("HTMLEditor::CreateAndInsertElementWithTransaction() failed");
     return maybeNewBRElement;
   }
   MOZ_ASSERT(maybeNewBRElement.inspect());
@@ -4179,31 +4271,30 @@ nsresult HTMLEditor::RemoveBlockContainerWithTransaction(Element& aElement) {
   return rv;
 }
 
-already_AddRefed<nsIContent> HTMLEditor::SplitNodeWithTransaction(
-    const EditorDOMPoint& aStartOfRightNode, ErrorResult& aError) {
+SplitNodeResult HTMLEditor::SplitNodeWithTransaction(
+    const EditorDOMPoint& aStartOfRightNode) {
   MOZ_ASSERT(IsEditActionDataAvailable());
 
-  if (NS_WARN_IF(!aStartOfRightNode.IsInContentNode())) {
-    aError.Throw(NS_ERROR_INVALID_ARG);
-    return nullptr;
+  if (MOZ_UNLIKELY(NS_WARN_IF(!aStartOfRightNode.IsInContentNode()))) {
+    return SplitNodeResult(NS_ERROR_INVALID_ARG);
   }
   MOZ_ASSERT(aStartOfRightNode.IsSetAndValid());
 
-  if (NS_WARN_IF(!HTMLEditUtils::IsSplittableNode(
-          *aStartOfRightNode.ContainerAsContent()))) {
-    aError.Throw(NS_ERROR_EDITOR_UNEXPECTED_DOM_TREE);
-    return nullptr;
+  if (MOZ_UNLIKELY(NS_WARN_IF(!HTMLEditUtils::IsSplittableNode(
+          *aStartOfRightNode.ContainerAsContent())))) {
+    return SplitNodeResult(NS_ERROR_EDITOR_UNEXPECTED_DOM_TREE);
   }
 
+  IgnoredErrorResult ignoredError;
   AutoEditSubActionNotifier startToHandleEditSubAction(
-      *this, EditSubAction::eSplitNode, nsIEditor::eNext, aError);
-  if (NS_WARN_IF(aError.ErrorCodeIs(NS_ERROR_EDITOR_DESTROYED))) {
-    return nullptr;
+      *this, EditSubAction::eSplitNode, nsIEditor::eNext, ignoredError);
+  if (MOZ_UNLIKELY(
+          NS_WARN_IF(ignoredError.ErrorCodeIs(NS_ERROR_EDITOR_DESTROYED)))) {
+    return SplitNodeResult(NS_ERROR_EDITOR_DESTROYED);
   }
   NS_WARNING_ASSERTION(
-      !aError.Failed(),
+      !ignoredError.Failed(),
       "OnStartToHandleTopLevelEditSubAction() failed, but ignored");
-  aError.SuppressException();
 
   // XXX Unfortunately, storing offset of the split point in
   //     SplitNodeTransaction is necessary for now.  We should fix this
@@ -4212,8 +4303,8 @@ already_AddRefed<nsIContent> HTMLEditor::SplitNodeWithTransaction(
 
   RefPtr<SplitNodeTransaction> transaction =
       SplitNodeTransaction::Create(*this, aStartOfRightNode);
-  aError = DoTransactionInternal(transaction);
-  NS_WARNING_ASSERTION(!aError.Failed(),
+  nsresult rv = DoTransactionInternal(transaction);
+  NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
                        "EditorBase::DoTransactionInternal() failed");
 
   nsCOMPtr<nsIContent> newLeftContent = transaction->GetNewLeftContent();
@@ -4223,26 +4314,29 @@ already_AddRefed<nsIContent> HTMLEditor::SplitNodeWithTransaction(
     // XXX Some other transactions manage range updater by themselves.
     //     Why doesn't SplitNodeTransaction do it?
     DebugOnly<nsresult> rvIgnored = RangeUpdaterRef().SelAdjSplitNode(
-        *aStartOfRightNode.GetContainerAsContent(), *newLeftContent);
+        *aStartOfRightNode.ContainerAsContent(), aStartOfRightNode.Offset(),
+        *newLeftContent, SplitNodeDirection::LeftNodeIsNewOne);
     NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),
                          "RangeUpdater::SelAdjSplitNode() failed, but ignored");
-  }
-  if (newLeftContent) {
+
     TopLevelEditSubActionDataRef().DidSplitContent(
-        *this, *aStartOfRightNode.GetContainerAsContent(), *newLeftContent);
+        *this, *aStartOfRightNode.ContainerAsContent(), *newLeftContent,
+        SplitNodeDirection::LeftNodeIsNewOne);
   }
 
-  if (mInlineSpellChecker) {
-    RefPtr<mozInlineSpellChecker> spellChecker = mInlineSpellChecker;
-    spellChecker->DidSplitNode(aStartOfRightNode.GetContainer(),
-                               newLeftContent);
+  if (MOZ_UNLIKELY(NS_WARN_IF(Destroyed()))) {
+    return SplitNodeResult(NS_ERROR_EDITOR_DESTROYED);
   }
 
-  if (aError.Failed()) {
-    return nullptr;
+  if (MOZ_UNLIKELY(NS_FAILED(rv))) {
+    return SplitNodeResult(rv);
   }
 
-  return newLeftContent.forget();
+  MOZ_ASSERT(newLeftContent);
+  MOZ_ASSERT(aStartOfRightNode.GetContainerAsContent());
+  return SplitNodeResult(std::move(newLeftContent),
+                         aStartOfRightNode.ContainerAsContent(),
+                         SplitNodeDirection::LeftNodeIsNewOne);
 }
 
 SplitNodeResult HTMLEditor::SplitNodeDeepWithTransaction(
@@ -4262,6 +4356,7 @@ SplitNodeResult HTMLEditor::SplitNodeDeepWithTransaction(
   nsCOMPtr<nsIContent> newLeftNodeOfMostAncestor;
   EditorDOMPoint atStartOfRightNode(aStartOfDeepestRightNode);
   SplitNodeResult lastSplitNodeResult(atStartOfRightNode);
+
   while (true) {
     // Need to insert rules code call here to do things like not split a list
     // if you are after the last <li> or before the first, etc.  For now we
@@ -4293,27 +4388,26 @@ SplitNodeResult HTMLEditor::SplitNodeDeepWithTransaction(
          !atStartOfRightNode.GetContainerAsText()) ||
         (!atStartOfRightNode.IsStartOfContainer() &&
          !atStartOfRightNode.IsEndOfContainer())) {
-      ErrorResult error;
-      nsCOMPtr<nsIContent> newLeftNode =
-          SplitNodeWithTransaction(atStartOfRightNode, error);
-      if (error.Failed()) {
+      lastSplitNodeResult = SplitNodeWithTransaction(atStartOfRightNode);
+      if (MOZ_UNLIKELY(lastSplitNodeResult.Failed())) {
         NS_WARNING("HTMLEditor::SplitNodeWithTransaction() failed");
-        return SplitNodeResult(error.StealNSResult());
+        return lastSplitNodeResult;
       }
 
-      lastSplitNodeResult = SplitNodeResult(newLeftNode, currentRightNode);
+      MOZ_ASSERT(lastSplitNodeResult.GetOriginalContent() == currentRightNode);
       if (currentRightNode == &aMostAncestorToSplit) {
         // Actually, we split aMostAncestorToSplit.
         return lastSplitNodeResult;
       }
 
       // Then, try to split its parent before current node.
-      atStartOfRightNode.Set(currentRightNode);
+      atStartOfRightNode.Set(lastSplitNodeResult.GetNextContent());
     }
     // If the split point is end of the node and it is a text node or we're not
     // allowed to create empty container node, try to split its parent after it.
     else if (!atStartOfRightNode.IsStartOfContainer()) {
-      lastSplitNodeResult = SplitNodeResult(currentRightNode, nullptr);
+      lastSplitNodeResult = SplitNodeResult(
+          currentRightNode, nullptr, SplitNodeDirection::LeftNodeIsNewOne);
       if (currentRightNode == &aMostAncestorToSplit) {
         return lastSplitNodeResult;
       }
@@ -4327,7 +4421,8 @@ SplitNodeResult HTMLEditor::SplitNodeDeepWithTransaction(
     // If the split point is start of the node and it is a text node or we're
     // not allowed to create empty container node, try to split its parent.
     else {
-      lastSplitNodeResult = SplitNodeResult(nullptr, currentRightNode);
+      lastSplitNodeResult = SplitNodeResult(
+          nullptr, currentRightNode, SplitNodeDirection::LeftNodeIsNewOne);
       if (currentRightNode == &aMostAncestorToSplit) {
         return lastSplitNodeResult;
       }
@@ -4338,7 +4433,7 @@ SplitNodeResult HTMLEditor::SplitNodeDeepWithTransaction(
     }
   }
 
-  return SplitNodeResult(NS_ERROR_FAILURE);
+  // Not reached because while (true) loop never breaks.
 }
 
 void HTMLEditor::DoSplitNode(const EditorDOMPoint& aStartOfRightNode,
@@ -4553,14 +4648,13 @@ void HTMLEditor::DoSplitNode(const EditorDOMPoint& aStartOfRightNode,
   }
 }
 
-nsresult HTMLEditor::JoinNodesWithTransaction(nsINode& aLeftNode,
-                                              nsINode& aRightNode) {
+nsresult HTMLEditor::JoinNodesWithTransaction(nsIContent& aLeftContent,
+                                              nsIContent& aRightContent) {
   MOZ_ASSERT(IsEditActionDataAvailable());
-  MOZ_ASSERT(aLeftNode.IsContent());
-  MOZ_ASSERT(aRightNode.IsContent());
-
-  nsCOMPtr<nsINode> parent = aLeftNode.GetParentNode();
-  MOZ_ASSERT(parent);
+  MOZ_ASSERT(&aLeftContent != &aRightContent);
+  MOZ_ASSERT(aLeftContent.GetParentNode());
+  MOZ_ASSERT(aRightContent.GetParentNode());
+  MOZ_ASSERT(aLeftContent.GetParentNode() == aRightContent.GetParentNode());
 
   IgnoredErrorResult ignoredError;
   AutoEditSubActionNotifier startToHandleEditSubAction(
@@ -4574,61 +4668,77 @@ nsresult HTMLEditor::JoinNodesWithTransaction(nsINode& aLeftNode,
 
   // Remember some values; later used for saved selection updating.
   // Find the offset between the nodes to be joined.
-  int32_t offset = parent->ComputeIndexOf(&aRightNode);
-  if (NS_WARN_IF(offset < 0)) {
+  EditorDOMPoint atRightContent(&aRightContent);
+  if (MOZ_UNLIKELY(NS_WARN_IF(!atRightContent.IsSet()))) {
     return NS_ERROR_FAILURE;
   }
+  Unused << atRightContent.Offset();  // Compute the offset first.
+
   // Find the number of children of the lefthand node
-  uint32_t oldLeftNodeLen = aLeftNode.Length();
+  const uint32_t oldLeftNodeLen = aLeftContent.Length();
 
-  TopLevelEditSubActionDataRef().WillJoinContents(*this, *aLeftNode.AsContent(),
-                                                  *aRightNode.AsContent());
+  RefPtr<JoinNodeTransaction> transaction =
+      JoinNodeTransaction::MaybeCreate(*this, aLeftContent, aRightContent);
+  if (MOZ_UNLIKELY(!transaction)) {
+    NS_WARNING("JoinNodeTransaction::MaybeCreate() failed");
+    return NS_ERROR_FAILURE;
+  }
 
-  RefPtr<JoinNodeTransaction> transaction = JoinNodeTransaction::MaybeCreate(
-      *this, *aLeftNode.AsContent(), *aRightNode.AsContent());
-  NS_WARNING_ASSERTION(
-      transaction, "JoinNodeTransaction::MaybeCreate() failed, but ignored");
-
-  nsresult rv = NS_OK;
-  if (transaction) {
+  nsresult rv;
+  {
+    AutoEditorDOMPointChildInvalidator lockOffset(atRightContent);
     rv = DoTransactionInternal(transaction);
+    if (MOZ_UNLIKELY(Destroyed())) {
+      rv = NS_ERROR_EDITOR_DESTROYED;
+    }
     NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
                          "EditorBase::DoTransactionInternal() failed");
   }
 
+  // If joined node is moved to different place, offset may not have any
+  // meaning.  In this case, the web app modified the DOM tree takes on the
+  // responsibility for the remaning things.
+  if (MOZ_UNLIKELY(NS_WARN_IF(aRightContent.GetParentNode() !=
+                              atRightContent.GetContainer()))) {
+    return NS_ERROR_EDITOR_UNEXPECTED_DOM_TREE;
+  }
+
+  // Be aware, the joined point should be created for each call because
+  // they may refer the child node, but some of them may change the DOM tree
+  // after that, thus we need to avoid invalid point (Although it shouldn't
+  // occur).
   // XXX Some other transactions manage range updater by themselves.
   //     Why doesn't JoinNodeTransaction do it?
   DebugOnly<nsresult> rvIgnored = RangeUpdaterRef().SelAdjJoinNodes(
-      aLeftNode, aRightNode, *parent, AssertedCast<uint32_t>(offset),
-      oldLeftNodeLen);
+      EditorRawDOMPoint(&aRightContent, oldLeftNodeLen), aLeftContent,
+      atRightContent.Offset(), JoinNodesDirection::LeftNodeIntoRightNode);
   NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),
                        "RangeUpdater::SelAdjJoinNodes() failed, but ignored");
 
-  TopLevelEditSubActionDataRef().DidJoinContents(*this, *aLeftNode.AsContent(),
-                                                 *aRightNode.AsContent());
+  TopLevelEditSubActionDataRef().DidJoinContents(
+      *this, EditorRawDOMPoint(&aRightContent, oldLeftNodeLen));
 
-  if (mInlineSpellChecker) {
-    RefPtr<mozInlineSpellChecker> spellChecker = mInlineSpellChecker;
-    spellChecker->DidJoinNodes(aLeftNode, aRightNode);
-  }
-
-  if (mTextServicesDocument && NS_SUCCEEDED(rv)) {
-    RefPtr<TextServicesDocument> textServicesDocument = mTextServicesDocument;
-    textServicesDocument->DidJoinNodes(*aLeftNode.AsContent(),
-                                       *aRightNode.AsContent());
+  if (NS_SUCCEEDED(rv)) {
+    if (RefPtr<TextServicesDocument> textServicesDocument =
+            mTextServicesDocument) {
+      textServicesDocument->DidJoinContents(
+          EditorRawDOMPoint(&aRightContent, oldLeftNodeLen), aLeftContent,
+          JoinNodesDirection::LeftNodeIntoRightNode);
+    }
   }
 
   if (!mActionListeners.IsEmpty()) {
     for (auto& listener : mActionListeners.Clone()) {
-      DebugOnly<nsresult> rvIgnored =
-          listener->DidJoinNodes(&aLeftNode, &aRightNode, parent, rv);
+      DebugOnly<nsresult> rvIgnored = listener->DidJoinContents(
+          EditorRawDOMPoint(&aRightContent, oldLeftNodeLen), &aLeftContent,
+          true);
       NS_WARNING_ASSERTION(
           NS_SUCCEEDED(rvIgnored),
-          "nsIEditActionListener::DidJoinNodes() failed, but ignored");
+          "nsIEditActionListener::DidJoinContents() failed, but ignored");
     }
   }
 
-  return rv;
+  return MOZ_UNLIKELY(NS_WARN_IF(Destroyed())) ? NS_ERROR_EDITOR_DESTROYED : rv;
 }
 
 nsresult HTMLEditor::DoJoinNodes(nsIContent& aContentToKeep,
@@ -4880,9 +4990,9 @@ already_AddRefed<Element> HTMLEditor::DeleteSelectionAndCreateElement(
     return nullptr;
   }
   Result<RefPtr<Element>, nsresult> maybeNewElement =
-      CreateNodeWithTransaction(aTag, pointToInsert);
+      CreateAndInsertElementWithTransaction(aTag, pointToInsert);
   if (maybeNewElement.isErr()) {
-    NS_WARNING("EditorBase::CreateNodeWithTransaction() failed");
+    NS_WARNING("HTMLEditor::CreateAndInsertElementWithTransaction() failed");
     return nullptr;
   }
   MOZ_ASSERT(maybeNewElement.inspect());
@@ -4957,19 +5067,20 @@ nsresult HTMLEditor::DeleteSelectionAndPrepareToCreateNode() {
     return error.StealNSResult();
   }
 
-  ErrorResult error;
-  nsCOMPtr<nsIContent> newLeftNode = SplitNodeWithTransaction(atAnchor, error);
-  if (error.Failed()) {
+  SplitNodeResult splitAtAnchorResult = SplitNodeWithTransaction(atAnchor);
+  if (MOZ_UNLIKELY(splitAtAnchorResult.Failed())) {
     NS_WARNING("HTMLEditor::SplitNodeWithTransaction() failed");
-    return error.StealNSResult();
+    return splitAtAnchorResult.Rv();
   }
 
-  EditorRawDOMPoint atRightNode(atAnchor.GetContainer());
-  if (NS_WARN_IF(!atRightNode.IsSet())) {
+  const EditorRawDOMPoint& atRightContent =
+      splitAtAnchorResult.AtNextContent<EditorRawDOMPoint>();
+  if (MOZ_UNLIKELY(NS_WARN_IF(!atRightContent.IsSet()))) {
     return NS_ERROR_FAILURE;
   }
-  MOZ_ASSERT(atRightNode.IsSetAndValid());
-  SelectionRef().CollapseInLimiter(atRightNode, error);
+  MOZ_ASSERT(atRightContent.IsSetAndValid());
+  ErrorResult error;
+  SelectionRef().CollapseInLimiter(atRightContent.ToRawRangeBoundary(), error);
   NS_WARNING_ASSERTION(!error.Failed(),
                        "Selection::CollapseInLimiter() failed");
   return error.StealNSResult();
@@ -5562,10 +5673,11 @@ nsresult HTMLEditor::CopyLastEditableChildStylesWithTransaction(
     // element.
     if (!firstClonedElement) {
       Result<RefPtr<Element>, nsresult> maybeNewElement =
-          CreateNodeWithTransaction(MOZ_KnownLive(*tagName),
-                                    EditorDOMPoint(newBlock, 0));
+          CreateAndInsertElementWithTransaction(MOZ_KnownLive(*tagName),
+                                                EditorDOMPoint(newBlock, 0));
       if (maybeNewElement.isErr()) {
-        NS_WARNING("EditorBase::CreateNodeWithTransaction() failed");
+        NS_WARNING(
+            "HTMLEditor::CreateAndInsertElementWithTransaction() failed");
         return maybeNewElement.unwrapErr();
       }
       firstClonedElement = lastClonedElement = maybeNewElement.unwrap();
@@ -5745,7 +5857,7 @@ nsIContent* HTMLEditor::GetFocusedContent() const {
   if (NS_WARN_IF(!document)) {
     return nullptr;
   }
-  bool inDesignMode = document->HasFlag(NODE_IS_EDITABLE);
+  const bool inDesignMode = IsInDesignMode();
   if (!focusedContent) {
     // in designMode, nobody gets focus in most cases.
     if (inDesignMode && OurWindowHasFocus()) {
@@ -5773,19 +5885,6 @@ nsIContent* HTMLEditor::GetFocusedContent() const {
   return OurWindowHasFocus() ? focusedContent : nullptr;
 }
 
-nsIContent* HTMLEditor::GetFocusedContentForIME() const {
-  nsIContent* focusedContent = GetFocusedContent();
-  if (!focusedContent) {
-    return nullptr;
-  }
-
-  Document* document = GetDocument();
-  if (NS_WARN_IF(!document)) {
-    return nullptr;
-  }
-  return document->HasFlag(NODE_IS_EDITABLE) ? nullptr : focusedContent;
-}
-
 bool HTMLEditor::IsActiveInDOMWindow() const {
   nsFocusManager* focusManager = nsFocusManager::GetFocusManager();
   if (NS_WARN_IF(!focusManager)) {
@@ -5796,7 +5895,7 @@ bool HTMLEditor::IsActiveInDOMWindow() const {
   if (NS_WARN_IF(!document)) {
     return false;
   }
-  bool inDesignMode = document->HasFlag(NODE_IS_EDITABLE);
+  const bool inDesignMode = IsInDesignMode();
 
   // If we're in designMode, we're always active in the DOM window.
   if (inDesignMode) {
@@ -5829,7 +5928,7 @@ Element* HTMLEditor::GetActiveEditingHost(
   if (NS_WARN_IF(!document)) {
     return nullptr;
   }
-  if (document->HasFlag(NODE_IS_EDITABLE)) {
+  if (IsInDesignMode()) {
     return document->GetBodyElement();
   }
 
@@ -5845,12 +5944,14 @@ Element* HTMLEditor::GetActiveEditingHost(
   }
   nsIContent* content = focusNode->AsContent();
 
-  // If the active content isn't editable, or it has independent selection,
-  // we're not active.
-  if (!content->HasFlag(NODE_IS_EDITABLE) ||
-      content->HasIndependentSelection()) {
+  // If the active content isn't editable, we're not active.
+  if (!content->HasFlag(NODE_IS_EDITABLE)) {
     return nullptr;
   }
+  // Note that `Selection` shouldn't be in the native anonymous subtree of
+  // <input>/<textarea>, but can be in them (e.g., collapsed at {<input> - 0}).
+  // Even in such case, we need to look for an ancestor which does not have
+  // editable parent.
   Element* candidateEditingHost = content->GetEditingHost();
   if (!candidateEditingHost) {
     return nullptr;
@@ -5865,9 +5966,10 @@ Element* HTMLEditor::GetActiveEditingHost(
 }
 
 void HTMLEditor::NotifyEditingHostMaybeChanged() {
-  Document* document = GetDocument();
-  if (NS_WARN_IF(!document) ||
-      NS_WARN_IF(document->HasFlag(NODE_IS_EDITABLE))) {
+  // Note that even if the document is in design mode, a contenteditable element
+  // in a shadow tree is focusable.   Therefore, we may need to update editing
+  // host even when the document is in design mode.
+  if (MOZ_UNLIKELY(NS_WARN_IF(!GetDocument()))) {
     return;
   }
 
@@ -5893,7 +5995,11 @@ void HTMLEditor::NotifyEditingHostMaybeChanged() {
 
   // Update selection ancestor limit if current editing host includes the
   // previous editing host.
-  if (ancestorLimiter->IsInclusiveDescendantOf(editingHost)) {
+  // Additionally, the editing host may be an element in shadow DOM and the
+  // shadow host is in designMode.  In this case, we need to set the editing
+  // host as the new selection limiter.
+  if (ancestorLimiter->IsInclusiveDescendantOf(editingHost) ||
+      (ancestorLimiter->IsInDesignMode() != editingHost->IsInDesignMode())) {
     // Note that don't call HTMLEditor::InitializeSelectionAncestorLimit()
     // here because it may collapse selection to the first editable node.
     EditorBase::InitializeSelectionAncestorLimit(*editingHost);
@@ -6025,11 +6131,8 @@ bool HTMLEditor::IsAcceptableInputEvent(WidgetGUIEvent* aGUIEvent) const {
     return true;
   }
 
-  RefPtr<EventTarget> eventTarget = aGUIEvent->GetOriginalDOMEventTarget();
-  if (NS_WARN_IF(!eventTarget)) {
-    return false;
-  }
-  nsCOMPtr<nsINode> eventTargetNode = do_QueryInterface(eventTarget);
+  nsCOMPtr<nsINode> eventTargetNode =
+      nsINode::FromEventTargetOrNull(aGUIEvent->GetOriginalDOMEventTarget());
   if (NS_WARN_IF(!eventTargetNode)) {
     return false;
   }
@@ -6047,7 +6150,7 @@ bool HTMLEditor::IsAcceptableInputEvent(WidgetGUIEvent* aGUIEvent) const {
     return false;
   }
 
-  if (document->HasFlag(NODE_IS_EDITABLE)) {
+  if (IsInDesignMode()) {
     // If this editor is in designMode and the event target is the document,
     // the event is for this editor.
     if (eventTargetNode->IsDocument()) {
@@ -6057,7 +6160,15 @@ bool HTMLEditor::IsAcceptableInputEvent(WidgetGUIEvent* aGUIEvent) const {
     if (NS_WARN_IF(!eventTargetNode->IsContent())) {
       return false;
     }
-    return document == eventTargetNode->GetUncomposedDoc();
+    if (document == eventTargetNode->GetUncomposedDoc()) {
+      return true;
+    }
+    // If the event target is in a shadow tree, the content is not editable
+    // by default, but if the focused content is an editing host, we need to
+    // handle it as contenteditable mode.
+    if (!eventTargetNode->IsInShadowTree()) {
+      return false;
+    }
   }
 
   // This HTML editor is for contenteditable.  We need to check the validity

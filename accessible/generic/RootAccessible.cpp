@@ -399,6 +399,9 @@ void RootAccessible::ProcessDOMEvent(Event* aDOMEvent, nsINode* aTarget) {
                               accessible);
     }
   } else if (eventType.EqualsLiteral("DOMMenuItemActive")) {
+    RefPtr<AccEvent> event =
+        new AccStateChangeEvent(accessible, states::ACTIVE, true);
+    nsEventShell::FireEvent(event);
     FocusMgr()->ActiveItemChanged(accessible);
 #ifdef A11Y_LOG
     if (logging::IsEnabled(logging::eFocus)) {
@@ -406,6 +409,10 @@ void RootAccessible::ProcessDOMEvent(Event* aDOMEvent, nsINode* aTarget) {
     }
 #endif
   } else if (eventType.EqualsLiteral("DOMMenuItemInactive")) {
+    RefPtr<AccEvent> event =
+        new AccStateChangeEvent(accessible, states::ACTIVE, false);
+    nsEventShell::FireEvent(event);
+
     // Process DOMMenuItemInactive event for autocomplete only because this is
     // unique widget that may acquire focus from autocomplete popup while popup
     // stays open and has no active item. In case of XUL tree autocomplete
@@ -515,7 +522,7 @@ void RootAccessible::HandlePopupShownEvent(LocalAccessible* aAccessible) {
     LocalAccessible* combobox = aAccessible->LocalParent();
     if (!combobox) return;
 
-    if (combobox->IsCombobox() || combobox->IsAutoComplete()) {
+    if (combobox->IsCombobox()) {
       RefPtr<AccEvent> event =
           new AccStateChangeEvent(combobox, states::EXPANDED, true);
       nsEventShell::FireEvent(event);
@@ -601,28 +608,14 @@ void RootAccessible::HandlePopupHidingEvent(nsINode* aPopupNode) {
     }
   }
 
-  if (popup->IsAutoCompletePopup()) {
-    // No focus event for autocomplete because it's managed by
-    // DOMMenuItemInactive events.
-    if (widget->IsAutoComplete()) notifyOf = kNotifyOfState;
-
-  } else if (widget->IsCombobox()) {
+  if (widget->IsCombobox()) {
     // Fire focus for active combobox, otherwise the focus is managed by DOM
     // focus notifications. Always fire state change event.
     if (widget->IsActiveWidget()) notifyOf = kNotifyOfFocus;
     notifyOf |= kNotifyOfState;
-
   } else if (widget->IsMenuButton()) {
-    // Can be a part of autocomplete.
-    LocalAccessible* compositeWidget = widget->ContainerWidget();
-    if (compositeWidget && compositeWidget->IsAutoComplete()) {
-      widget = compositeWidget;
-      notifyOf = kNotifyOfState;
-    }
-
     // Autocomplete (like searchbar) can be inactive when popup hiddens
     notifyOf |= kNotifyOfFocus;
-
   } else if (widget == popup) {
     // Top level context menus and alerts.
     // Ignore submenus and menubar. When submenu is closed then sumbenu

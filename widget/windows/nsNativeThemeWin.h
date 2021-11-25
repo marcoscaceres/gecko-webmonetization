@@ -7,20 +7,27 @@
 #ifndef nsNativeThemeWin_h
 #define nsNativeThemeWin_h
 
-#include "nsITheme.h"
-#include "nsCOMPtr.h"
+#include <windows.h>
+
+#include "gfxTypes.h"
+#include "mozilla/Maybe.h"
+#include "mozilla/TimeStamp.h"
 #include "nsAtom.h"
+#include "nsCOMPtr.h"
+#include "nsITheme.h"
+#include "nsNativeBasicTheme.h"
 #include "nsNativeTheme.h"
+#include "nsSize.h"
 #include "nsStyleConsts.h"
 #include "nsUXThemeConstants.h"
 #include "nsUXThemeData.h"
-#include "gfxTypes.h"
-#include <windows.h>
-#include "mozilla/Maybe.h"
-#include "mozilla/TimeStamp.h"
-#include "nsSize.h"
+#include "ScrollbarDrawingWin.h"
 
-class nsNativeThemeWin : private nsNativeTheme, public nsITheme {
+namespace mozilla::widget {
+
+class nsNativeThemeWin : public nsNativeBasicTheme {
+ protected:
+  using ScrollbarDrawingWin = mozilla::widget::ScrollbarDrawingWin;
   virtual ~nsNativeThemeWin();
 
  public:
@@ -29,11 +36,28 @@ class nsNativeThemeWin : private nsNativeTheme, public nsITheme {
 
   NS_DECL_ISUPPORTS_INHERITED
 
+  // Whether we draw a non-native widget.
+  //
+  // We draw widgets as non-native when their color-scheme is dark, since win32
+  // classic APIs don't allow us to draw dark form controls.
+  //
+  // We don't call into the non-native theme for sizing information
+  // (GetWidgetPadding/Border and GetMinimumWidgetSize), to avoid subtle sizing
+  // changes. The non-native theme can basically draw at any size, so we prefer
+  // to have consistent sizing information with the native theme.
+  bool IsWidgetNonNative(nsIFrame*, StyleAppearance);
+
   // The nsITheme interface.
   NS_IMETHOD DrawWidgetBackground(gfxContext* aContext, nsIFrame* aFrame,
                                   StyleAppearance aAppearance,
                                   const nsRect& aRect, const nsRect& aDirtyRect,
                                   DrawOverflow) override;
+
+  bool CreateWebRenderCommandsForWidget(
+      mozilla::wr::DisplayListBuilder&, mozilla::wr::IpcResourceUpdateQueue&,
+      const mozilla::layers::StackingContextHelper&,
+      mozilla::layers::RenderRootStateManager*, nsIFrame*, StyleAppearance,
+      const nsRect&) override;
 
   [[nodiscard]] LayoutDeviceIntMargin GetWidgetBorder(
       nsDeviceContext* aContext, nsIFrame* aFrame,
@@ -66,9 +90,11 @@ class nsNativeThemeWin : private nsNativeTheme, public nsITheme {
 
   bool WidgetIsContainer(StyleAppearance aAppearance) override;
 
-  bool ThemeDrawsFocusForWidget(StyleAppearance aAppearance) override;
+  bool ThemeDrawsFocusForWidget(nsIFrame*, StyleAppearance) override;
 
-  bool ThemeWantsButtonInnerFocusRing(StyleAppearance) override { return true; }
+  bool ThemeWantsButtonInnerFocusRing(nsIFrame*, StyleAppearance) override {
+    return true;
+  }
 
   bool ThemeNeedsComboboxDropmarker() override;
 
@@ -81,7 +107,8 @@ class nsNativeThemeWin : private nsNativeTheme, public nsITheme {
   ScrollbarSizes GetScrollbarSizes(nsPresContext*, StyleScrollbarWidth,
                                    Overlay) override;
 
-  nsNativeThemeWin();
+  explicit nsNativeThemeWin(
+      mozilla::UniquePtr<ScrollbarDrawing>&& aScrollbarDrawingWin);
 
  protected:
   mozilla::Maybe<nsUXThemeClass> GetThemeClass(StyleAppearance aAppearance);
@@ -162,5 +189,7 @@ class nsNativeThemeWin : private nsNativeTheme, public nsITheme {
   bool mGutterSizeCacheValid;
   SIZE mGutterSizeCache;
 };
+
+}  // namespace mozilla::widget
 
 #endif

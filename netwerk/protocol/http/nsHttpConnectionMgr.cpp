@@ -156,7 +156,8 @@ nsresult nsHttpConnectionMgr::Shutdown() {
   }
 
   // wait for shutdown event to complete
-  SpinEventLoopUntil([&, shutdownWrapper]() { return shutdownWrapper->mBool; });
+  SpinEventLoopUntil("nsHttpConnectionMgr::Shutdown"_ns,
+                     [&, shutdownWrapper]() { return shutdownWrapper->mBool; });
 
   return NS_OK;
 }
@@ -296,6 +297,8 @@ nsHttpConnectionMgr::Observe(nsISupports* subject, const char* topic,
 nsresult nsHttpConnectionMgr::AddTransaction(HttpTransactionShell* trans,
                                              int32_t priority) {
   LOG(("nsHttpConnectionMgr::AddTransaction [trans=%p %d]\n", trans, priority));
+  // Make sure a transaction is not in a pending queue.
+  CheckTransInPendingQueue(trans->AsHttpTransaction());
   return PostEvent(&nsHttpConnectionMgr::OnMsgNewTransaction, priority,
                    trans->AsHttpTransaction());
 }
@@ -325,6 +328,9 @@ nsresult nsHttpConnectionMgr::AddTransactionWithStickyConn(
       ("nsHttpConnectionMgr::AddTransactionWithStickyConn "
        "[trans=%p %d transWithStickyConn=%p]\n",
        trans, priority, transWithStickyConn));
+  // Make sure a transaction is not in a pending queue.
+  CheckTransInPendingQueue(trans->AsHttpTransaction());
+
   RefPtr<NewTransactionData> data =
       new NewTransactionData(trans->AsHttpTransaction(), priority,
                              transWithStickyConn->AsHttpTransaction());
@@ -1621,6 +1627,9 @@ nsresult nsHttpConnectionMgr::ProcessNewTransaction(nsHttpTransaction* trans) {
     return NS_OK;
   }
 
+  // Make sure a transaction is not in a pending queue.
+  CheckTransInPendingQueue(trans);
+
   trans->SetPendingTime();
 
   RefPtr<Http2PushedStreamWrapper> pushedStreamWrapper =
@@ -1647,7 +1656,7 @@ nsresult nsHttpConnectionMgr::ProcessNewTransaction(nsHttpTransaction* trans) {
       trans->Caps() & NS_HTTP_DISALLOW_HTTP3);
   MOZ_ASSERT(ent);
 
-  if (gHttpHandler->EchConfigEnabled()) {
+  if (gHttpHandler->EchConfigEnabled(ci->IsHttp3())) {
     ent->MaybeUpdateEchConfig(ci);
   }
 
@@ -3230,7 +3239,7 @@ ConnectionEntry* nsHttpConnectionMgr::GetOrCreateConnectionEntry(
   }
 
   // step 2
-  if (!prohibitWildCard && !aNoHttp3) {
+  if (!prohibitWildCard && aNoHttp3) {
     RefPtr<nsHttpConnectionInfo> wildCardProxyCI;
     DebugOnly<nsresult> rv =
         specificCI->CreateWildCard(getter_AddRefs(wildCardProxyCI));
@@ -3418,9 +3427,6 @@ void nsHttpConnectionMgr::ExcludeHttp3(const nsHttpConnectionInfo* ci) {
   }
 
   ent->DontReuseHttp3Conn();
-  // Need to cancel the transactions in the pending queue. Otherwise, they'll
-  // stay in the queue forever.
-  ent->CancelAllTransactions(NS_ERROR_NET_RESET);
 }
 
 void nsHttpConnectionMgr::MoveToWildCardConnEntry(
@@ -3467,14 +3473,19 @@ void nsHttpConnectionMgr::MoveToWildCardConnEntry(
   ent->MoveConnection(proxyConn, wcEnt);
 }
 
-bool nsHttpConnectionMgr::RemoveTransFromConnEntry(nsHttpTransaction* aTrans) {
+bool nsHttpConnectionMgr::RemoveTransFromConnEntry(nsHttpTransaction* aTrans,
+                                                   const nsACString& aHashKey) {
   MOZ_ASSERT(OnSocketThread(), "not on socket thread");
 
   LOG(("nsHttpConnectionMgr::RemoveTransFromConnEntry: trans=%p ci=%s", aTrans,
-       aTrans->ConnectionInfo()->HashKey().get()));
+       PromiseFlatCString(aHashKey).get()));
+
+  if (aHashKey.IsEmpty()) {
+    return false;
+  }
 
   // Step 1: Get the transaction's connection entry.
-  ConnectionEntry* entry = mCT.GetWeak(aTrans->ConnectionInfo()->HashKey());
+  ConnectionEntry* entry = mCT.GetWeak(aHashKey);
   if (!entry) {
     return false;
   }
@@ -3540,6 +3551,25 @@ void nsHttpConnectionMgr::DecrementNumIdleConns() {
   MOZ_ASSERT(mNumIdleConns);
   mNumIdleConns--;
   ConditionallyStopPruneDeadConnectionsTimer();
+}
+
+void nsHttpConnectionMgr::CheckTransInPendingQueue(nsHttpTransaction* aTrans) {
+#ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
+  // We only do this check on socket thread. When this function is called on
+  // main thread, the transaction is newly created, so we can skip this check.
+  if (!OnSocketThread()) {
+    return;
+  }
+
+  nsAutoCString hashKey;
+  aTrans->GetHashKeyOfConnectionEntry(hashKey);
+  if (hashKey.IsEmpty()) {
+    return;
+  }
+
+  bool foundInPendingQ = RemoveTransFromConnEntry(aTrans, hashKey);
+  MOZ_DIAGNOSTIC_ASSERT(!foundInPendingQ);
+#endif
 }
 
 }  // namespace net

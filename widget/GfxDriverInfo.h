@@ -201,6 +201,7 @@ enum class DeviceFamily : uint8_t {
   NvidiaRolloutWebRender,
   IntelRolloutWebRender,
   IntelModernRolloutWebRender,
+  IntelWebRenderBlocked,
   AtiRolloutWebRender,
 
   Max
@@ -234,6 +235,7 @@ enum DriverVendor : uint8_t {
   MesaLLVMPipe,
   MesaSoftPipe,
   MesaSWRast,
+  MesaSWUnknown,
   // AMD
   MesaR600,
   // Nouveau: Open-source nvidia
@@ -267,6 +269,7 @@ enum class DesktopEnvironment : uint8_t {
   Deepin,
   Dwm,
   Budgie,
+  Sway,
   Unknown,
   Max
 };

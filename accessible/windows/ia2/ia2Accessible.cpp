@@ -278,13 +278,10 @@ ia2Accessible::get_states(AccessibleStates* aStates) {
 
   // XXX: bug 344674 should come with better approach that we have here.
 
-  if (!Acc()) {
+  Accessible* acc = Acc();
+  if (!acc) {
     *aStates = IA2_STATE_DEFUNCT;
     return S_OK;
-  }
-  AccessibleWrap* acc = LocalAcc();
-  if (!acc) {
-    return E_NOTIMPL;  // XXX Not supported for RemoteAccessible yet.
   }
 
   uint64_t state;

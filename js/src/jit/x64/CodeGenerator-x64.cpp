@@ -465,16 +465,6 @@ void CodeGenerator::visitAtomicTypedArrayElementBinopForEffect64(
   }
 }
 
-void CodeGenerator::visitWasmRegisterResult(LWasmRegisterResult* lir) {
-  if (JitOptions.spectreIndexMasking) {
-    if (MWasmRegisterResult* mir = lir->mir()) {
-      if (mir->type() == MIRType::Int32) {
-        masm.movl(ToRegister(lir->output()), ToRegister(lir->output()));
-      }
-    }
-  }
-}
-
 void CodeGenerator::visitWasmSelectI64(LWasmSelectI64* lir) {
   MOZ_ASSERT(lir->mir()->type() == MIRType::Int64);
 
@@ -564,6 +554,8 @@ void CodeGeneratorX64::emitWasmLoad(T* ins) {
   uint32_t offset = mir->access().offset();
   MOZ_ASSERT(offset < masm.wasmMaxOffsetGuardLimit());
 
+  // ptr is a GPR and is either a 32-bit value zero-extended to 64-bit, or a
+  // true 64-bit value.
   const LAllocation* ptr = ins->ptr();
   Operand srcAddr = ptr->isBogus()
                         ? Operand(HeapReg, offset)
@@ -771,7 +763,7 @@ void CodeGenerator::visitWasmExtendU32Index(LWasmExtendU32Index* lir) {
   // canonical form.
   Register output = ToRegister(lir->output());
   MOZ_ASSERT(ToRegister(lir->input()) == output);
-  masm.assertCanonicalInt32(output);
+  masm.debugAssertCanonicalInt32(output);
 }
 
 void CodeGenerator::visitWasmWrapU32Index(LWasmWrapU32Index* lir) {
@@ -779,7 +771,7 @@ void CodeGenerator::visitWasmWrapU32Index(LWasmWrapU32Index* lir) {
   // canonical form.
   Register output = ToRegister(lir->output());
   MOZ_ASSERT(ToRegister(lir->input()) == output);
-  masm.assertCanonicalInt32(output);
+  masm.debugAssertCanonicalInt32(output);
 }
 
 void CodeGenerator::visitSignExtendInt64(LSignExtendInt64* ins) {

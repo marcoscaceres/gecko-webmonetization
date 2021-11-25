@@ -74,6 +74,15 @@ module.exports = {
         ],
       },
     },
+    {
+      // TODO Bug 1501127: sjs files have their own sandbox, and do not inherit
+      // the Window backstage pass directly. Turn this rule off for sjs files for
+      // now until we develop a solution.
+      files: ["**/*.sjs"],
+      rules: {
+        "mozilla/reject-importGlobalProperties": "off",
+      },
+    },
   ],
 
   parserOptions: {
@@ -129,9 +138,11 @@ module.exports = {
     "mozilla/no-useless-removeEventListener": "error",
     "mozilla/prefer-boolean-length-check": "error",
     "mozilla/prefer-formatValues": "error",
+    "mozilla/reject-addtask-only": "error",
     "mozilla/reject-chromeutils-import-params": "error",
     "mozilla/reject-importGlobalProperties": ["error", "allownonwebidl"],
     "mozilla/reject-osfile": "warn",
+    "mozilla/reject-scriptableunicodeconverter": "warn",
     "mozilla/rejects-requires-await": "error",
     "mozilla/use-cc-etc": "error",
     "mozilla/use-chromeutils-generateqi": "error",
@@ -209,6 +220,9 @@ module.exports = {
 
     // No single if block inside an else block
     "no-lonely-if": "error",
+
+    // Disallow the use of number literals that immediately lose precision at runtime when converted to JS Number
+    "no-loss-of-precision": "error",
 
     // Nested ternary statements are confusing
     "no-nested-ternary": "error",

@@ -334,11 +334,11 @@ class WalkerFront extends FrontClassWithSpec(walkerSpec) {
   }
 
   async children(node, options) {
-    if (!node.remoteFrame) {
+    if (!node.useChildTargetToFetchChildren) {
       return super.children(node, options);
     }
-    const remoteTarget = await node.connectToRemoteFrame();
-    const walker = (await remoteTarget.getFront("inspector")).walker;
+    const target = await node.connectToFrame();
+    const walker = (await target.getFront("inspector")).walker;
 
     // Finally retrieve the NodeFront of the remote frame's document
     const documentNode = await walker.getRootNode();
@@ -389,79 +389,6 @@ class WalkerFront extends FrontClassWithSpec(walkerSpec) {
     // Finally, set this embedder element's node front as the
     const documentNode = await this.getRootNode();
     documentNode.reparent(parentNode);
-  }
-
-  /**
-   * Evaluate the cross iframes query selectors for the current walker front.
-   *
-   * @param {Array} selectors
-   *        An array of CSS selectors to find the target accessible object.
-   *        Several selectors can be needed if the element is nested in frames
-   *        and not directly in the root document.
-   * @return {Promise} a promise that resolves when the node front is found for
-   *                   selection using inspector tools.
-   */
-  async findNodeFront(nodeSelectors) {
-    const querySelectors = async nodeFront => {
-      const selector = nodeSelectors.shift();
-      if (!selector) {
-        return nodeFront;
-      }
-      nodeFront = await this.querySelector(nodeFront, selector);
-
-      // It's possible the containing iframe isn't available by the time
-      // this.querySelector is called, which causes the re-selected node to be
-      // unavailable. There also isn't a way for us to know when all iframes on the page
-      // have been created after a reload. Because of this, we should should bail here.
-      if (!nodeFront) {
-        return null;
-      }
-
-      if (nodeSelectors.length > 0) {
-        await nodeFront.waitForFrameLoad();
-
-        const { nodes } = await this.children(nodeFront);
-
-        // If there are remaining selectors to process, they will target a document or a
-        // document-fragment under the current node. Whether the element is a frame or
-        // a web component, it can only contain one document/document-fragment, so just
-        // select the first one available.
-        nodeFront = nodes.find(node => {
-          const { nodeType } = node;
-          return (
-            nodeType === Node.DOCUMENT_FRAGMENT_NODE ||
-            nodeType === Node.DOCUMENT_NODE
-          );
-        });
-
-        // The iframe selector might have matched an element which is not an
-        // iframe in the new page (or an iframe with no document?). In this
-        // case, bail out and fallback to the root body element.
-        if (!nodeFront) {
-          return null;
-        }
-      }
-      return querySelectors(nodeFront) || nodeFront;
-    };
-    const nodeFront = await this.getRootNode();
-
-    // If rootSelectors are [frameSelector1, ..., frameSelectorN, rootSelector]
-    // we expect that [frameSelector1, ..., frameSelectorN] will also be in
-    // nodeSelectors.
-    // Otherwise it means the nodeSelectors target a node outside of this walker
-    // and we should return null.
-    const rootFrontSelectors = await nodeFront.getAllSelectors();
-    for (let i = 0; i < rootFrontSelectors.length - 1; i++) {
-      if (rootFrontSelectors[i] !== nodeSelectors[i]) {
-        return null;
-      }
-    }
-
-    // The query will start from the walker's rootNode, remove all the
-    // "frameSelectors".
-    nodeSelectors.splice(0, rootFrontSelectors.length - 1);
-
-    return querySelectors(nodeFront);
   }
 
   _onRootNodeAvailable(rootNode) {

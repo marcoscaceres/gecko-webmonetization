@@ -110,7 +110,8 @@ class DebugAPI {
   // The garbage collector calls this after everything has been marked, but
   // before anything has been finalized. We use this to clear Debugger /
   // debuggee edges at a point where the parties concerned are all still
-  // initialized.
+  // initialized. This does not update edges to moved GC things which is handled
+  // via the other trace methods.
   static void sweepAll(JSFreeOp* fop);
 
   // Add sweep group edges due to the presence of any debuggers.
@@ -258,7 +259,7 @@ class DebugAPI {
    */
   [[nodiscard]] static inline bool onLeaveFrame(JSContext* cx,
                                                 AbstractFramePtr frame,
-                                                jsbytecode* pc, bool ok);
+                                                const jsbytecode* pc, bool ok);
 
   // Call any breakpoint handlers for the current scripted location.
   [[nodiscard]] static bool onTrap(JSContext* cx);
@@ -355,7 +356,7 @@ class DebugAPI {
       mozilla::TimeStamp when, JS::Realm::DebuggerVector& dbgs);
   [[nodiscard]] static bool slowPathOnLeaveFrame(JSContext* cx,
                                                  AbstractFramePtr frame,
-                                                 jsbytecode* pc, bool ok);
+                                                 const jsbytecode* pc, bool ok);
   [[nodiscard]] static bool slowPathOnNewGenerator(
       JSContext* cx, AbstractFramePtr frame,
       Handle<AbstractGeneratorObject*> genObj);

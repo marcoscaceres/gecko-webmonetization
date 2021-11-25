@@ -277,13 +277,13 @@ already_AddRefed<Decoder> CreateTrivialDecoder() {
 }
 
 void AssertCorrectPipelineFinalState(SurfaceFilter* aFilter,
-                                     const gfx::IntRect& aInputSpaceRect,
-                                     const gfx::IntRect& aOutputSpaceRect) {
+                                     const IntRect& aInputSpaceRect,
+                                     const IntRect& aOutputSpaceRect) {
   EXPECT_TRUE(aFilter->IsSurfaceFinished());
   Maybe<SurfaceInvalidRect> invalidRect = aFilter->TakeInvalidRect();
   EXPECT_TRUE(invalidRect.isSome());
-  EXPECT_EQ(aInputSpaceRect, invalidRect->mInputSpaceRect);
-  EXPECT_EQ(aOutputSpaceRect, invalidRect->mOutputSpaceRect);
+  EXPECT_EQ(aInputSpaceRect, invalidRect->mInputSpaceRect.ToUnknownRect());
+  EXPECT_EQ(aOutputSpaceRect, invalidRect->mOutputSpaceRect.ToUnknownRect());
 }
 
 void CheckGeneratedImage(Decoder* aDecoder, const IntRect& aRect,
@@ -443,6 +443,13 @@ ImageTestCase GreenAVIFTestCase() {
 
 ImageTestCase NonzeroReservedAVIFTestCase() {
   auto testCase = ImageTestCase("hdlr-nonzero-reserved-bug-1727033.avif",
+                                "image/avif", IntSize(1, 1));
+  testCase.mColor = BGRAColor(0x00, 0x00, 0x00, 0xFF);
+  return testCase;
+}
+
+ImageTestCase MultipleColrAVIFTestCase() {
+  auto testCase = ImageTestCase("valid-avif-colr-nclx-and-prof.avif",
                                 "image/avif", IntSize(1, 1));
   testCase.mColor = BGRAColor(0x00, 0x00, 0x00, 0xFF);
   return testCase;

@@ -927,6 +927,10 @@ class Field extends _pdf_object.PDFObject {
     return false;
   }
 
+  _reset() {
+    this.value = this.valueAsString = this.defaultValue;
+  }
+
   _runActions(event) {
     const eventName = event.name;
 
@@ -1096,9 +1100,9 @@ exports.CheckboxField = CheckboxField;
 Object.defineProperty(exports, "__esModule", ({
   value: true
 }));
+exports.FieldType = void 0;
 exports.createActionsMap = createActionsMap;
 exports.getFieldType = getFieldType;
-exports.FieldType = void 0;
 const FieldType = {
   none: 0,
   number: 1,
@@ -1986,8 +1990,8 @@ var _thermometer = __w_pdfjs_require__(12);
 
 const VIEWER_TYPE = "PDF.js";
 const VIEWER_VARIATION = "Full";
-const VIEWER_VERSION = "10.0";
-const FORMS_VERSION = undefined;
+const VIEWER_VERSION = 21.00720099;
+const FORMS_VERSION = 21.00720099;
 
 class App extends _pdf_object.PDFObject {
   constructor(data) {
@@ -2435,7 +2439,37 @@ class App extends _pdf_object.PDFObject {
 
   execDialog() {}
 
-  execMenuItem() {}
+  execMenuItem(item) {
+    switch (item) {
+      case "SaveAs":
+      case "FirstPage":
+      case "LastPage":
+      case "NextPage":
+      case "PrevPage":
+      case "ZoomViewIn":
+      case "ZoomViewOut":
+        this._send({
+          command: item
+        });
+
+        break;
+
+      case "FitPage":
+        this._send({
+          command: "zoom",
+          value: "page-fit"
+        });
+
+        break;
+
+      case "Print":
+        this._send({
+          command: "print"
+        });
+
+        break;
+    }
+  }
 
   getNthPlugInName() {}
 
@@ -2613,6 +2647,14 @@ class EventDispatcher {
         this._document.obj._dispatchDocEvent(event.name);
       } else if (id === "page") {
         this._document.obj._dispatchPageEvent(event.name, baseEvent.actions, baseEvent.pageNumber);
+      } else if (id === "app" && baseEvent.name === "ResetForm") {
+        for (const fieldId of baseEvent.ids) {
+          const obj = this._objects[fieldId];
+
+          if (obj) {
+            obj.obj._reset();
+          }
+        }
       }
 
       return;
@@ -3036,6 +3078,7 @@ class Doc extends _pdf_object.PDFObject {
     this._numPages = data.numPages || 1;
     this._pageNum = data.pageNum || 0;
     this._producer = data.Producer || "";
+    this._securityHandler = data.EncryptFilterName || null;
     this._subject = data.Subject || "";
     this._title = data.Title || "";
     this._URL = data.URL || "";
@@ -3487,7 +3530,7 @@ class Doc extends _pdf_object.PDFObject {
   }
 
   get securityHandler() {
-    return null;
+    return this._securityHandler;
   }
 
   set securityHandler(_) {
@@ -4902,8 +4945,8 @@ Object.defineProperty(exports, "initSandbox", ({
 
 var _initialization = __w_pdfjs_require__(1);
 
-const pdfjsVersion = '2.11.243';
-const pdfjsBuild = '7fb653b19';
+const pdfjsVersion = '2.12.126';
+const pdfjsBuild = 'e1a35e7bb';
 })();
 
 /******/ 	return __webpack_exports__;

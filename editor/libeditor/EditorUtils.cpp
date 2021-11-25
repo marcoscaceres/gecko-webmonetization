@@ -5,14 +5,15 @@
 
 #include "EditorUtils.h"
 
-#include "gfxFontUtils.h"
+#include "EditorDOMPoint.h"
+#include "HTMLEditHelpers.h"  // for MoveNodeResult
+#include "HTMLEditUtils.h"    // for HTMLEditUtils
+#include "TextEditor.h"
 #include "WSRunObject.h"
+
+#include "gfxFontUtils.h"
 #include "mozilla/ComputedStyle.h"
-#include "mozilla/ContentIterator.h"
-#include "mozilla/EditorDOMPoint.h"
-#include "mozilla/HTMLEditor.h"
 #include "mozilla/OwningNonNull.h"
-#include "mozilla/TextEditor.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/HTMLBRElement.h"
 #include "mozilla/dom/Selection.h"
@@ -36,20 +37,6 @@ class nsISupports;
 namespace mozilla {
 
 using namespace dom;
-
-template void DOMIterator::AppendAllNodesToArray(
-    nsTArray<OwningNonNull<nsIContent>>& aArrayOfNodes) const;
-template void DOMIterator::AppendAllNodesToArray(
-    nsTArray<OwningNonNull<HTMLBRElement>>& aArrayOfNodes) const;
-template void DOMIterator::AppendNodesToArray(
-    BoolFunctor aFunctor, nsTArray<OwningNonNull<nsIContent>>& aArrayOfNodes,
-    void* aClosure) const;
-template void DOMIterator::AppendNodesToArray(
-    BoolFunctor aFunctor, nsTArray<OwningNonNull<Element>>& aArrayOfNodes,
-    void* aClosure) const;
-template void DOMIterator::AppendNodesToArray(
-    BoolFunctor aFunctor, nsTArray<OwningNonNull<Text>>& aArrayOfNodes,
-    void* aClosure) const;
 
 /******************************************************************************
  * mozilla::EditActionResult
@@ -388,54 +375,6 @@ AutoRangeArray::ShrinkRangesIfStartFromOrEndAfterAtomicContent(
 }
 
 /******************************************************************************
- * some helper classes for iterating the dom tree
- *****************************************************************************/
-
-DOMIterator::DOMIterator(nsINode& aNode) : mIter(&mPostOrderIter) {
-  DebugOnly<nsresult> rv = mIter->Init(&aNode);
-  MOZ_ASSERT(NS_SUCCEEDED(rv));
-}
-
-nsresult DOMIterator::Init(nsRange& aRange) { return mIter->Init(&aRange); }
-
-nsresult DOMIterator::Init(const RawRangeBoundary& aStartRef,
-                           const RawRangeBoundary& aEndRef) {
-  return mIter->Init(aStartRef, aEndRef);
-}
-
-DOMIterator::DOMIterator() : mIter(&mPostOrderIter) {}
-
-template <class NodeClass>
-void DOMIterator::AppendAllNodesToArray(
-    nsTArray<OwningNonNull<NodeClass>>& aArrayOfNodes) const {
-  for (; !mIter->IsDone(); mIter->Next()) {
-    if (NodeClass* node = NodeClass::FromNode(mIter->GetCurrentNode())) {
-      aArrayOfNodes.AppendElement(*node);
-    }
-  }
-}
-
-template <class NodeClass>
-void DOMIterator::AppendNodesToArray(
-    BoolFunctor aFunctor, nsTArray<OwningNonNull<NodeClass>>& aArrayOfNodes,
-    void* aClosure /* = nullptr */) const {
-  for (; !mIter->IsDone(); mIter->Next()) {
-    NodeClass* node = NodeClass::FromNode(mIter->GetCurrentNode());
-    if (node && aFunctor(*node, aClosure)) {
-      aArrayOfNodes.AppendElement(*node);
-    }
-  }
-}
-
-DOMSubtreeIterator::DOMSubtreeIterator() : DOMIterator() {
-  mIter = &mSubtreeIter;
-}
-
-nsresult DOMSubtreeIterator::Init(nsRange& aRange) {
-  return mIter->Init(&aRange);
-}
-
-/******************************************************************************
  * some general purpose editor utils
  *****************************************************************************/
 
@@ -482,15 +421,15 @@ bool EditorUtils::IsDescendantOf(const nsINode& aNode, const nsINode& aParent,
 }
 
 // static
-void EditorUtils::MaskString(nsString& aString, Text* aText,
+void EditorUtils::MaskString(nsString& aString, const Text& aTextNode,
                              uint32_t aStartOffsetInString,
                              uint32_t aStartOffsetInText) {
-  MOZ_ASSERT(aText->HasFlag(NS_MAYBE_MASKED));
+  MOZ_ASSERT(aTextNode.HasFlag(NS_MAYBE_MASKED));
   MOZ_ASSERT(aStartOffsetInString == 0 || aStartOffsetInText == 0);
 
   uint32_t unmaskStart = UINT32_MAX, unmaskLength = 0;
   TextEditor* textEditor =
-      nsContentUtils::GetTextEditorFromAnonymousNodeWithoutCreation(aText);
+      nsContentUtils::GetTextEditorFromAnonymousNodeWithoutCreation(&aTextNode);
   if (textEditor && textEditor->UnmaskedLength() > 0) {
     unmaskStart = textEditor->UnmaskedStart();
     unmaskLength = textEditor->UnmaskedLength();

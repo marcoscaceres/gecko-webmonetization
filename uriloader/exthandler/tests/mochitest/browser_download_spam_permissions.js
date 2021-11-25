@@ -17,11 +17,16 @@ const TEST_PATH = getRootDirectory(gTestPath).replace(
 
 const AUTOMATIC_DOWNLOAD_TOPIC = "blocked-automatic-download";
 
+var MockFilePicker = SpecialPowers.MockFilePicker;
+MockFilePicker.init(window);
+registerCleanupFunction(() => MockFilePicker.cleanup());
+
 add_task(async function setup() {
   // Create temp directory
   let time = new Date().getTime();
   let tempDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
   tempDir.append(time);
+  Services.prefs.setIntPref("browser.download.folderList", 2);
   Services.prefs.setComplexValue("browser.download.dir", Ci.nsIFile, tempDir);
 
   PermissionTestUtils.add(
@@ -30,13 +35,22 @@ add_task(async function setup() {
     Services.perms.UNKNOWN
   );
   await SpecialPowers.pushPrefEnv({
-    set: [["browser.download.improvements_to_download_panel", true]],
+    set: [
+      // We enable browser.download.improvements_to_download_panel here since
+      // the test expects the download to be saved directly to disk and not
+      // prompted by the UnknownContentType window.
+      ["browser.download.improvements_to_download_panel", true],
+      ["browser.download.enable_spam_prevention", true],
+    ],
   });
 
   registerCleanupFunction(async () => {
+    Services.prefs.clearUserPref("browser.download.folderList");
     Services.prefs.clearUserPref("browser.download.dir");
     await IOUtils.remove(tempDir.path, { recursive: true });
   });
+
+  Services.telemetry.clearEvents();
 });
 
 add_task(async function check_download_spam_permissions() {
@@ -63,6 +77,8 @@ add_task(async function check_download_spam_permissions() {
     TEST_PATH + "test_spammy_page.html"
   );
   registerCleanupFunction(async () => {
+    DownloadIntegration.getDownloadSpamProtection().clearDownloadSpam(TEST_URI);
+    DownloadsPanel.hidePanel();
     await publicList.removeFinished();
     BrowserTestUtils.removeTab(newTab);
     Services.obs.removeObserver(
@@ -100,4 +116,45 @@ add_task(async function check_download_spam_permissions() {
     TEST_URI,
     "The test URI should have blocked automatic downloads"
   );
+
+  let events = Services.telemetry.snapshotEvents(
+    Ci.nsITelemetry.DATASET_PRERELEASE_CHANNELS,
+    true
+  );
+  events = (events.parent || []).filter(
+    e => e[1] == "downloads" && e[2] == "helpertype"
+  );
+  is(events.length, 100, "should be 100 events");
+
+  let initialEvent = events.shift();
+  is(initialEvent[4], "save", "download is saved");
+
+  for (let event of events) {
+    is(event[4], "spam", "download is blocked");
+  }
+
+  await savelink();
 });
+
+// Check to ensure that a link saved manually is not blocked.
+async function savelink() {
+  let menu = document.getElementById("contentAreaContextMenu");
+  let popupShown = BrowserTestUtils.waitForEvent(menu, "popupshown");
+  BrowserTestUtils.synthesizeMouse(
+    "#image",
+    5,
+    5,
+    { type: "contextmenu", button: 2 },
+    gBrowser.selectedBrowser
+  );
+  await popupShown;
+
+  await new Promise(resolve => {
+    MockFilePicker.showCallback = function(fp) {
+      setTimeout(resolve, 0);
+      return Ci.nsIFilePicker.returnCancel;
+    };
+    let menuitem = menu.querySelector("#context-savelink");
+    menu.activateItem(menuitem);
+  });
+}

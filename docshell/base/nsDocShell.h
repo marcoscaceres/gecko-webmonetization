@@ -867,7 +867,7 @@ class nsDocShell final : public nsDocLoader,
   bool CanSavePresentation(uint32_t aLoadType, nsIRequest* aNewRequest,
                            mozilla::dom::Document* aNewDocument);
 
-  static void ReportBFCacheComboTelemetry(uint16_t aCombo);
+  static void ReportBFCacheComboTelemetry(uint32_t aCombo);
 
   // Captures the state of the supporting elements of the presentation
   // (the "window" object, docshell tree, meta-refresh loads, and security
@@ -946,6 +946,7 @@ class nsDocShell final : public nsDocLoader,
   void FirePageHideNotificationInternal(bool aIsUnload,
                                         bool aSkipCheckingDynEntries);
 
+  void ThawFreezeNonRecursive(bool aThaw);
   void FirePageHideShowNonRecursive(bool aShow);
 
   nsresult Dispatch(mozilla::TaskCategory aCategory,
@@ -978,7 +979,8 @@ class nsDocShell final : public nsDocLoader,
   void RefreshURIToQueue();
   nsresult Embed(nsIContentViewer* aContentViewer,
                  mozilla::dom::WindowGlobalChild* aWindowActor,
-                 bool aIsTransientAboutBlank, bool aPersist);
+                 bool aIsTransientAboutBlank, bool aPersist,
+                 nsIRequest* aRequest);
   nsPresContext* GetEldestPresContext();
   nsresult CheckLoadingPermissions();
   nsresult LoadHistoryEntry(nsISHEntry* aEntry, uint32_t aLoadType,
@@ -987,7 +989,7 @@ class nsDocShell final : public nsDocLoader,
       const mozilla::dom::LoadingSessionHistoryInfo& aEntry, uint32_t aLoadType,
       bool aUserActivation);
   nsresult LoadHistoryEntry(nsDocShellLoadState* aLoadState, uint32_t aLoadType,
-                            bool aReloadingActiveEntry);
+                            bool aLoadingCurrentEntry);
   nsresult GetHttpChannel(nsIChannel* aChannel, nsIHttpChannel** aReturn);
   nsresult ConfirmRepost(bool* aRepost);
   nsresult GetPromptAndStringBundle(nsIPrompt** aPrompt,
@@ -1074,7 +1076,8 @@ class nsDocShell final : public nsDocLoader,
 
   // Sets the active entry to the current loading entry. aPersist is used in the
   // case a new session history entry is added to the session history.
-  void MoveLoadingToActiveEntry(bool aPersist);
+  // aExpired is true if the relevant nsIChannel has its cache token expired.
+  void MoveLoadingToActiveEntry(bool aPersist, bool aExpired);
 
   void ActivenessMaybeChanged();
 

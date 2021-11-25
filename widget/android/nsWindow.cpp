@@ -4,6 +4,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include <algorithm>
 #include <android/log.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
@@ -12,18 +13,56 @@
 #include <type_traits>
 #include <unistd.h>
 
+#include "AndroidGraphics.h"
+#include "AndroidBridge.h"
+#include "AndroidBridgeUtilities.h"
+#include "AndroidContentController.h"
+#include "AndroidUiThread.h"
+#include "AndroidView.h"
+#include "gfxContext.h"
+#include "GeckoEditableSupport.h"
+#include "GeckoViewSupport.h"
+#include "GLContext.h"
+#include "GLContextProvider.h"
+#include "JavaBuiltins.h"
+#include "JavaExceptions.h"
+#include "KeyEvent.h"
+#include "Layers.h"
+#include "MotionEvent.h"
+#include "ScopedGLHelpers.h"
+#include "ScreenHelperAndroid.h"
+#include "TouchResampler.h"
+#include "WidgetUtils.h"
+#include "WindowRenderer.h"
+
+#include "nsAppShell.h"
+#include "nsContentUtils.h"
+#include "nsFocusManager.h"
+#include "nsGkAtoms.h"
+#include "nsGfxCIID.h"
+#include "nsLayoutUtils.h"
+#include "nsNetUtil.h"
+#include "nsPrintfCString.h"
+#include "nsString.h"
+#include "nsTArray.h"
+#include "nsThreadUtils.h"
+#include "nsUserIdleService.h"
+#include "nsViewManager.h"
+#include "nsWidgetsCID.h"
+#include "nsWindow.h"
+
+#include "nsIWidgetListener.h"
+#include "nsIWindowWatcher.h"
+#include "nsIAppWindow.h"
+
 #include "mozilla/MiscEvents.h"
 #include "mozilla/MouseEvents.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/StaticPrefs_android.h"
 #include "mozilla/StaticPrefs_ui.h"
 #include "mozilla/TouchEvents.h"
-#include "mozilla/Unused.h"
 #include "mozilla/WeakPtr.h"
 #include "mozilla/WheelHandlingHelper.h"  // for WheelDeltaAdjustmentStrategy
-
-#include "mozilla/Preferences.h"
-#include "mozilla/Unused.h"
 #include "mozilla/a11y/SessionAccessibility.h"
 #include "mozilla/dom/BrowsingContext.h"
 #include "mozilla/dom/CanonicalBrowsingContext.h"
@@ -32,65 +71,9 @@
 #include "mozilla/dom/MouseEventBinding.h"
 #include "mozilla/gfx/2D.h"
 #include "mozilla/gfx/DataSurfaceHelpers.h"
+#include "mozilla/gfx/Swizzle.h"
 #include "mozilla/gfx/Types.h"
-#include "mozilla/layers/LayersTypes.h"
-#include "mozilla/widget/AndroidVsync.h"
-#include <algorithm>
-
-using mozilla::Unused;
-using mozilla::dom::ContentChild;
-using mozilla::dom::ContentParent;
-using mozilla::gfx::DataSourceSurface;
-using mozilla::gfx::IntSize;
-using mozilla::gfx::Matrix;
-using mozilla::gfx::SurfaceFormat;
-
-#include "nsWindow.h"
-
-#include "AndroidGraphics.h"
-#include "JavaExceptions.h"
-
-#include "nsIWidgetListener.h"
-#include "nsIWindowWatcher.h"
-#include "nsIAppWindow.h"
-
-#include "nsAppShell.h"
-#include "nsFocusManager.h"
-#include "nsUserIdleService.h"
-#include "nsLayoutUtils.h"
-#include "nsNetUtil.h"
-#include "nsViewManager.h"
-
-#include "WidgetUtils.h"
-#include "nsContentUtils.h"
-
-#include "nsGfxCIID.h"
-#include "nsGkAtoms.h"
-#include "nsWidgetsCID.h"
-
-#include "gfxContext.h"
-
-#include "AndroidContentController.h"
-#include "GLContext.h"
-#include "GLContextProvider.h"
-#include "Layers.h"
-#include "ScopedGLHelpers.h"
-#include "mozilla/layers/APZEventState.h"
-#include "mozilla/layers/APZInputBridge.h"
-#include "mozilla/layers/APZThreadUtils.h"
-#include "mozilla/layers/CompositorOGL.h"
-#include "mozilla/layers/IAPZCTreeManager.h"
-
-#include "nsTArray.h"
-
-#include "AndroidBridge.h"
-#include "AndroidBridgeUtilities.h"
-#include "AndroidUiThread.h"
-#include "AndroidView.h"
-#include "GeckoEditableSupport.h"
-#include "GeckoViewSupport.h"
-#include "KeyEvent.h"
-#include "MotionEvent.h"
+#include "mozilla/ipc/Shmem.h"
 #include "mozilla/java/EventDispatcherWrappers.h"
 #include "mozilla/java/GeckoAppShellWrappers.h"
 #include "mozilla/java/GeckoEditableChildWrappers.h"
@@ -99,16 +82,17 @@ using mozilla::gfx::SurfaceFormat;
 #include "mozilla/java/GeckoSystemStateListenerWrappers.h"
 #include "mozilla/java/PanZoomControllerNatives.h"
 #include "mozilla/java/SessionAccessibilityWrappers.h"
-#include "ScreenHelperAndroid.h"
-#include "TouchResampler.h"
-
+#include "mozilla/layers/APZEventState.h"
+#include "mozilla/layers/APZInputBridge.h"
+#include "mozilla/layers/APZThreadUtils.h"
+#include "mozilla/layers/CompositorBridgeChild.h"
+#include "mozilla/layers/CompositorOGL.h"
+#include "mozilla/layers/CompositorSession.h"
+#include "mozilla/layers/LayersTypes.h"
+#include "mozilla/layers/UiCompositorControllerChild.h"
+#include "mozilla/layers/IAPZCTreeManager.h"
 #include "mozilla/ProfilerLabels.h"
-#include "nsPrintfCString.h"
-#include "nsString.h"
-
-#include "JavaBuiltins.h"
-
-#include "mozilla/ipc/Shmem.h"
+#include "mozilla/widget/AndroidVsync.h"
 
 using namespace mozilla;
 using namespace mozilla::dom;
@@ -116,12 +100,13 @@ using namespace mozilla::layers;
 using namespace mozilla::widget;
 using namespace mozilla::ipc;
 
+using mozilla::dom::ContentChild;
+using mozilla::dom::ContentParent;
+using mozilla::gfx::DataSourceSurface;
+using mozilla::gfx::IntSize;
+using mozilla::gfx::Matrix;
+using mozilla::gfx::SurfaceFormat;
 using mozilla::java::GeckoSession;
-
-#include "mozilla/layers/CompositorBridgeChild.h"
-#include "mozilla/layers/CompositorSession.h"
-#include "mozilla/layers/UiCompositorControllerChild.h"
-#include "nsThreadUtils.h"
 
 // All the toplevel windows that have been created; these are in
 // stacking order, so the window at gTopLevelWindows[0] is the topmost
@@ -714,9 +699,7 @@ class NPZCSupport final
     MOZ_ASSERT(toolMinor.Length() == pointerCount);
 
     for (size_t i = startIndex; i < endIndex; i++) {
-      float orien;
-      ScreenSize radius;
-      std::tie(orien, radius) = ConvertOrientationAndRadius(
+      auto [orien, radius] = ConvertOrientationAndRadius(
           orientation[i], toolMajor[i], toolMinor[i]);
 
       ScreenIntPoint point(int32_t(floorf(x[i])), int32_t(floorf(y[i])));
@@ -726,12 +709,9 @@ class NPZCSupport final
       for (size_t historyIndex = 0; historyIndex < historySize;
            historyIndex++) {
         size_t historicalI = historyIndex * pointerCount + i;
-        float historicalAngle;
-        ScreenSize historicalRadius;
-        std::tie(historicalAngle, historicalRadius) =
-            ConvertOrientationAndRadius(historicalOrientation[historicalI],
-                                        historicalToolMajor[historicalI],
-                                        historicalToolMinor[historicalI]);
+        auto [historicalAngle, historicalRadius] = ConvertOrientationAndRadius(
+            historicalOrientation[historicalI],
+            historicalToolMajor[historicalI], historicalToolMinor[historicalI]);
         ScreenIntPoint historicalPoint(
             int32_t(floorf(historicalX[historicalI])),
             int32_t(floorf(historicalY[historicalI])));
@@ -1002,9 +982,9 @@ class LayerViewSupport final
                 }
                 results->pop();
               }
-              compositor->OnCompositorDetached();
             }
 
+            compositor->OnCompositorDetached();
             disposer->Run();
           }));
     }
@@ -1817,17 +1797,6 @@ void nsWindow::Destroy() {
 #endif
 }
 
-nsresult nsWindow::ConfigureChildren(
-    const nsTArray<nsIWidget::Configuration>& config) {
-  for (uint32_t i = 0; i < config.Length(); ++i) {
-    nsWindow* childWin = (nsWindow*)config[i].mChild.get();
-    childWin->Resize(config[i].mBounds.x, config[i].mBounds.y,
-                     config[i].mBounds.width, config[i].mBounds.height, false);
-  }
-
-  return NS_OK;
-}
-
 mozilla::widget::EventDispatcher* nsWindow::GetEventDispatcher() const {
   if (mAndroidView) {
     return mAndroidView->mEventDispatcher;
@@ -2222,7 +2191,7 @@ void nsWindow::CreateLayerManager() {
 
   if (!ComputeShouldAccelerate() || sFailedToCreateGLContext) {
     printf_stderr(" -- creating basic, not accelerated\n");
-    mWindowRenderer = CreateBasicLayerManager();
+    mWindowRenderer = CreateFallbackRenderer();
   }
 }
 
@@ -2710,4 +2679,193 @@ already_AddRefed<nsIWidget> nsIWidget::CreateTopLevelWindow() {
 already_AddRefed<nsIWidget> nsIWidget::CreateChildWindow() {
   nsCOMPtr<nsIWidget> window = new nsWindow();
   return window.forget();
+}
+
+static already_AddRefed<DataSourceSurface> GetCursorImage(
+    const nsIWidget::Cursor& aCursor, mozilla::CSSToLayoutDeviceScale aScale) {
+  if (!aCursor.IsCustom()) {
+    return nullptr;
+  }
+
+  RefPtr<DataSourceSurface> destDataSurface;
+
+  nsIntSize size = nsIWidget::CustomCursorSize(aCursor);
+  // prevent DoS attacks
+  if (size.width > 128 || size.height > 128) {
+    return nullptr;
+  }
+
+  RefPtr<gfx::SourceSurface> surface = aCursor.mContainer->GetFrameAtSize(
+      size * aScale.scale, imgIContainer::FRAME_CURRENT,
+      imgIContainer::FLAG_SYNC_DECODE | imgIContainer::FLAG_ASYNC_NOTIFY);
+  if (NS_WARN_IF(!surface)) {
+    return nullptr;
+  }
+
+  RefPtr<DataSourceSurface> srcDataSurface = surface->GetDataSurface();
+  if (NS_WARN_IF(!srcDataSurface)) {
+    return nullptr;
+  }
+
+  DataSourceSurface::ScopedMap sourceMap(srcDataSurface,
+                                         DataSourceSurface::READ);
+
+  destDataSurface = gfx::Factory::CreateDataSourceSurfaceWithStride(
+      srcDataSurface->GetSize(), SurfaceFormat::R8G8B8A8,
+      sourceMap.GetStride());
+  if (NS_WARN_IF(!destDataSurface)) {
+    return nullptr;
+  }
+
+  DataSourceSurface::ScopedMap destMap(destDataSurface,
+                                       DataSourceSurface::READ_WRITE);
+
+  SwizzleData(sourceMap.GetData(), sourceMap.GetStride(), surface->GetFormat(),
+              destMap.GetData(), destMap.GetStride(), SurfaceFormat::R8G8B8A8,
+              destDataSurface->GetSize());
+
+  return destDataSurface.forget();
+}
+
+static int32_t GetCursorType(nsCursor aCursor) {
+  // When our minimal requirement of SDK version is 25+,
+  // we should replace with JNI auto-generator.
+  switch (aCursor) {
+    case eCursor_standard:
+      // android.view.PointerIcon.TYPE_ARROW
+      return 0x3e8;
+    case eCursor_wait:
+      // android.view.PointerIcon.TYPE_WAIT
+      return 0x3ec;
+    case eCursor_select:
+      // android.view.PointerIcon.TYPE_TEXT;
+      return 0x3f0;
+    case eCursor_hyperlink:
+      // android.view.PointerIcon.TYPE_HAND
+      return 0x3ea;
+    case eCursor_n_resize:
+    case eCursor_s_resize:
+    case eCursor_ns_resize:
+    case eCursor_row_resize:
+      // android.view.PointerIcon.TYPE_VERTICAL_DOUBLE_ARROW
+      return 0x3f7;
+    case eCursor_w_resize:
+    case eCursor_e_resize:
+    case eCursor_ew_resize:
+    case eCursor_col_resize:
+      // android.view.PointerIcon.TYPE_HORIZONTAL_DOUBLE_ARROW
+      return 0x3f6;
+    case eCursor_nw_resize:
+    case eCursor_se_resize:
+    case eCursor_nwse_resize:
+      // android.view.PointerIcon.TYPE_TOP_LEFT_DIAGONAL_DOUBLE_ARROW
+      return 0x3f9;
+    case eCursor_ne_resize:
+    case eCursor_sw_resize:
+    case eCursor_nesw_resize:
+      // android.view.PointerIcon.TYPE_TOP_RIGHT_DIAGONAL_DOUBLE_ARROW
+      return 0x3f8;
+    case eCursor_crosshair:
+      // android.view.PointerIcon.TYPE_CROSSHAIR
+      return 0x3ef;
+    case eCursor_move:
+      // android.view.PointerIcon.TYPE_ARROW
+      return 0x3e8;
+    case eCursor_help:
+      // android.view.PointerIcon.TYPE_HELP
+      return 0x3eb;
+    case eCursor_copy:
+      // android.view.PointerIcon.TYPE_COPY
+      return 0x3f3;
+    case eCursor_alias:
+      // android.view.PointerIcon.TYPE_ALIAS
+      return 0x3f2;
+    case eCursor_context_menu:
+      // android.view.PointerIcon.TYPE_CONTEXT_MENU
+      return 0x3e9;
+    case eCursor_cell:
+      // android.view.PointerIcon.TYPE_CELL
+      return 0x3ee;
+    case eCursor_grab:
+      // android.view.PointerIcon.TYPE_GRAB
+      return 0x3fc;
+    case eCursor_grabbing:
+      // android.view.PointerIcon.TYPE_GRABBING
+      return 0x3fd;
+    case eCursor_spinning:
+      // android.view.PointerIcon.TYPE_WAIT
+      return 0x3ec;
+    case eCursor_zoom_in:
+      // android.view.PointerIcon.TYPE_ZOOM_IN
+      return 0x3fa;
+    case eCursor_zoom_out:
+      // android.view.PointerIcon.TYPE_ZOOM_OUT
+      return 0x3fb;
+    case eCursor_not_allowed:
+      // android.view.PointerIcon.TYPE_NO_DROP:
+      return 0x3f4;
+    case eCursor_no_drop:
+      // android.view.PointerIcon.TYPE_NO_DROP:
+      return 0x3f4;
+    case eCursor_vertical_text:
+      // android.view.PointerIcon.TYPE_VERTICAL_TEXT
+      return 0x3f1;
+    case eCursor_all_scroll:
+      // android.view.PointerIcon.TYPE_ALL_SCROLL
+      return 0x3f5;
+    case eCursor_none:
+      // android.view.PointerIcon.TYPE_NULL
+      return 0;
+    default:
+      NS_WARNING_ASSERTION(aCursor, "Invalid cursor type");
+      // android.view.PointerIcon.TYPE_ARROW
+      return 0x3e8;
+  }
+}
+
+void nsWindow::SetCursor(const Cursor& aCursor) {
+  if (mozilla::jni::GetAPIVersion() < 24) {
+    return;
+  }
+
+  // Only change cursor if it's actually been changed
+  if (!mUpdateCursor && mCursor == aCursor) {
+    return;
+  }
+
+  mUpdateCursor = false;
+  mCursor = aCursor;
+
+  int32_t type = 0;
+  RefPtr<DataSourceSurface> destDataSurface =
+      GetCursorImage(aCursor, GetDefaultScale());
+  if (!destDataSurface) {
+    type = GetCursorType(aCursor.mDefaultCursor);
+  }
+
+  if (mozilla::jni::NativeWeakPtr<LayerViewSupport>::Accessor lvs{
+          mLayerViewSupport.Access()}) {
+    const auto& compositor = lvs->GetJavaCompositor();
+
+    DispatchToUiThread(
+        "nsWindow::SetCursor",
+        [compositor = GeckoSession::Compositor::GlobalRef(compositor), type,
+         destDataSurface = std::move(destDataSurface),
+         hotspotX = aCursor.mHotspotX, hotspotY = aCursor.mHotspotY] {
+          java::sdk::Bitmap::LocalRef bitmap;
+          if (destDataSurface) {
+            DataSourceSurface::ScopedMap destMap(destDataSurface,
+                                                 DataSourceSurface::READ);
+            auto pixels = mozilla::jni::ByteBuffer::New(
+                reinterpret_cast<int8_t*>(destMap.GetData()),
+                destMap.GetStride() * destDataSurface->GetSize().height);
+            bitmap = java::sdk::Bitmap::CreateBitmap(
+                destDataSurface->GetSize().width,
+                destDataSurface->GetSize().height,
+                java::sdk::Config::ARGB_8888());
+            bitmap->CopyPixelsFromBuffer(pixels);
+          }
+          compositor->SetPointerIcon(type, bitmap, hotspotX, hotspotY);
+        });
+  }
 }

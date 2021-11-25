@@ -23,6 +23,11 @@ tree {
 
 treechildren::-moz-tree-row {
   border: 1px solid transparent;
+}
+
+treechildren::-moz-tree-row,
+treecol:not([hideheader="true"]),
+treecolpicker {
   min-height: 24px;
   height: 1.3em;
 }
@@ -123,8 +128,8 @@ treecolpicker {
   padding: 0 4px;
 }
 
-treecol:hover,
-treecolpicker:hover {
+treecol:where(:hover),
+treecolpicker:where(:hover) {
   color: -moz-ColHeaderHoverText;
 }
 

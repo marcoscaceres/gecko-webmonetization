@@ -64,7 +64,7 @@ bool SharedMemory::SetHandle(SharedMemoryHandle handle, bool read_only) {
 #endif
 
   freezeable_ = false;
-  mapped_file_.reset(handle.fd);
+  mapped_file_ = std::move(handle);
   read_only_ = read_only;
   // is_memfd_ only matters for freezing, which isn't possible
   return true;
@@ -72,11 +72,11 @@ bool SharedMemory::SetHandle(SharedMemoryHandle handle, bool read_only) {
 
 // static
 bool SharedMemory::IsHandleValid(const SharedMemoryHandle& handle) {
-  return handle.fd >= 0;
+  return handle != nullptr;
 }
 
 // static
-SharedMemoryHandle SharedMemory::NULLHandle() { return SharedMemoryHandle(); }
+SharedMemoryHandle SharedMemory::NULLHandle() { return nullptr; }
 
 #ifdef ANDROID
 
@@ -489,6 +489,10 @@ bool SharedMemory::ReadOnlyCopy(SharedMemory* ro_out) {
 
 #endif  // not Android
 
+#ifndef MAP_NORESERVE
+#  define MAP_NORESERVE 0
+#endif
+
 bool SharedMemory::Map(size_t bytes, void* fixed_address) {
   if (!mapped_file_) {
     return false;
@@ -517,30 +521,22 @@ bool SharedMemory::Map(size_t bytes, void* fixed_address) {
 }
 
 void* SharedMemory::FindFreeAddressSpace(size_t size) {
-  void* memory =
-      mmap(NULL, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  void* memory = mmap(nullptr, size, PROT_NONE,
+                      MAP_ANONYMOUS | MAP_NORESERVE | MAP_PRIVATE, -1, 0);
   munmap(memory, size);
   return memory != MAP_FAILED ? memory : NULL;
 }
 
-bool SharedMemory::ShareToProcessCommon(ProcessId processId,
-                                        SharedMemoryHandle* new_handle,
-                                        bool close_self) {
+SharedMemoryHandle SharedMemory::CloneHandle() {
   freezeable_ = false;
   const int new_fd = dup(mapped_file_.get());
   if (new_fd < 0) {
     CHROMIUM_LOG(WARNING) << "failed to duplicate file descriptor: "
                           << strerror(errno);
-    return false;
+    return nullptr;
   }
-  new_handle->fd = new_fd;
-  new_handle->auto_close = true;
-
-  if (close_self) Close();
-
-  return true;
+  return mozilla::UniqueFileHandle(new_fd);
 }
-
 void SharedMemory::Close(bool unmap_view) {
   if (unmap_view) {
     Unmap();

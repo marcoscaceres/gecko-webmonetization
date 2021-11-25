@@ -266,7 +266,6 @@ class ResponsiveUI {
       await Promise.all([
         this.updateScreenOrientation("landscape-primary", 0),
         this.updateMaxTouchPointsEnabled(false),
-        this.responsiveFront.setFloatingScrollbars(false),
       ]);
 
       // Hide browser UI to avoid displaying weird intermediate states while closing.
@@ -321,10 +320,10 @@ class ResponsiveUI {
       // any resource & target anymore, the JSWindowActors will be unregistered
       // which will trigger an early destruction of the RDM target, before we
       // could finalize the cleanup.
-      this.commands.targetCommand.unwatchTargets(
-        [this.commands.targetCommand.TYPES.FRAME],
-        this.onTargetAvailable
-      );
+      this.commands.targetCommand.unwatchTargets({
+        types: [this.commands.targetCommand.TYPES.FRAME],
+        onAvailable: this.onTargetAvailable,
+      });
 
       this.resourceCommand.unwatchResources(
         [this.resourceCommand.TYPES.NETWORK_EVENT],
@@ -368,10 +367,10 @@ class ResponsiveUI {
 
     await this.commands.targetCommand.startListening();
 
-    await this.commands.targetCommand.watchTargets(
-      [this.commands.targetCommand.TYPES.FRAME],
-      this.onTargetAvailable
-    );
+    await this.commands.targetCommand.watchTargets({
+      types: [this.commands.targetCommand.TYPES.FRAME],
+      onAvailable: this.onTargetAvailable,
+    });
 
     // To support network throttling the resource command
     // needs to be watching for network resources.
@@ -501,8 +500,11 @@ class ResponsiveUI {
     if (reloadNeeded) {
       this.reloadBrowser();
     }
+
     // Used by tests
-    this.emit("device-changed");
+    this.emitForTests("device-changed", {
+      reloadTriggered: reloadNeeded || reloadOnTouchSimulationChange,
+    });
   }
 
   async onChangeNetworkThrottling(event) {
@@ -561,7 +563,9 @@ class ResponsiveUI {
       this.reloadBrowser();
     }
     // Used by tests
-    this.emit("device-association-removed");
+    this.emitForTests("device-association-removed", {
+      reloadTriggered: reloadNeeded || reloadOnTouchSimulationChange,
+    });
   }
 
   /**
@@ -750,12 +754,6 @@ class ResponsiveUI {
     // on the BrowsingContext by RDM are not preserved. So we need to call
     // enterResponsiveMode whenever there is a target switch.
     this.tab.linkedBrowser.enterResponsiveMode();
-
-    // Apply floating scrollbar styles to document.
-    await this.responsiveFront.setFloatingScrollbars(true);
-
-    // Attach current target to the selected browser tab.
-    await this.currentTarget.attach();
 
     // If the target follows the window global lifecycle, the configuration was already
     // restored from the server during target switch, so we can stop here.

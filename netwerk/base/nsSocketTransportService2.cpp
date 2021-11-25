@@ -686,7 +686,7 @@ int32_t nsSocketTransportService::Poll(TimeDuration* pollDuration,
     if (pollTimeout != PR_INTERVAL_NO_WAIT) {
       profiler_thread_wake();
     }
-    if (profiler_can_accept_markers()) {
+    if (profiler_thread_is_being_profiled_for_markers()) {
       PROFILER_MARKER_TEXT(
           "SocketTransportService::Poll", NETWORK,
           MarkerTiming::IntervalUntilNowFrom(startTime),
@@ -1605,7 +1605,6 @@ nsSocketTransportService::Observe(nsISupports* subject, const char* topic,
     ShutdownThread();
   } else if (!strcmp(topic, NS_NETWORK_LINK_TOPIC)) {
     mLastNetworkLinkChangeTime = PR_IntervalNow();
-    mNotTrustedMitmDetected = false;
   }
 
   return NS_OK;

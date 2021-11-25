@@ -581,6 +581,15 @@
     expected: ObjId
     slot: RawInt32Field
 
+# Guard obj[slot] is not an object.
+- name: GuardDynamicSlotIsNotObject
+  shared: true
+  transpile: true
+  cost_estimate: 1
+  args:
+    obj: ObjId
+    slot: RawInt32Field
+
 - name: GuardFixedSlotValue
   shared: true
   transpile: true
@@ -767,6 +776,13 @@
     obj: ObjId
     id: ValId
     hasOwn: BoolImm
+
+- name: ValueToIteratorResult
+  shared: true
+  transpile: true
+  cost_estimate: 5
+  args:
+    val: ValId
 
 # See CacheIR.cpp 'DOM proxies' comment.
 - name: LoadDOMExpandoValue
@@ -1643,14 +1659,13 @@
 
 
 # Meta ops generate no code, but contain data for BaselineInspector.
-- name: MetaTwoByte
+- name: MetaScriptedThisShape
   shared: true
   transpile: true
   cost_estimate: 0
   custom_writer: true
   args:
-    functionObject: ObjectField
-    templateObject: ObjectField
+    thisShape: ShapeField
 
 - name: LoadFixedSlotResult
   shared: false
@@ -1774,6 +1789,22 @@
     result: Int32Id
 
 - name: LoadArgumentsObjectArgResult
+  shared: true
+  transpile: true
+  cost_estimate: 2
+  args:
+    obj: ObjId
+    index: Int32Id
+
+- name: LoadArgumentsObjectArgHoleResult
+  shared: true
+  transpile: true
+  cost_estimate: 2
+  args:
+    obj: ObjId
+    index: Int32Id
+
+- name: LoadArgumentsObjectArgExistsResult
   shared: true
   transpile: true
   cost_estimate: 2
@@ -2756,6 +2787,14 @@
   args:
     map: ObjId
     obj: ObjId
+
+- name: ArrayFromArgumentsObjectResult
+  shared: true
+  transpile: true
+  cost_estimate: 5
+  args:
+    obj: ObjId
+    shape: ShapeField
 
 - name: CallPrintString
   shared: true

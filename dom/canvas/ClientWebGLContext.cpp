@@ -19,6 +19,7 @@
 #include "mozilla/dom/WorkerCommon.h"
 #include "mozilla/EnumeratedRange.h"
 #include "mozilla/gfx/gfxVars.h"
+#include "mozilla/gfx/CanvasManagerChild.h"
 #include "mozilla/ipc/Shmem.h"
 #include "mozilla/layers/CompositorBridgeChild.h"
 #include "mozilla/layers/ImageBridgeChild.h"
@@ -387,32 +388,6 @@ void ClientWebGLContext::ClearVRSwapChain() { Run<RPROC(ClearVRSwapChain)>(); }
 
 // -
 
-already_AddRefed<layers::Layer> ClientWebGLContext::GetCanvasLayer(
-    nsDisplayListBuilder* builder, Layer* oldLayer, LayerManager* manager) {
-  if (!mResetLayer && oldLayer) {
-    RefPtr<layers::Layer> ret = oldLayer;
-    return ret.forget();
-  }
-
-  RefPtr<CanvasLayer> canvasLayer = manager->CreateCanvasLayer();
-  if (!canvasLayer) {
-    NS_WARNING("CreateCanvasLayer returned null!");
-    return nullptr;
-  }
-
-  const auto canvasRenderer = canvasLayer->CreateOrGetCanvasRenderer();
-  if (!InitializeCanvasRenderer(builder, canvasRenderer)) return nullptr;
-
-  uint32_t flags = 0;
-  if (GetIsOpaque()) {
-    flags |= Layer::CONTENT_OPAQUE;
-  }
-  canvasLayer->SetContentFlags(flags);
-
-  mResetLayer = false;
-  return canvasLayer.forget();
-}
-
 bool ClientWebGLContext::UpdateWebRenderCanvasData(
     nsDisplayListBuilder* aBuilder, WebRenderCanvasData* aCanvasData) {
   CanvasRenderer* renderer = aCanvasData->GetCanvasRenderer();
@@ -570,15 +545,16 @@ ClientWebGLContext::SetDimensions(const int32_t signedWidth,
 }
 
 static bool IsWebglOutOfProcessEnabled() {
-  bool useOop = StaticPrefs::webgl_out_of_process();
-
-  if (!gfx::gfxVars::AllowWebglOop()) {
-    useOop = false;
-  }
   if (StaticPrefs::webgl_out_of_process_force()) {
-    useOop = true;
+    return true;
   }
-  return useOop;
+  if (!gfx::gfxVars::AllowWebglOop()) {
+    return false;
+  }
+  if (!NS_IsMainThread()) {
+    return StaticPrefs::webgl_out_of_process_worker();
+  }
+  return StaticPrefs::webgl_out_of_process();
 }
 
 static inline bool StartsWith(const std::string& haystack,
@@ -599,7 +575,6 @@ bool ClientWebGLContext::CreateHostContext(const uvec2& requestedSize) {
     if (options.failIfMajorPerformanceCaveat) {
       const auto backend = GetCompositorBackendType();
       bool isCompositorSlow = false;
-      isCompositorSlow |= (backend == layers::LayersBackend::LAYERS_BASIC);
       isCompositorSlow |= (backend == layers::LayersBackend::LAYERS_WR &&
                            gfx::gfxVars::UseSoftwareWebRender());
 
@@ -611,9 +586,7 @@ bool ClientWebGLContext::CreateHostContext(const uvec2& requestedSize) {
     }
 
     const bool resistFingerprinting = ShouldResistFingerprinting();
-
-    const auto& principal = GetCanvas()->NodePrincipal();
-    const auto principalKey = principal->GetHashValue();
+    const auto principalKey = GetPrincipalHashValue();
     const auto initDesc = webgl::InitContextDesc{
         mIsWebGL2, resistFingerprinting, requestedSize, options, principalKey};
 
@@ -634,15 +607,15 @@ bool ClientWebGLContext::CreateHostContext(const uvec2& requestedSize) {
 
     ScopedGfxFeatureReporter reporter("IpcWebGL");
 
-    auto* const cbc = layers::CompositorBridgeChild::Get();
-    MOZ_ASSERT(cbc);
-    if (!cbc) {
-      return Err("!CompositorBridgeChild::Get()");
+    auto* const cm = gfx::CanvasManagerChild::Get();
+    MOZ_ASSERT(cm);
+    if (!cm) {
+      return Err("!CanvasManagerChild::Get()");
     }
 
     RefPtr<dom::WebGLChild> outOfProcess = new dom::WebGLChild(*this);
     outOfProcess =
-        static_cast<dom::WebGLChild*>(cbc->SendPWebGLConstructor(outOfProcess));
+        static_cast<dom::WebGLChild*>(cm->SendPWebGLConstructor(outOfProcess));
     if (!outOfProcess) {
       return Err("SendPWebGLConstructor failed");
     }
@@ -777,14 +750,7 @@ ClientWebGLContext::SetContextOptions(JSContext* cx,
   newOpts.enableDebugRendererInfo =
       StaticPrefs::webgl_enable_debug_renderer_info();
   MOZ_ASSERT(mCanvasElement || mOffscreenCanvas);
-  newOpts.shouldResistFingerprinting =
-      mCanvasElement ?
-                     // If we're constructed from a canvas element
-          nsContentUtils::ShouldResistFingerprinting(GetOwnerDoc())
-                     :
-                     // If we're constructed from an offscreen canvas
-          nsContentUtils::ShouldResistFingerprinting(
-              mOffscreenCanvas->GetOwnerGlobal()->PrincipalOrNull());
+  newOpts.shouldResistFingerprinting = ShouldResistFingerprinting();
 
   if (attributes.mAlpha.WasPassed()) {
     newOpts.alpha = attributes.mAlpha.Value();
@@ -3205,6 +3171,14 @@ void ClientWebGLContext::BufferData(GLenum target,
   Run<RPROC(BufferData)>(target, RawBuffer<>(range), usage);
 }
 
+void ClientWebGLContext::RawBufferData(GLenum target,
+                                       const Range<const uint8_t>& srcData,
+                                       GLenum usage) {
+  const FuncScope funcScope(*this, "bufferData");
+
+  Run<RPROC(BufferData)>(target, RawBuffer<>(srcData), usage);
+}
+
 ////
 
 void ClientWebGLContext::BufferSubData(GLenum target,
@@ -4116,6 +4090,14 @@ void ClientWebGLContext::TexImage(uint8_t funcDims, GLenum imageTarget,
   Run<RPROC(TexImage)>(static_cast<uint32_t>(level), respecFormat,
                        CastUvec3(offset), pi, std::move(*desc));
   scopedArr.Reset();  // (For the hazard analysis) Done with the data.
+}
+
+void ClientWebGLContext::RawTexImage(
+    uint32_t level, GLenum respecFormat, uvec3 offset,
+    const webgl::PackingInfo& pi, const webgl::TexUnpackBlobDesc& desc) const {
+  const FuncScope funcScope(*this, "tex(Sub)Image[23]D");
+  if (IsContextLost()) return;
+  Run<RPROC(TexImage)>(level, respecFormat, offset, pi, desc);
 }
 
 void ClientWebGLContext::CompressedTexImage(bool sub, uint8_t funcDims,
@@ -5307,22 +5289,26 @@ void ClientWebGLContext::GetSupportedProfilesASTC(
 // -
 
 bool ClientWebGLContext::ShouldResistFingerprinting() const {
-  if (NS_IsMainThread()) {
-    if (mCanvasElement) {
-      // If we're constructed from a canvas element
-      return nsContentUtils::ShouldResistFingerprinting(GetOwnerDoc());
-    }
-    // if (mOffscreenCanvas->GetOwnerGlobal()) {
-    //  // If we're constructed from an offscreen canvas
-    //  return nsContentUtils::ShouldResistFingerprinting(
-    //      mOffscreenCanvas->GetOwnerGlobal()->PrincipalOrNull());
-    //}
-    // Last resort, just check the global preference
-    return nsContentUtils::ShouldResistFingerprinting();
+  if (mCanvasElement) {
+    // If we're constructed from a canvas element
+    return nsContentUtils::ShouldResistFingerprinting(GetOwnerDoc());
   }
-  dom::WorkerPrivate* workerPrivate = dom::GetCurrentThreadWorkerPrivate();
-  MOZ_ASSERT(workerPrivate);
-  return nsContentUtils::ShouldResistFingerprinting(workerPrivate);
+  if (mOffscreenCanvas) {
+    // If we're constructed from an offscreen canvas
+    return mOffscreenCanvas->ShouldResistFingerprinting();
+  }
+  // Last resort, just check the global preference
+  return nsContentUtils::ShouldResistFingerprinting();
+}
+
+uint32_t ClientWebGLContext::GetPrincipalHashValue() const {
+  if (mCanvasElement) {
+    return mCanvasElement->NodePrincipal()->GetHashValue();
+  }
+  if (mOffscreenCanvas) {
+    return mOffscreenCanvas->GetOwnerGlobal()->GetPrincipalHashValue();
+  }
+  return 0;
 }
 
 // ---------------------------
@@ -6020,18 +6006,8 @@ void ClientWebGLContext::ShaderSource(WebGLShaderJS& shader,
   if (IsContextLost()) return;
   if (!shader.ValidateUsable(*this, "shader")) return;
 
-  auto source = ToString(NS_ConvertUTF16toUTF8(sourceU16));
-  const auto cleanSource = CommentsToSpaces(source);
-
-  const auto badChar = CheckGLSLPreprocString(mIsWebGL2, cleanSource);
-  if (badChar) {
-    EnqueueError(LOCAL_GL_INVALID_VALUE,
-                 "`source` contains illegal character 0x%x.", *badChar);
-    return;
-  }
-
-  shader.mSource = std::move(source);
-  Run<RPROC(ShaderSource)>(shader.mId, cleanSource);
+  shader.mSource = ToString(NS_ConvertUTF16toUTF8(sourceU16));
+  Run<RPROC(ShaderSource)>(shader.mId, shader.mSource);
 }
 
 // -

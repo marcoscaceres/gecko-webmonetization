@@ -5,8 +5,8 @@
 
 #include "mozilla/Logging.h"
 #include "mozilla/gfx/Logging.h"
+#include "mozilla/intl/Locale.h"
 #include "mozilla/intl/LocaleService.h"
-#include "mozilla/intl/MozLocale.h"
 #include "mozilla/intl/OSPreferences.h"
 
 #include "gfxPlatformFontList.h"
@@ -51,6 +51,7 @@
 
 using namespace mozilla;
 using mozilla::intl::Locale;
+using mozilla::intl::LocaleParser;
 using mozilla::intl::LocaleService;
 using mozilla::intl::OSPreferences;
 
@@ -248,6 +249,7 @@ bool gfxPlatformFontList::Initialize(gfxPlatformFontList* aList) {
   sPlatformFontList = aList;
   if (XRE_IsParentProcess() &&
       StaticPrefs::gfx_font_list_omt_enabled_AtStartup() &&
+      StaticPrefs::gfx_e10s_font_list_shared_AtStartup() &&
       !gfxPlatform::InSafeMode()) {
     sInitFontListThread = PR_CreateThread(
         PR_USER_THREAD, InitFontListCallback, aList, PR_PRIORITY_NORMAL,
@@ -471,22 +473,18 @@ bool gfxPlatformFontList::InitFontList() {
 
     gfxPlatform::PurgeSkiaFontCache();
 
+    // There's no need to broadcast this reflow request to child processes, as
+    // ContentParent::NotifyUpdatedFonts deals with it by re-entering into this
+    // function on child processes.
     if (NS_IsMainThread()) {
-      nsCOMPtr<nsIObserverService> obs =
-          mozilla::services::GetObserverService();
-      if (obs) {
-        // Notify any current presContexts that fonts are being updated, so
-        // existing caches will no longer be valid.
-        obs->NotifyObservers(nullptr, "font-info-updated", nullptr);
-      }
+      gfxPlatform::ForceGlobalReflow(gfxPlatform::NeedsReframe::Yes,
+                                     gfxPlatform::BroadcastToChildren::No);
     } else {
       NS_DispatchToMainThread(
           NS_NewRunnableFunction("font-info-updated notification callback", [] {
-            nsCOMPtr<nsIObserverService> obs =
-                mozilla::services::GetObserverService();
-            if (obs) {
-              obs->NotifyObservers(nullptr, "font-info-updated", nullptr);
-            }
+            gfxPlatform::ForceGlobalReflow(
+                gfxPlatform::NeedsReframe::Yes,
+                gfxPlatform::BroadcastToChildren::No);
           }));
     }
 
@@ -508,6 +506,11 @@ bool gfxPlatformFontList::InitFontList() {
     mFaceNameListsInitialized = false;
     ClearLangGroupPrefFonts();
     CancelLoader();
+
+    // Clear cached family records that will no longer be valid.
+    for (auto& f : mReplacementCharFallbackFamily) {
+      f = FontFamily();
+    }
 
     gfxFontUtils::GetPrefsFontList(kFontSystemWhitelistPref, mEnabledFontsList);
   }
@@ -792,6 +795,9 @@ gfxFontEntry* gfxPlatformFontList::LookupInSharedFaceNameList(
   FontVisibility level =
       aPresContext ? aPresContext->GetFontVisibility() : FontVisibility::User;
   if (!IsVisibleToCSS(*family, level)) {
+    if (aPresContext) {
+      aPresContext->ReportBlockedFontFamily(*family);
+    }
     return nullptr;
   }
   gfxFontEntry* fe = CreateFontEntry(face, family);
@@ -1061,7 +1067,6 @@ gfxFont* gfxPlatformFontList::GlobalFontFallback(
                   gfxPlatform::GetPlatform()->UseCmapsDuringSystemFallback();
   FontVisibility level =
       aPresContext ? aPresContext->GetFontVisibility() : FontVisibility::User;
-  FontVisibility rejectedFallbackVisibility = FontVisibility::Unknown;
   if (!useCmaps) {
     // Allow platform-specific fallback code to try and find a usable font
     gfxFontEntry* fe = PlatformGlobalFontFallback(aPresContext, aCh, aRunScript,
@@ -1083,7 +1088,6 @@ gfxFont* gfxPlatformFontList::GlobalFontFallback(
             RefPtr<gfxFont> autoRefDeref(font);
           }
         }
-        rejectedFallbackVisibility = aMatchedFamily.mShared->Visibility();
       } else {
         if (IsVisibleToCSS(*aMatchedFamily.mUnshared, level)) {
           gfxFont* font = fe->FindOrMakeFont(aMatchStyle);
@@ -1098,7 +1102,6 @@ gfxFont* gfxPlatformFontList::GlobalFontFallback(
             RefPtr<gfxFont> autoRefDeref(font);
           }
         }
-        rejectedFallbackVisibility = aMatchedFamily.mUnshared->Visibility();
       }
     }
   }
@@ -1427,10 +1430,15 @@ bool gfxPlatformFontList::FindAndAddFamilies(
     }
     // Check whether the family we found is actually allowed to be looked up,
     // according to current font-visibility prefs.
-    if (family && (IsVisibleToCSS(*family, visibilityLevel) ||
-                   (allowHidden && family->IsHidden()))) {
-      aOutput->AppendElement(FamilyAndGeneric(family, aGeneric));
-      return true;
+    if (family) {
+      bool visible = IsVisibleToCSS(*family, visibilityLevel);
+      if (visible || (allowHidden && family->IsHidden())) {
+        aOutput->AppendElement(FamilyAndGeneric(family, aGeneric));
+        return true;
+      }
+      if (aPresContext) {
+        aPresContext->ReportBlockedFontFamily(*family);
+      }
     }
     return false;
   }
@@ -1438,20 +1446,33 @@ bool gfxPlatformFontList::FindAndAddFamilies(
   NS_ASSERTION(mFontFamilies.Count() != 0,
                "system font list was not initialized correctly");
 
+  auto isBlockedByVisibilityLevel = [=](gfxFontFamily* aFamily) -> bool {
+    bool visible = IsVisibleToCSS(*aFamily, visibilityLevel);
+    if (visible || (allowHidden && aFamily->IsHidden())) {
+      return false;
+    }
+    if (aPresContext) {
+      aPresContext->ReportBlockedFontFamily(*aFamily);
+    }
+    return true;
+  };
+
   // lookup in canonical (i.e. English) family name list
   gfxFontFamily* familyEntry = mFontFamilies.GetWeak(key);
-  if (familyEntry && !IsVisibleToCSS(*familyEntry, visibilityLevel) &&
-      !(allowHidden && familyEntry->IsHidden())) {
-    return false;
+  if (familyEntry) {
+    if (isBlockedByVisibilityLevel(familyEntry)) {
+      return false;
+    }
   }
 
   // if not found, lookup in other family names list (mostly localized names)
   if (!familyEntry) {
     familyEntry = mOtherFamilyNames.GetWeak(key);
   }
-  if (familyEntry && !IsVisibleToCSS(*familyEntry, visibilityLevel) &&
-      !(allowHidden && familyEntry->IsHidden())) {
-    return false;
+  if (familyEntry) {
+    if (isBlockedByVisibilityLevel(familyEntry)) {
+      return false;
+    }
   }
 
   // if still not found and other family names not yet fully initialized,
@@ -1472,9 +1493,10 @@ bool gfxPlatformFontList::FindAndAddFamilies(
       }
       mOtherNamesMissed->Insert(key);
     }
-    if (familyEntry && !IsVisibleToCSS(*familyEntry, visibilityLevel) &&
-        !(allowHidden && familyEntry->IsHidden())) {
-      return false;
+    if (familyEntry) {
+      if (isBlockedByVisibilityLevel(familyEntry)) {
+        return false;
+      }
     }
   }
 
@@ -1505,9 +1527,10 @@ bool gfxPlatformFontList::FindAndAddFamilies(
       if (base && base->CheckForLegacyFamilyNames(this)) {
         familyEntry = mOtherFamilyNames.GetWeak(key);
       }
-      if (familyEntry && !IsVisibleToCSS(*familyEntry, visibilityLevel) &&
-          !(allowHidden && familyEntry->IsHidden())) {
-        return false;
+      if (familyEntry) {
+        if (isBlockedByVisibilityLevel(familyEntry)) {
+          return false;
+        }
       }
     }
   }
@@ -2150,19 +2173,22 @@ void gfxPlatformFontList::AppendCJKPrefLangs(eFontPrefLang aPrefLangs[],
     LocaleService::GetInstance()->GetAppLocaleAsBCP47(localeStr);
 
     {
-      Locale locale(localeStr);
-      if (locale.GetLanguage().Equals("ja")) {
-        AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_Japanese);
-      } else if (locale.GetLanguage().Equals("zh")) {
-        if (locale.GetRegion().Equals("CN")) {
-          AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_ChineseCN);
-        } else if (locale.GetRegion().Equals("TW")) {
-          AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_ChineseTW);
-        } else if (locale.GetRegion().Equals("HK")) {
-          AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_ChineseHK);
+      Locale locale;
+      if (LocaleParser::TryParse(localeStr, locale).isOk() &&
+          locale.Canonicalize().isOk()) {
+        if (locale.Language().EqualTo("ja")) {
+          AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_Japanese);
+        } else if (locale.Language().EqualTo("zh")) {
+          if (locale.Region().EqualTo("CN")) {
+            AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_ChineseCN);
+          } else if (locale.Region().EqualTo("TW")) {
+            AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_ChineseTW);
+          } else if (locale.Region().EqualTo("HK")) {
+            AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_ChineseHK);
+          }
+        } else if (locale.Language().EqualTo("ko")) {
+          AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_Korean);
         }
-      } else if (locale.GetLanguage().Equals("ko")) {
-        AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_Korean);
       }
     }
 
@@ -2182,20 +2208,22 @@ void gfxPlatformFontList::AppendCJKPrefLangs(eFontPrefLang aPrefLangs[],
           sysLocales, prefLocales, ""_ns,
           LocaleService::kLangNegStrategyFiltering, negLocales);
       for (const auto& localeStr : negLocales) {
-        Locale locale(localeStr);
-
-        if (locale.GetLanguage().Equals("ja")) {
-          AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_Japanese);
-        } else if (locale.GetLanguage().Equals("zh")) {
-          if (locale.GetRegion().Equals("CN")) {
-            AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_ChineseCN);
-          } else if (locale.GetRegion().Equals("TW")) {
-            AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_ChineseTW);
-          } else if (locale.GetRegion().Equals("HK")) {
-            AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_ChineseHK);
+        Locale locale;
+        if (LocaleParser::TryParse(localeStr, locale).isOk() &&
+            locale.Canonicalize().isOk()) {
+          if (locale.Language().EqualTo("ja")) {
+            AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_Japanese);
+          } else if (locale.Language().EqualTo("zh")) {
+            if (locale.Region().EqualTo("CN")) {
+              AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_ChineseCN);
+            } else if (locale.Region().EqualTo("TW")) {
+              AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_ChineseTW);
+            } else if (locale.Region().EqualTo("HK")) {
+              AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_ChineseHK);
+            }
+          } else if (locale.Language().EqualTo("ko")) {
+            AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_Korean);
           }
-        } else if (locale.GetLanguage().Equals("ko")) {
-          AppendPrefLang(tempPrefLangs, tempLen, eFontPrefLang_Korean);
         }
       }
     }
@@ -2749,7 +2777,7 @@ base::SharedMemoryHandle gfxPlatformFontList::ShareShmBlockToProcess(
 void gfxPlatformFontList::ShmBlockAdded(uint32_t aGeneration, uint32_t aIndex,
                                         base::SharedMemoryHandle aHandle) {
   if (SharedFontList()) {
-    SharedFontList()->ShmBlockAdded(aGeneration, aIndex, aHandle);
+    SharedFontList()->ShmBlockAdded(aGeneration, aIndex, std::move(aHandle));
   }
 }
 

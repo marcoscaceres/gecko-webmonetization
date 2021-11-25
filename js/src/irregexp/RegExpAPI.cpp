@@ -13,6 +13,7 @@
 #include "mozilla/ArrayUtils.h"
 #include "mozilla/Casting.h"
 
+#include "frontend/TokenStream.h"
 #include "gc/Zone.h"
 #include "irregexp/imported/regexp-ast.h"
 #include "irregexp/imported/regexp-bytecode-generator.h"
@@ -490,6 +491,7 @@ enum class AssembleResult {
     masm = MakeUnique<RegExpBytecodeGenerator>(cx->isolate, zone);
   }
   if (!masm) {
+    ReportOutOfMemory(cx);
     return AssembleResult::OutOfMemory;
   }
 
@@ -564,6 +566,7 @@ enum class AssembleResult {
         static_cast<SMRegExpMacroAssembler*>(masm.get())->tables();
     for (uint32_t i = 0; i < tables.length(); i++) {
       if (!re->addTable(std::move(tables[i]))) {
+        ReportOutOfMemory(cx);
         return AssembleResult::OutOfMemory;
       }
     }
@@ -670,7 +673,7 @@ bool CompilePattern(JSContext* cx, MutableHandleRegExpShared re,
       JS_ReportErrorASCII(cx, "regexp too big");
       return false;
     case AssembleResult::OutOfMemory:
-      ReportOutOfMemory(cx);
+      MOZ_ASSERT(cx->isThrowingOutOfMemory());
       return false;
     case AssembleResult::Success:
       break;

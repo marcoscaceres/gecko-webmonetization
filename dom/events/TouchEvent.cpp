@@ -151,9 +151,10 @@ TouchList* TouchEvent::TargetTouches() {
         if (!equalTarget) {
           // Need to still check if we're inside native anonymous content
           // and the non-NAC target would be the same.
-          nsCOMPtr<nsIContent> touchTarget =
-              do_QueryInterface(touches[i]->mTarget);
-          nsCOMPtr<nsIContent> eventTarget = do_QueryInterface(mEvent->mTarget);
+          nsIContent* touchTarget =
+              nsIContent::FromEventTargetOrNull(touches[i]->mTarget);
+          nsIContent* eventTarget =
+              nsIContent::FromEventTargetOrNull(mEvent->mTarget);
           equalTarget = touchTarget && eventTarget &&
                         touchTarget->FindFirstNonChromeOnlyAccessContent() ==
                             eventTarget->FindFirstNonChromeOnlyAccessContent();
@@ -242,8 +243,11 @@ bool TouchEvent::PrefEnabled(nsIDocShell* aDocShell) {
         // APZ might be disabled on this particular widget, in which case
         // TouchEvent support will also be disabled. Try to detect that.
         RefPtr<nsPresContext> pc = aDocShell->GetPresContext();
-        if (pc && pc->GetRootWidget()) {
-          enabled &= pc->GetRootWidget()->AsyncPanZoomEnabled();
+        if (pc) {
+          nsCOMPtr<nsIWidget> widget = pc->GetRootWidget();
+          if (widget) {
+            enabled &= widget->AsyncPanZoomEnabled();
+          }
         }
       }
 #endif

@@ -97,6 +97,7 @@ class HttpChannelChild final : public PHttpChannelChild,
   void DoDiagnosticAssertWhenOnStopNotCalledOnDestroy() override;
   // nsIHttpChannelInternal
   NS_IMETHOD GetIsAuthChannel(bool* aIsAuthChannel) override;
+  NS_IMETHOD SetEarlyHintObserver(nsIEarlyHintObserver* aObserver) override;
   // nsISupportsPriority
   NS_IMETHOD SetPriority(int32_t value) override;
   // nsIClassOfService
@@ -140,9 +141,6 @@ class HttpChannelChild final : public PHttpChannelChild,
   mozilla::ipc::IPCResult RecvSetPriority(const int16_t& aPriority) override;
 
   mozilla::ipc::IPCResult RecvOriginalCacheInputStreamAvailable(
-      const Maybe<IPCStream>& aStream) override;
-
-  mozilla::ipc::IPCResult RecvAltDataCacheInputStreamAvailable(
       const Maybe<IPCStream>& aStream) override;
 
   virtual void ActorDestroy(ActorDestroyReason aWhy) override;
@@ -197,7 +195,8 @@ class HttpChannelChild final : public PHttpChannelChild,
   void ProcessOnStartRequest(const nsHttpResponseHead& aResponseHead,
                              const bool& aUseResponseHead,
                              const nsHttpHeaderArray& aRequestHeaders,
-                             const HttpChannelOnStartRequestArgs& aArgs);
+                             const HttpChannelOnStartRequestArgs& aArgs,
+                             const HttpChannelAltDataStream& aAltData);
 
   // Callbacks while receiving OnTransportAndData/OnStopRequest/OnProgress/
   // OnStatus/FlushedForDiversion/DivertMessages on background IPC channel.
@@ -257,6 +256,8 @@ class HttpChannelChild final : public PHttpChannelChild,
   // ensure Cacnel is processed before any other channel events.
   void CancelOnMainThread(nsresult aRv);
 
+  nsresult MaybeLogCOEPError(nsresult aStatus);
+
  private:
   // this section is for main-thread-only object
   // all the references need to be proxy released on main thread.
@@ -272,7 +273,7 @@ class HttpChannelChild final : public PHttpChannelChild,
   RefPtr<ChannelEventQueue> mEventQ;
 
   nsCOMPtr<nsIInputStreamReceiver> mOriginalInputStreamReceiver;
-  nsCOMPtr<nsIInputStreamReceiver> mAltDataInputStreamReceiver;
+  nsCOMPtr<nsIInputStream> mAltDataInputStream;
 
   // Used to ensure atomicity of mBgChild and mBgInitFailCallback
   Mutex mBgChildMutex{"HttpChannelChild::BgChildMutex"};

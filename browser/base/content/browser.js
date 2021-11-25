@@ -69,6 +69,7 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   SafeBrowsing: "resource://gre/modules/SafeBrowsing.jsm",
   Sanitizer: "resource:///modules/Sanitizer.jsm",
   SaveToPocket: "chrome://pocket/content/SaveToPocket.jsm",
+  ScreenshotsUtils: "resource:///modules/ScreenshotsUtils.jsm",
   SessionStartup: "resource:///modules/sessionstore/SessionStartup.jsm",
   SessionStore: "resource:///modules/sessionstore/SessionStore.jsm",
   ShortcutUtils: "resource://gre/modules/ShortcutUtils.jsm",
@@ -444,6 +445,16 @@ XPCOMUtils.defineLazyGetter(this, "PopupNotifications", () => {
   }
 });
 
+XPCOMUtils.defineLazyGetter(this, "MacUserActivityUpdater", () => {
+  if (AppConstants.platform != "macosx") {
+    return null;
+  }
+
+  return Cc["@mozilla.org/widget/macuseractivityupdater;1"].getService(
+    Ci.nsIMacUserActivityUpdater
+  );
+});
+
 XPCOMUtils.defineLazyGetter(this, "Win7Features", () => {
   if (AppConstants.platform != "win") {
     return null;
@@ -490,12 +501,6 @@ XPCOMUtils.defineLazyPreferenceGetter(
   }
 );
 
-XPCOMUtils.defineLazyPreferenceGetter(
-  this,
-  "gBookmarksToolbar2h2020",
-  "browser.toolbars.bookmarks.2h2020",
-  false
-);
 XPCOMUtils.defineLazyPreferenceGetter(
   this,
   "gBookmarksToolbarVisibility",
@@ -547,9 +552,9 @@ customElements.setElementCreationCallback("translation-notification", () => {
   );
 });
 
-customElements.setElementCreationCallback("screenshots-div", () => {
+customElements.setElementCreationCallback("screenshots-buttons", () => {
   Services.scriptloader.loadSubScript(
-    "chrome://browser/content/screenshots/screenshots.js",
+    "chrome://browser/content/screenshots/screenshots-buttons.js",
     window
   );
 });
@@ -972,10 +977,11 @@ const gStoragePressureObserver = {
     messageFragment.appendChild(message);
 
     gNotificationBox.appendNotification(
-      messageFragment,
       NOTIFICATION_VALUE,
-      null,
-      gNotificationBox.PRIORITY_WARNING_HIGH,
+      {
+        label: messageFragment,
+        priority: gNotificationBox.PRIORITY_WARNING_HIGH,
+      },
       buttons
     );
 
@@ -1056,10 +1062,12 @@ var gPopupBlockerObserver = {
 
           const priority = notificationBox.PRIORITY_INFO_MEDIUM;
           notificationBox.appendNotification(
-            message,
             "popup-blocked",
-            "chrome://browser/skin/notification-icons/popup.svg",
-            priority,
+            {
+              label: message,
+              image: "chrome://browser/skin/notification-icons/popup.svg",
+              priority,
+            },
             buttons
           );
         }
@@ -1370,10 +1378,11 @@ var gKeywordURIFixup = {
           },
         ];
         let notification = notificationBox.appendNotification(
-          message,
           "keyword-uri-fixup",
-          null,
-          notificationBox.PRIORITY_INFO_HIGH,
+          {
+            label: message,
+            priority: notificationBox.PRIORITY_INFO_HIGH,
+          },
           buttons
         );
         notification.persistence = 1;
@@ -1598,9 +1607,7 @@ var gBrowserInit = {
     BookmarkingUI.updateEmptyToolbarMessage();
     setToolbarVisibility(
       BookmarkingUI.toolbar,
-      gBookmarksToolbar2h2020
-        ? gBookmarksToolbarVisibility
-        : gBookmarksToolbarVisibility == "always",
+      gBookmarksToolbarVisibility,
       false,
       false
     );
@@ -1737,9 +1744,6 @@ var gBrowserInit = {
     // the listener is registered.
     CaptivePortalWatcher.init();
     ZoomUI.init(window);
-
-    let mm = window.getGroupMessageManager("browsers");
-    mm.loadFrameScript("chrome://browser/content/tab-content.js", true, true);
 
     if (!gMultiProcessBrowser) {
       // There is a Content:Click message manually sent from content.
@@ -4825,6 +4829,18 @@ let gFileMenu = {
     }
   },
 
+  /**
+   * Updates the "Close tab" command to reflect the number of selected tabs,
+   * when applicable.
+   */
+  updateTabCloseCountState() {
+    document.l10n.setAttributes(
+      document.getElementById("menu_close"),
+      "menu-file-close-tab",
+      { tabCount: gBrowser.selectedTabs.length }
+    );
+  },
+
   onPopupShowing(event) {
     // We don't care about submenus:
     if (event.target.id != "menu_FilePopup") {
@@ -4832,6 +4848,7 @@ let gFileMenu = {
     }
     this.updateUserContextUIVisibility();
     this.updateImportCommandEnabledState();
+    this.updateTabCloseCountState();
     if (AppConstants.platform == "macosx") {
       gShareUtils.updateShareURLMenuItem(
         gBrowser.selectedBrowser,
@@ -5402,7 +5419,7 @@ var XULBrowserWindow = {
 
     BookmarkingUI.onLocationChange();
     // If we've actually changed document, update the toolbar visibility.
-    if (gBookmarksToolbar2h2020 && !isSameDocument) {
+    if (!isSameDocument) {
       let bookmarksToolbar = gNavToolbox.querySelector("#PersonalToolbar");
       setToolbarVisibility(
         bookmarksToolbar,
@@ -5414,7 +5431,7 @@ var XULBrowserWindow = {
 
     let closeOpenPanels = selector => {
       for (let panel of document.querySelectorAll(selector)) {
-        if (panel.state == "open") {
+        if (panel.state != "closed") {
           panel.hidePopup();
         }
       }
@@ -5460,6 +5477,8 @@ var XULBrowserWindow = {
     gTabletModePageCounter.inc();
 
     this._updateElementsForContentType();
+
+    this._updateMacUserActivity(window, aLocationURI, aWebProgress);
 
     // Unconditionally disable the Text Encoding button during load to
     // keep the UI calm when navigating from one modern page to another and
@@ -5552,6 +5571,36 @@ var XULBrowserWindow = {
         element.setAttribute("disabled", "true");
       }
     }
+  },
+
+  /**
+   * Updates macOS platform code with the current URI and page title.
+   * From there, we update the current NSUserActivity, enabling Handoff to other
+   * Apple devices.
+   * @param {Window} window
+   *   The window in which the navigation occurred.
+   * @param {nsIURI} uri
+   *   The URI pointing to the current page.
+   * @param {nsIWebProgress} webProgress
+   *   The nsIWebProgress instance that fired a onLocationChange notification.
+   */
+  _updateMacUserActivity(win, uri, webProgress) {
+    if (!webProgress.isTopLevel || AppConstants.platform != "macosx") {
+      return;
+    }
+
+    let url = uri.spec;
+    if (PrivateBrowsingUtils.isWindowPrivate(win)) {
+      // Passing an empty string to MacUserActivityUpdater will invalidate the
+      // current user activity.
+      url = "";
+    }
+    let baseWin = win.docShell.treeOwner.QueryInterface(Ci.nsIBaseWindow);
+    MacUserActivityUpdater.updateLocation(
+      url,
+      win.gBrowser.contentTitle,
+      baseWin
+    );
   },
 
   asyncUpdateUI() {
@@ -6471,7 +6520,7 @@ function onViewToolbarsPopupShowing(aEvent, aInsertPoint) {
       continue;
     }
 
-    if (toolbar.id == "PersonalToolbar" && gBookmarksToolbar2h2020) {
+    if (toolbar.id == "PersonalToolbar") {
       let menu = BookmarkingUI.buildBookmarksToolbarSubmenu(toolbar);
       popup.insertBefore(menu, firstMenuItem);
     } else {
@@ -6894,7 +6943,6 @@ const nodeToTooltipMap = {
   "appMenu-zoomReduce-button2": "zoomReduce-button.tooltip",
   "reader-mode-button": "reader-mode-button.tooltip",
   "reader-mode-button-icon": "reader-mode-button.tooltip",
-  "print-button": "printButton.tooltip",
 };
 const nodeToShortcutMap = {
   "bookmarks-menu-button": "manBookmarkKb",
@@ -6914,7 +6962,6 @@ const nodeToShortcutMap = {
   "appMenu-zoomReduce-button2": "key_fullZoomReduce",
   "reader-mode-button": "key_toggleReaderMode",
   "reader-mode-button-icon": "key_toggleReaderMode",
-  "print-button": "printKb",
 };
 
 const gDynamicTooltipCache = new Map();
@@ -6940,19 +6987,7 @@ function GetDynamicShortcutTooltipText(nodeId) {
 function UpdateDynamicShortcutTooltipText(aTooltip) {
   let nodeId =
     aTooltip.triggerNode.id || aTooltip.triggerNode.getAttribute("anonid");
-  if (
-    nodeId == "print-button" &&
-    !Services.prefs.getBoolPref("print.tab_modal.enabled") &&
-    AppConstants.platform !== "macosx"
-  ) {
-    // If the new print UI pref is turned off, we should display the old title that did not have the shortcut
-    aTooltip.setAttribute(
-      "label",
-      document.getElementById(nodeId).getAttribute("print-button-title")
-    );
-  } else {
-    aTooltip.setAttribute("label", GetDynamicShortcutTooltipText(nodeId));
-  }
+  aTooltip.setAttribute("label", GetDynamicShortcutTooltipText(nodeId));
 }
 
 /*
@@ -7912,12 +7947,12 @@ var WebAuthnPromptHelper = {
       checkbox: {
         label: gNavigatorBundle.getString("webauthn.anonymize"),
       },
+      hintText: "webauthn.registerDirectPromptHint",
     };
-
     this.show(
       tid,
       "register-direct",
-      "webauthn.registerDirectPrompt2",
+      "webauthn.registerDirectPrompt3",
       origin,
       mainAction,
       secondaryActions,
@@ -7950,11 +7985,15 @@ var WebAuthnPromptHelper = {
     let brandShortName = document
       .getElementById("bundle_brand")
       .getString("brandShortName");
-    let message = gNavigatorBundle.getFormattedString(
-      stringId,
-      ["<>", brandShortName],
-      1
-    );
+    let message = gNavigatorBundle.getFormattedString(stringId, [
+      "<>",
+      brandShortName,
+    ]);
+    if (options.hintText) {
+      options.hintText = gNavigatorBundle.getFormattedString(options.hintText, [
+        brandShortName,
+      ]);
+    }
 
     options.name = origin;
     options.hideClose = true;
@@ -8888,7 +8927,7 @@ var ToolbarIconColor = {
   init() {
     this._initialized = true;
 
-    Services.obs.addObserver(this, "look-and-feel-changed");
+    window.addEventListener("nativethemechange", this);
     window.addEventListener("activate", this);
     window.addEventListener("deactivate", this);
     window.addEventListener("toolbarvisibilitychange", this);
@@ -8905,24 +8944,18 @@ var ToolbarIconColor = {
   uninit() {
     this._initialized = false;
 
-    Services.obs.removeObserver(this, "look-and-feel-changed");
+    window.removeEventListener("nativethemechange", this);
     window.removeEventListener("activate", this);
     window.removeEventListener("deactivate", this);
     window.removeEventListener("toolbarvisibilitychange", this);
     window.removeEventListener("windowlwthemeupdate", this);
   },
 
-  observe(subject, topic, data) {
-    if (topic != "look-and-feel-changed") {
-      return;
-    }
-    this.inferFromText("nativethemechange");
-  },
-
   handleEvent(event) {
     switch (event.type) {
       case "activate":
       case "deactivate":
+      case "nativethemechange":
       case "windowlwthemeupdate":
         this.inferFromText(event.type);
         break;
@@ -9088,10 +9121,12 @@ const SafeBrowsingNotificationBox = {
     }
 
     let notification = notificationBox.appendNotification(
-      title,
       value,
-      "chrome://global/skin/icons/blocked.svg",
-      notificationBox.PRIORITY_CRITICAL_HIGH,
+      {
+        label: title,
+        image: "chrome://global/skin/icons/blocked.svg",
+        priority: notificationBox.PRIORITY_CRITICAL_HIGH,
+      },
       buttons
     );
     // Persist the notification until the user removes so it
@@ -9196,16 +9231,17 @@ class TabDialogBox {
       modalType === Ci.nsIPrompt.MODAL_TYPE_CONTENT
         ? this.getContentDialogManager()
         : this._tabDialogManager;
-    let hasDialogs =
+
+    let hasDialogs = () =>
       this._tabDialogManager.hasDialogs ||
       this._contentDialogManager?.hasDialogs;
 
-    if (!hasDialogs) {
+    if (!hasDialogs()) {
       this._onFirstDialogOpen();
     }
 
     let closingCallback = event => {
-      if (!hasDialogs) {
+      if (!hasDialogs()) {
         this._onLastDialogClose();
       }
 
@@ -9626,6 +9662,10 @@ var gDialogBox = {
   // of an error opening the dialog.
   _didOpenHTMLDialog: false,
 
+  get dialog() {
+    return this._dialog;
+  },
+
   get isOpen() {
     return !!this._dialog;
   },
@@ -9845,7 +9885,6 @@ var ConfirmationHint = {
    * @param  options (object, optional)
    *         An object with the following optional properties:
    *         - event (DOM event): The event that triggered the feedback.
-   *         - hideArrow (boolean): Optionally hide the arrow.
    *         - showDescription (boolean): show description text (confirmationHint.<messageId>.description)
    *
    */
@@ -9865,10 +9904,6 @@ var ConfirmationHint = {
     } else {
       this._description.hidden = true;
       this._panel.classList.remove("with-description");
-    }
-
-    if (options.hideArrow) {
-      this._panel.setAttribute("hidearrow", "true");
     }
 
     this._panel.setAttribute("data-message-id", messageId);
@@ -9909,7 +9944,6 @@ var ConfirmationHint = {
       this._timerID = null;
     }
     if (this.__panel) {
-      this._panel.removeAttribute("hidearrow");
       this._animationBox.removeAttribute("animate");
       this._panel.removeAttribute("data-message-id");
     }

@@ -31,7 +31,7 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   ExtensionParent: "resource://gre/modules/ExtensionParent.jsm",
   ExtensionTestUtils: "resource://testing-common/ExtensionXPCShellUtils.jsm",
   FileUtils: "resource://gre/modules/FileUtils.jsm",
-  MessageChannel: "resource://gre/modules/MessageChannel.jsm",
+  MessageChannel: "resource://testing-common/MessageChannel.jsm",
   NetUtil: "resource://gre/modules/NetUtil.jsm",
   PromiseTestUtils: "resource://testing-common/PromiseTestUtils.jsm",
   Schemas: "resource://gre/modules/Schemas.jsm",
@@ -40,6 +40,11 @@ XPCOMUtils.defineLazyModuleGetters(this, {
 PromiseTestUtils.allowMatchingRejectionsGlobally(
   /Message manager disconnected/
 );
+
+// https_first automatically upgrades http to https, but the tests are not
+// designed to expect that. And it is not easy to change that because
+// nsHttpServer does not support https (bug 1742061). So disable https_first.
+Services.prefs.setBoolPref("dom.security.https_first", false);
 
 // These values may be changed in later head files and tested in check_remote
 // below.
@@ -211,7 +216,7 @@ function handlingUserInputFrameScript() {
   /* globals content */
   // eslint-disable-next-line no-shadow
   const { MessageChannel } = ChromeUtils.import(
-    "resource://gre/modules/MessageChannel.jsm"
+    "resource://testing-common/MessageChannel.jsm"
   );
 
   let handle;

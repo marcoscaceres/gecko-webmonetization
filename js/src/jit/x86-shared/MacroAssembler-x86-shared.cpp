@@ -284,6 +284,36 @@ void MacroAssemblerX86Shared::minMaxFloat32(FloatRegister first,
   bind(&done);
 }
 
+#ifdef ENABLE_WASM_SIMD
+bool MacroAssembler::MustMaskShiftCountSimd128(wasm::SimdOp op, int32_t* mask) {
+  switch (op) {
+    case wasm::SimdOp::I8x16Shl:
+    case wasm::SimdOp::I8x16ShrU:
+    case wasm::SimdOp::I8x16ShrS:
+      *mask = 7;
+      break;
+    case wasm::SimdOp::I16x8Shl:
+    case wasm::SimdOp::I16x8ShrU:
+    case wasm::SimdOp::I16x8ShrS:
+      *mask = 15;
+      break;
+    case wasm::SimdOp::I32x4Shl:
+    case wasm::SimdOp::I32x4ShrU:
+    case wasm::SimdOp::I32x4ShrS:
+      *mask = 31;
+      break;
+    case wasm::SimdOp::I64x2Shl:
+    case wasm::SimdOp::I64x2ShrU:
+    case wasm::SimdOp::I64x2ShrS:
+      *mask = 63;
+      break;
+    default:
+      MOZ_CRASH("Unexpected shift operation");
+  }
+  return true;
+}
+#endif
+
 //{{{ check_macroassembler_style
 // ===============================================================
 // MacroAssembler high-level usage.
@@ -412,6 +442,7 @@ void MacroAssembler::PushRegsInMask(LiveRegisterSet set) {
     Push(*iter);
   }
   MOZ_ASSERT(diffG == 0);
+  (void)diffG;
 
   reserveStack(diffF);
   for (FloatRegisterBackwardIterator iter(fpuSet); iter.more(); ++iter) {
@@ -430,6 +461,7 @@ void MacroAssembler::PushRegsInMask(LiveRegisterSet set) {
     }
   }
   MOZ_ASSERT(numFpu == 0);
+  (void)numFpu;
 
   // x64 padding to keep the stack aligned on uintptr_t. Keep in sync with
   // GetPushSizeInBytes.
@@ -462,6 +494,7 @@ void MacroAssembler::storeRegsInMask(LiveRegisterSet set, Address dest,
     storePtr(*iter, dest);
   }
   MOZ_ASSERT(diffG == 0);
+  (void)diffG;
 
   for (FloatRegisterBackwardIterator iter(fpuSet); iter.more(); ++iter) {
     FloatRegister reg = *iter;
@@ -479,6 +512,7 @@ void MacroAssembler::storeRegsInMask(LiveRegisterSet set, Address dest,
     }
   }
   MOZ_ASSERT(numFpu == 0);
+  (void)numFpu;
 
   // x64 padding to keep the stack aligned on uintptr_t. Keep in sync with
   // GetPushSizeInBytes.
@@ -527,6 +561,7 @@ void MacroAssembler::PopRegsInMaskIgnore(LiveRegisterSet set,
   }
   freeStack(reservedF);
   MOZ_ASSERT(numFpu == 0);
+  (void)numFpu;
   // x64 padding to keep the stack aligned on uintptr_t. Keep in sync with
   // GetPushBytesInSize.
   diffF -= diffF % sizeof(uintptr_t);
@@ -700,19 +735,18 @@ uint32_t MacroAssembler::pushFakeReturnAddress(Register scratch) {
 CodeOffset MacroAssembler::wasmTrapInstruction() { return ud2(); }
 
 void MacroAssembler::wasmBoundsCheck32(Condition cond, Register index,
-                                       Register boundsCheckLimit,
-                                       Label* label) {
+                                       Register boundsCheckLimit, Label* ok) {
   cmp32(index, boundsCheckLimit);
-  j(cond, label);
+  j(cond, ok);
   if (JitOptions.spectreIndexMasking) {
     cmovCCl(cond, Operand(boundsCheckLimit), index);
   }
 }
 
 void MacroAssembler::wasmBoundsCheck32(Condition cond, Register index,
-                                       Address boundsCheckLimit, Label* label) {
+                                       Address boundsCheckLimit, Label* ok) {
   cmp32(index, Operand(boundsCheckLimit));
-  j(cond, label);
+  j(cond, ok);
   if (JitOptions.spectreIndexMasking) {
     cmovCCl(cond, Operand(boundsCheckLimit), index);
   }

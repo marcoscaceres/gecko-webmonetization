@@ -170,11 +170,9 @@ class WorkerPrivate final : public RelativeTimeline {
   }
 
   bool ExtensionAPIAllowed() {
-    // This method should never be actually called if the extension background
-    // service worker is disabled by pref.
-    MOZ_ASSERT(
-        StaticPrefs::extensions_backgroundServiceWorker_enabled_AtStartup());
-    return mExtensionAPIAllowed;
+    return (
+        StaticPrefs::extensions_backgroundServiceWorker_enabled_AtStartup() &&
+        mExtensionAPIAllowed);
   }
 
   void SetIsDebuggerRegistered(bool aDebuggerRegistered) {
@@ -741,6 +739,10 @@ class WorkerPrivate final : public RelativeTimeline {
     return *mLoadInfo.mPrincipalInfo;
   }
 
+  uint32_t GetPrincipalHashValue() const {
+    return mLoadInfo.mPrincipalHashValue;
+  }
+
   const mozilla::ipc::PrincipalInfo& GetEffectiveStoragePrincipalInfo() const;
 
   already_AddRefed<nsIChannel> ForgetWorkerChannel() {
@@ -752,6 +754,8 @@ class WorkerPrivate final : public RelativeTimeline {
     AssertIsOnMainThread();
     return mLoadInfo.mWindow;
   }
+
+  nsPIDOMWindowInner* GetAncestorWindow() const;
 
   nsIContentSecurityPolicy* GetCSP() const {
     AssertIsOnMainThread();
@@ -832,6 +836,10 @@ class WorkerPrivate final : public RelativeTimeline {
   // Determine if the SW testing per-window flag is set by devtools
   bool ServiceWorkersTestingInWindow() const {
     return mLoadInfo.mServiceWorkersTestingInWindow;
+  }
+
+  bool ShouldResistFingerprinting() const {
+    return mLoadInfo.mShouldResistFingerprinting;
   }
 
   bool IsWatchedByDevTools() const { return mLoadInfo.mWatchedByDevTools; }

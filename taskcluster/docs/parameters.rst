@@ -123,13 +123,13 @@ specified programmatically using one of a variety of methods (e.g., parsing try
 syntax or reading a project-specific configuration file).
 
 ``filters``
-    List of filter functions (from ``taskcluster/taskgraph/filter_tasks.py``) to
+    List of filter functions (from ``taskcluster/gecko_taskgraph/filter_tasks.py``) to
     apply. This is usually defined internally, as filters are typically
     global.
 
 ``target_tasks_method``
     The method to use to determine the target task set.  This is the suffix of
-    one of the functions in ``taskcluster/taskgraph/target_tasks.py``.
+    one of the functions in ``taskcluster/gecko_taskgraph/target_tasks.py``.
 
 ``release_history``
    History of recent releases by platform and locale, used when generating
@@ -173,7 +173,7 @@ Release Promotion
    Specify the next version for version bump tasks.
 
 ``release_type``
-   The type of release being promoted. One of "nightly", "beta", "esr78", "esr91", "release-rc", or "release".
+   The type of release being promoted. One of "nightly", "beta", "esr91", "release-rc", or "release".
 
 ``release_eta``
    The time and date when a release is scheduled to live. This value is passed to Balrog.

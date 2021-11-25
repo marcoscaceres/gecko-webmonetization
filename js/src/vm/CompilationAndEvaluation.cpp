@@ -19,8 +19,6 @@
 
 #include "frontend/BytecodeCompilation.h"  // frontend::CompileGlobalScript
 #include "frontend/CompilationStencil.h"  // for frontened::{CompilationStencil, BorrowingCompilationStencil, CompilationGCOutput}
-#include "frontend/FullParseHandler.h"    // frontend::FullParseHandler
-#include "frontend/ParseContext.h"        // frontend::UsedNameTracker
 #include "frontend/Parser.h"       // frontend::Parser, frontend::ParseGoal
 #include "js/CharacterEncoding.h"  // JS::UTF8Chars, JS::UTF8CharsToNewTwoByteCharsZ
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
@@ -116,8 +114,7 @@ static JSScript* CompileSourceBufferAndStartIncrementalEncoding(
     }
   }
 
-  MOZ_DIAGNOSTIC_ASSERT(options.useStencilXDR);
-  if (!script->scriptSource()->startIncrementalEncoding(cx, options,
+  if (!script->scriptSource()->startIncrementalEncoding(cx,
                                                         std::move(stencil))) {
     return nullptr;
   }
@@ -423,10 +420,9 @@ JS_PUBLIC_API void JS::ExposeScriptToDebugger(JSContext* cx,
 }
 
 JS_PUBLIC_API bool JS::UpdateDebugMetadata(
-    JSContext* cx, Handle<JSScript*> script,
-    const ReadOnlyCompileOptions& options, HandleValue privateValue,
-    HandleString elementAttributeName, HandleScript introScript,
-    HandleScript scriptOrModule) {
+    JSContext* cx, Handle<JSScript*> script, const InstantiateOptions& options,
+    HandleValue privateValue, HandleString elementAttributeName,
+    HandleScript introScript, HandleScript scriptOrModule) {
   RootedScriptSourceObject sso(cx, script->sourceObject());
 
   if (!ScriptSourceObject::initElementProperties(cx, sso,
@@ -451,7 +447,7 @@ JS_PUBLIC_API bool JS::UpdateDebugMetadata(
     // Set the private value to that of the script or module that this source is
     // part of, if any.
     if (scriptOrModule) {
-      privateValueStore = scriptOrModule->sourceObject()->canonicalPrivate();
+      privateValueStore = scriptOrModule->sourceObject()->getPrivate();
     }
   } else {
     privateValueStore = privateValue;
@@ -526,37 +522,6 @@ MOZ_NEVER_INLINE JS_PUBLIC_API bool JS_ExecuteScript(
     JSContext* cx, HandleObjectVector envChain, HandleScript scriptArg) {
   RootedValue rval(cx);
   return ExecuteScript(cx, envChain, scriptArg, &rval);
-}
-
-JS_PUBLIC_API bool JS::CloneAndExecuteScript(JSContext* cx,
-                                             HandleScript scriptArg,
-                                             JS::MutableHandleValue rval) {
-  CHECK_THREAD(cx);
-  RootedScript script(cx, scriptArg);
-  RootedObject globalLexical(cx, &cx->global()->lexicalEnvironment());
-  if (script->realm() != cx->realm()) {
-    script = CloneGlobalScript(cx, script);
-    if (!script) {
-      return false;
-    }
-  }
-  return ExecuteScript(cx, globalLexical, script, rval);
-}
-
-JS_PUBLIC_API bool JS::CloneAndExecuteScript(JSContext* cx,
-                                             JS::HandleObjectVector envChain,
-                                             HandleScript scriptArg,
-                                             JS::MutableHandleValue rval) {
-  CHECK_THREAD(cx);
-  MOZ_RELEASE_ASSERT(scriptArg->hasNonSyntacticScope());
-  RootedScript script(cx, scriptArg);
-  if (script->realm() != cx->realm()) {
-    script = CloneGlobalScript(cx, script);
-    if (!script) {
-      return false;
-    }
-  }
-  return ExecuteScript(cx, envChain, script, rval);
 }
 
 template <typename Unit>

@@ -127,7 +127,7 @@ const XPI_PERMISSION = "install";
 
 const XPI_SIGNATURE_CHECK_PERIOD = 24 * 60 * 60;
 
-const DB_SCHEMA = 33;
+const DB_SCHEMA = 34;
 
 XPCOMUtils.defineLazyPreferenceGetter(
   this,
@@ -2492,7 +2492,7 @@ var XPIProvider = {
       }
       this.maybeInstallBuiltinAddon(
         "default-theme@mozilla.org",
-        "1.2",
+        "1.3",
         "resource://default-theme/"
       );
 
@@ -2507,28 +2507,6 @@ var XPIProvider = {
           );
         } catch (e) {}
         this.addAddonsToCrashReporter();
-      }
-
-      // This is a one-time migration when incognito is turned on.  Any previously
-      // enabled extension will be migrated.
-      try {
-        if (
-          !Services.prefs.getBoolPref("extensions.incognito.migrated", false)
-        ) {
-          XPIDatabase.syncLoadDB(false);
-          let promises = [];
-          for (let addon of XPIDatabase.getAddons()) {
-            if (addon.type == "extension" && addon.active) {
-              promises.push(Extension.migratePrivateBrowsing(addon));
-            }
-          }
-          if (promises.length) {
-            awaitPromise(Promise.all(promises));
-          }
-          Services.prefs.setBoolPref("extensions.incognito.migrated", true);
-        }
-      } catch (e) {
-        logger.error("private browsing migration failed", e);
       }
 
       try {
@@ -2858,55 +2836,83 @@ var XPIProvider = {
    *        True if any new add-ons were installed
    */
   installDistributionAddons(aManifests, aAppChanged, aOldAppVersion) {
-    let distroDir;
+    let distroDirs = [];
     try {
-      distroDir = FileUtils.getDir(KEY_APP_DISTRIBUTION, [DIR_EXTENSIONS]);
+      distroDirs.push(FileUtils.getDir(KEY_APP_DISTRIBUTION, [DIR_EXTENSIONS]));
     } catch (e) {
       return false;
     }
 
+    let availableLocales = [];
+    for (let file of iterDirectory(distroDirs[0])) {
+      if (file.isDirectory() && file.leafName.startsWith("locale-")) {
+        availableLocales.push(file.leafName.replace("locale-", ""));
+      }
+    }
+
+    let locales = Services.locale.negotiateLanguages(
+      Services.locale.requestedLocales,
+      availableLocales,
+      undefined,
+      Services.locale.langNegStrategyMatching
+    );
+
+    // Also install addons from subdirectories that correspond to the requested
+    // locales. This allows for installing language packs and dictionaries.
+    for (let locale of locales) {
+      let langPackDir = distroDirs[0].clone();
+      langPackDir.append(`locale-${locale}`);
+      distroDirs.push(langPackDir);
+    }
+
     let changed = false;
-    for (let file of iterDirectory(distroDir)) {
-      if (!isXPI(file.leafName, true)) {
-        logger.warn(`Ignoring distribution: not an XPI: ${file.path}`);
-        continue;
-      }
-
-      let id = getExpectedID(file);
-      if (!id) {
-        logger.warn(
-          `Ignoring distribution: name is not a valid add-on ID: ${file.path}`
-        );
-        continue;
-      }
-
-      /* If this is not an upgrade and we've already handled this extension
-       * just continue */
-      if (
-        !aAppChanged &&
-        Services.prefs.prefHasUserValue(PREF_BRANCH_INSTALLED_ADDON + id)
-      ) {
-        continue;
-      }
-
-      try {
-        let loc = XPIStates.getLocation(KEY_APP_PROFILE);
-        let addon = awaitPromise(
-          XPIInstall.installDistributionAddon(id, file, loc, aOldAppVersion)
-        );
-
-        if (addon) {
-          // aManifests may contain a copy of a newly installed add-on's manifest
-          // and we'll have overwritten that so instead cache our install manifest
-          // which will later be put into the database in processFileChanges
-          if (!(loc.name in aManifests)) {
-            aManifests[loc.name] = {};
+    for (let distroDir of distroDirs) {
+      logger.warn(`Checking ${distroDir.path} for addons`);
+      for (let file of iterDirectory(distroDir)) {
+        if (!isXPI(file.leafName, true)) {
+          // Only warn for files, not directories
+          if (!file.isDirectory()) {
+            logger.warn(`Ignoring distribution: not an XPI: ${file.path}`);
           }
-          aManifests[loc.name][id] = addon;
-          changed = true;
+          continue;
         }
-      } catch (e) {
-        logger.error(`Failed to install distribution add-on ${file.path}`, e);
+
+        let id = getExpectedID(file);
+        if (!id) {
+          logger.warn(
+            `Ignoring distribution: name is not a valid add-on ID: ${file.path}`
+          );
+          continue;
+        }
+
+        /* If this is not an upgrade and we've already handled this extension
+         * just continue */
+        if (
+          !aAppChanged &&
+          Services.prefs.prefHasUserValue(PREF_BRANCH_INSTALLED_ADDON + id)
+        ) {
+          continue;
+        }
+
+        try {
+          let loc = XPIStates.getLocation(KEY_APP_PROFILE);
+          let addon = awaitPromise(
+            XPIInstall.installDistributionAddon(id, file, loc, aOldAppVersion)
+          );
+
+          if (addon) {
+            // aManifests may contain a copy of a newly installed add-on's manifest
+            // and we'll have overwritten that so instead cache our install manifest
+            // which will later be put into the database in processFileChanges
+            if (!(loc.name in aManifests)) {
+              aManifests[loc.name] = {};
+            }
+            aManifests[loc.name][id] = addon;
+            changed = true;
+          }
+        } catch (e) {
+          logger.error(`Failed to install distribution add-on ${file.path}`, e);
+        }
       }
     }
 

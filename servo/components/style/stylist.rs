@@ -12,7 +12,9 @@ use crate::font_metrics::FontMetricsProvider;
 #[cfg(feature = "gecko")]
 use crate::gecko_bindings::structs::{ServoStyleSetSizes, StyleRuleInclusion};
 use crate::invalidation::element::invalidation_map::InvalidationMap;
-use crate::invalidation::media_queries::{EffectiveMediaQueryResults, MediaListKey, ToMediaListKey};
+use crate::invalidation::media_queries::{
+    EffectiveMediaQueryResults, MediaListKey, ToMediaListKey,
+};
 use crate::invalidation::stylesheets::RuleChangeKind;
 use crate::media_queries::Device;
 use crate::properties::{self, CascadeMode, ComputedValues};
@@ -26,15 +28,18 @@ use crate::shared_lock::{Locked, SharedRwLockReadGuard, StylesheetGuards};
 use crate::stylesheet_set::{DataValidity, DocumentStylesheetSet, SheetRebuildKind};
 use crate::stylesheet_set::{DocumentStylesheetFlusher, SheetCollectionFlusher};
 use crate::stylesheets::keyframes_rule::KeyframesAnimation;
-use crate::stylesheets::layer_rule::{LayerName, LayerOrder};
+use crate::stylesheets::layer_rule::{LayerId, LayerName, LayerOrder};
 use crate::stylesheets::viewport_rule::{self, MaybeNew, ViewportRule};
-use crate::stylesheets::{StyleRule, StylesheetInDocument, StylesheetContents};
 #[cfg(feature = "gecko")]
 use crate::stylesheets::{CounterStyleRule, FontFaceRule, FontFeatureValuesRule, PageRule};
-use crate::stylesheets::{CssRule, Origin, OriginSet, PerOrigin, PerOriginIter, EffectiveRulesIterator};
+use crate::stylesheets::{
+    CssRule, EffectiveRulesIterator, Origin, OriginSet, PerOrigin, PerOriginIter,
+};
+use crate::stylesheets::{StyleRule, StylesheetContents, StylesheetInDocument};
 use crate::thread_state::{self, ThreadState};
 use crate::{Atom, LocalName, Namespace, WeakAtom};
 use fallible::FallibleVec;
+use fxhash::FxHashMap;
 use hashglobe::FailedAllocationError;
 use malloc_size_of::MallocSizeOf;
 #[cfg(feature = "gecko")]
@@ -49,11 +54,10 @@ use selectors::NthIndexCache;
 use servo_arc::{Arc, ArcBorrow};
 use smallbitvec::SmallBitVec;
 use smallvec::SmallVec;
+use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 use std::{mem, ops};
-use std::hash::{Hash, Hasher};
 use style_traits::viewport::ViewportConstraints;
-use fxhash::FxHashMap;
 
 /// The type of the stylesheets that the stylist contains.
 #[cfg(feature = "servo")]
@@ -94,7 +98,7 @@ struct CascadeDataCacheKey {
 unsafe impl Send for CascadeDataCacheKey {}
 unsafe impl Sync for CascadeDataCacheKey {}
 
-trait CascadeDataCacheEntry : Sized {
+trait CascadeDataCacheEntry: Sized {
     /// Returns a reference to the cascade data.
     fn cascade_data(&self) -> &CascadeData;
     /// Rebuilds the cascade data for the new stylesheet collection. The
@@ -122,7 +126,9 @@ where
     Entry: CascadeDataCacheEntry,
 {
     fn new() -> Self {
-        Self { entries: Default::default() }
+        Self {
+            entries: Default::default(),
+        }
     }
 
     fn len(&self) -> usize {
@@ -166,15 +172,9 @@ where
         match self.entries.entry(key) {
             HashMapEntry::Vacant(e) => {
                 debug!("> Picking the slow path (not in the cache)");
-                new_entry = Entry::rebuild(
-                    device,
-                    quirks_mode,
-                    collection,
-                    guard,
-                    old_entry,
-                )?;
+                new_entry = Entry::rebuild(device, quirks_mode, collection, guard, old_entry)?;
                 e.insert(new_entry.clone());
-            }
+            },
             HashMapEntry::Occupied(mut e) => {
                 // Avoid reusing our old entry (this can happen if we get
                 // invalidated due to CSSOM mutations and our old stylesheet
@@ -193,15 +193,9 @@ where
                 }
 
                 debug!("> Picking the slow path due to same entry as old");
-                new_entry = Entry::rebuild(
-                    device,
-                    quirks_mode,
-                    collection,
-                    guard,
-                    old_entry,
-                )?;
+                new_entry = Entry::rebuild(device, quirks_mode, collection, guard, old_entry)?;
                 e.insert(new_entry.clone());
-            }
+            },
         }
 
         Ok(Some(new_entry))
@@ -273,7 +267,7 @@ impl CascadeDataCacheEntry for UserAgentCascadeData {
         _old: &Self,
     ) -> Result<Arc<Self>, FailedAllocationError>
     where
-        S: StylesheetInDocument + PartialEq + 'static
+        S: StylesheetInDocument + PartialEq + 'static,
     {
         // TODO: Maybe we should support incremental rebuilds, though they seem
         // uncommon and rebuild() doesn't deal with
@@ -293,6 +287,8 @@ impl CascadeDataCacheEntry for UserAgentCascadeData {
                 Some(&mut new_data.precomputed_pseudo_element_decls),
             )?;
         }
+
+        new_data.cascade_data.compute_layer_order();
 
         Ok(Arc::new(new_data))
     }
@@ -602,13 +598,8 @@ impl Stylist {
     where
         S: StylesheetInDocument + PartialEq + 'static,
     {
-        self.author_data_cache.lookup(
-            &self.device,
-            self.quirks_mode,
-            collection,
-            guard,
-            old_data,
-        )
+        self.author_data_cache
+            .lookup(&self.device, self.quirks_mode, collection, guard, old_data)
     }
 
     /// Iterate over the extra data in origin order.
@@ -1892,12 +1883,21 @@ impl PartElementAndPseudoRules {
     }
 }
 
-#[derive(Debug, Clone, MallocSizeOf)]
-struct LayerOrderState {
-    /// The order for this layer.
+#[derive(Clone, Debug, MallocSizeOf)]
+struct CascadeLayer {
+    id: LayerId,
     order: LayerOrder,
-    /// The order for the next registered child layer.
-    next_child: LayerOrder,
+    children: Vec<LayerId>,
+}
+
+impl CascadeLayer {
+    const fn root() -> Self {
+        Self {
+            id: LayerId::root(),
+            order: LayerOrder::root(),
+            children: vec![],
+        }
+    }
 }
 
 /// Data resulting from performing the CSS cascade that is specific to a given
@@ -1966,10 +1966,10 @@ pub struct CascadeData {
     animations: PrecomputedHashMap<Atom, KeyframesAnimation>,
 
     /// A map from cascade layer name to layer order.
-    layer_order: FxHashMap<LayerName, LayerOrderState>,
+    layer_id: FxHashMap<LayerName, LayerId>,
 
-    /// The next layer order for the top level cascade data.
-    next_layer_order: LayerOrder,
+    /// The list of cascade layers, indexed by their layer id.
+    layers: SmallVec<[CascadeLayer; 1]>,
 
     /// Effective media query results cached from the last rebuild.
     effective_media_query_results: EffectiveMediaQueryResults,
@@ -2011,8 +2011,8 @@ impl CascadeData {
             // somewhat gnarly.
             selectors_for_cache_revalidation: SelectorMap::new_without_attribute_bucketing(),
             animations: Default::default(),
-            layer_order: Default::default(),
-            next_layer_order: LayerOrder::first(),
+            layer_id: Default::default(),
+            layers: smallvec::smallvec![CascadeLayer::root()],
             extra_data: ExtraStyleData::default(),
             effective_media_query_results: EffectiveMediaQueryResults::new(),
             rules_source_order: 0,
@@ -2058,6 +2058,8 @@ impl CascadeData {
             );
             result.is_ok()
         });
+
+        self.compute_layer_order();
 
         result
     }
@@ -2120,6 +2122,50 @@ impl CascadeData {
         self.part_rules.is_some()
     }
 
+    #[inline]
+    fn layer_order_for(&self, id: LayerId) -> LayerOrder {
+        self.layers[id.0 as usize].order
+    }
+
+    fn compute_layer_order(&mut self) {
+        debug_assert_ne!(
+            self.layers.len(),
+            0,
+            "There should be at least the root layer!"
+        );
+        if self.layers.len() == 1 {
+            return; // Nothing to do
+        }
+        let (first, remaining) = self.layers.split_at_mut(1);
+        let root = &mut first[0];
+        let mut order = LayerOrder::first();
+        compute_layer_order_for_subtree(root, remaining, &mut order);
+
+        // NOTE(emilio): This is a bit trickier than it should to avoid having
+        // to clone() around layer indices.
+        fn compute_layer_order_for_subtree(
+            parent: &mut CascadeLayer,
+            remaining_layers: &mut [CascadeLayer],
+            order: &mut LayerOrder,
+        ) {
+            for child in parent.children.iter() {
+                debug_assert!(
+                    parent.id < *child,
+                    "Children are always registered after parents"
+                );
+                let child_index = (child.0 - parent.id.0 - 1) as usize;
+                let (first, remaining) = remaining_layers.split_at_mut(child_index + 1);
+                let child = &mut first[child_index];
+                compute_layer_order_for_subtree(child, remaining, order);
+            }
+
+            if parent.id != LayerId::root() {
+                parent.order = *order;
+                order.inc();
+            }
+        }
+    }
+
     /// Collects all the applicable media query results into `results`.
     ///
     /// This duplicates part of the logic in `add_stylesheet`, which is
@@ -2176,7 +2222,7 @@ impl CascadeData {
         guard: &SharedRwLockReadGuard,
         rebuild_kind: SheetRebuildKind,
         mut current_layer: &mut LayerName,
-        current_layer_order: LayerOrder,
+        current_layer_id: LayerId,
         mut precomputed_pseudo_element_decls: Option<&mut PrecomputedPseudoElementDeclarations>,
     ) -> Result<(), FailedAllocationError>
     where
@@ -2199,6 +2245,7 @@ impl CascadeData {
                             if pseudo.is_precomputed() {
                                 debug_assert!(selector.is_universal());
                                 debug_assert_eq!(stylesheet.contents().origin, Origin::UserAgent);
+                                debug_assert_eq!(current_layer_id, LayerId::root());
 
                                 precomputed_pseudo_element_decls
                                     .as_mut()
@@ -2209,7 +2256,7 @@ impl CascadeData {
                                         self.rules_source_order,
                                         CascadeLevel::UANormal,
                                         selector.specificity(),
-                                        current_layer_order.raw(),
+                                        LayerOrder::root(),
                                     ));
                                 continue;
                             }
@@ -2225,7 +2272,7 @@ impl CascadeData {
                             hashes,
                             locked.clone(),
                             self.rules_source_order,
-                            current_layer_order,
+                            current_layer_id,
                         );
 
                         if rebuild_kind.should_rebuild_invalidation() {
@@ -2290,24 +2337,48 @@ impl CascadeData {
                     self.rules_source_order += 1;
                 },
                 CssRule::Keyframes(ref keyframes_rule) => {
+                    use hashglobe::hash_map::Entry;
+
                     let keyframes_rule = keyframes_rule.read_with(guard);
                     debug!("Found valid keyframes rule: {:?}", *keyframes_rule);
-
-                    // Don't let a prefixed keyframes animation override a non-prefixed one.
-                    let needs_insertion = keyframes_rule.vendor_prefix.is_none() ||
-                        self.animations
-                            .get(keyframes_rule.name.as_atom())
-                            .map_or(true, |rule| rule.vendor_prefix.is_some());
-                    if needs_insertion {
-                        let animation = KeyframesAnimation::from_keyframes(
-                            &keyframes_rule.keyframes,
-                            keyframes_rule.vendor_prefix.clone(),
-                            guard,
-                        );
-                        debug!("Found valid keyframe animation: {:?}", animation);
-                        self.animations
-                            .try_insert(keyframes_rule.name.as_atom().clone(), animation)?;
+                    match self
+                        .animations
+                        .try_entry(keyframes_rule.name.as_atom().clone())?
+                    {
+                        Entry::Vacant(e) => {
+                            e.insert(KeyframesAnimation::from_keyframes(
+                                &keyframes_rule.keyframes,
+                                keyframes_rule.vendor_prefix.clone(),
+                                current_layer_id,
+                                guard,
+                            ));
+                        },
+                        Entry::Occupied(mut e) => {
+                            // Don't let a prefixed keyframes animation override
+                            // a non-prefixed one.
+                            //
+                            // TODO(emilio): This will need to be harder for
+                            // layers.
+                            let needs_insert = keyframes_rule.vendor_prefix.is_none() ||
+                                e.get().vendor_prefix.is_some();
+                            if needs_insert {
+                                e.insert(KeyframesAnimation::from_keyframes(
+                                    &keyframes_rule.keyframes,
+                                    keyframes_rule.vendor_prefix.clone(),
+                                    current_layer_id,
+                                    guard,
+                                ));
+                            }
+                        },
                     }
+                },
+                #[cfg(feature = "gecko")]
+                CssRule::ScrollTimeline(..) => {
+                    // TODO: Bug 1676791: set the timeline into animation.
+                    // https://phabricator.services.mozilla.com/D126452
+                    //
+                    // Note: Bug 1733260: we may drop @scroll-timeline rule once this spec issue
+                    // https://github.com/w3c/csswg-drafts/issues/6674 gets landed.
                 },
                 #[cfg(feature = "gecko")]
                 CssRule::FontFace(ref rule) => {
@@ -2350,44 +2421,46 @@ impl CascadeData {
             }
 
             let mut effective = false;
-            let children = EffectiveRulesIterator::children(
-                rule,
-                device,
-                quirks_mode,
-                guard,
-                &mut effective,
-            );
+            let children =
+                EffectiveRulesIterator::children(rule, device, quirks_mode, guard, &mut effective);
 
             if !effective {
                 continue;
             }
 
-            fn maybe_register_layer(data: &mut CascadeData, layer: &LayerName) -> LayerOrder {
+            fn maybe_register_layer(data: &mut CascadeData, layer: &LayerName) -> LayerId {
                 // TODO: Measure what's more common / expensive, if
                 // layer.clone() or the double hash lookup in the insert
                 // case.
-                if let Some(ref mut state) = data.layer_order.get(layer) {
-                    return state.order;
+                if let Some(id) = data.layer_id.get(layer) {
+                    return *id;
                 }
-                // If the layer is not top-level, find the relevant parent.
-                let order = if layer.layer_names().len() > 1 {
+                let id = LayerId(data.layers.len() as u32);
+
+                let parent_layer_id = if layer.layer_names().len() > 1 {
                     let mut parent = layer.clone();
                     parent.0.pop();
 
-                    let mut parent_state = data.layer_order.get_mut(&parent).expect("Parent layers should be registered before child layers");
-                    let order = parent_state.next_child;
-                    parent_state.next_child = order.for_next_sibling();
-                    order
+                    *data
+                        .layer_id
+                        .get_mut(&parent)
+                        .expect("Parent layers should be registered before child layers")
                 } else {
-                    let order = data.next_layer_order;
-                    data.next_layer_order = order.for_next_sibling();
-                    order
+                    LayerId::root()
                 };
-                data.layer_order.insert(layer.clone(), LayerOrderState {
-                    order,
-                    next_child: order.for_child(),
+
+                data.layers[parent_layer_id.0 as usize].children.push(id);
+                data.layers.push(CascadeLayer {
+                    id,
+                    // NOTE(emilio): Order is evaluated after rebuild in
+                    // compute_layer_order.
+                    order: LayerOrder::first(),
+                    children: vec![],
                 });
-                order
+
+                data.layer_id.insert(layer.clone(), id);
+
+                id
             }
 
             fn maybe_register_layers(
@@ -2395,7 +2468,7 @@ impl CascadeData {
                 name: Option<&LayerName>,
                 current_layer: &mut LayerName,
                 pushed_layers: &mut usize,
-            ) -> LayerOrder {
+            ) -> LayerId {
                 let anon_name;
                 let name = match name {
                     Some(name) => name,
@@ -2405,18 +2478,18 @@ impl CascadeData {
                     },
                 };
 
-                let mut order = LayerOrder::top_level();
+                let mut id = LayerId::root();
                 for name in name.layer_names() {
                     current_layer.0.push(name.clone());
-                    order = maybe_register_layer(data, &current_layer);
+                    id = maybe_register_layer(data, &current_layer);
                     *pushed_layers += 1;
                 }
-                debug_assert_ne!(order, LayerOrder::top_level());
-                order
+                debug_assert_ne!(id, LayerId::root());
+                id
             }
 
             let mut layer_names_to_pop = 0;
-            let mut children_layer_order = current_layer_order;
+            let mut children_layer_id = current_layer_id;
             match *rule {
                 CssRule::Import(ref lock) => {
                     let import_rule = lock.read_with(guard);
@@ -2425,14 +2498,13 @@ impl CascadeData {
                             .saw_effective(import_rule);
                     }
                     if let Some(ref layer) = import_rule.layer {
-                        children_layer_order = maybe_register_layers(
+                        children_layer_id = maybe_register_layers(
                             self,
                             layer.name.as_ref(),
                             &mut current_layer,
                             &mut layer_names_to_pop,
                         );
                     }
-
                 },
                 CssRule::Media(ref lock) => {
                     if rebuild_kind.should_rebuild_invalidation() {
@@ -2446,13 +2518,13 @@ impl CascadeData {
                     let layer_rule = lock.read_with(guard);
                     match layer_rule.kind {
                         LayerRuleKind::Block { ref name, .. } => {
-                            children_layer_order = maybe_register_layers(
+                            children_layer_id = maybe_register_layers(
                                 self,
                                 name.as_ref(),
                                 &mut current_layer,
                                 &mut layer_names_to_pop,
                             );
-                        }
+                        },
                         LayerRuleKind::Statement { ref names } => {
                             for name in &**names {
                                 let mut pushed = 0;
@@ -2468,7 +2540,7 @@ impl CascadeData {
                                     current_layer.0.pop();
                                 }
                             }
-                        }
+                        },
                     }
                 },
                 // We don't care about any other rule.
@@ -2484,7 +2556,7 @@ impl CascadeData {
                     guard,
                     rebuild_kind,
                     current_layer,
-                    children_layer_order,
+                    children_layer_id,
                     precomputed_pseudo_element_decls.as_deref_mut(),
                 )?;
             }
@@ -2529,7 +2601,7 @@ impl CascadeData {
             guard,
             rebuild_kind,
             &mut current_layer,
-            LayerOrder::top_level(),
+            LayerId::root(),
             precomputed_pseudo_element_decls.as_deref_mut(),
         )?;
 
@@ -2552,7 +2624,9 @@ impl CascadeData {
 
         let effective_now = stylesheet.is_effective_for_device(device, guard);
 
-        let effective_then = self.effective_media_query_results.was_effective(stylesheet.contents());
+        let effective_then = self
+            .effective_media_query_results
+            .was_effective(stylesheet.contents());
 
         if effective_now != effective_then {
             debug!(
@@ -2578,6 +2652,7 @@ impl CascadeData {
                 CssRule::CounterStyle(..) |
                 CssRule::Supports(..) |
                 CssRule::Keyframes(..) |
+                CssRule::ScrollTimeline(..) |
                 CssRule::Page(..) |
                 CssRule::Viewport(..) |
                 CssRule::Document(..) |
@@ -2647,8 +2722,9 @@ impl CascadeData {
             host_rules.clear();
         }
         self.animations.clear();
-        self.layer_order.clear();
-        self.next_layer_order = LayerOrder::first();
+        self.layer_id.clear();
+        self.layers.clear();
+        self.layers.push(CascadeLayer::root());
         self.extra_data.clear();
         self.rules_source_order = 0;
         self.num_selectors = 0;
@@ -2680,7 +2756,7 @@ impl CascadeDataCacheEntry for CascadeData {
         old: &Self,
     ) -> Result<Arc<Self>, FailedAllocationError>
     where
-        S: StylesheetInDocument + PartialEq + 'static
+        S: StylesheetInDocument + PartialEq + 'static,
     {
         debug_assert!(collection.dirty(), "We surely need to do something?");
         // If we're doing a full rebuild anyways, don't bother cloning the data.
@@ -2737,8 +2813,8 @@ pub struct Rule {
     /// we could repurpose that storage here if we needed to.
     pub source_order: u32,
 
-    /// The current layer order of this style rule.
-    pub layer_order: LayerOrder,
+    /// The current layer id of this style rule.
+    pub layer_id: LayerId,
 
     /// The actual style rule.
     #[cfg_attr(
@@ -2766,9 +2842,16 @@ impl Rule {
     pub fn to_applicable_declaration_block(
         &self,
         level: CascadeLevel,
+        cascade_data: &CascadeData,
     ) -> ApplicableDeclarationBlock {
         let source = StyleSource::from_rule(self.style_rule.clone());
-        ApplicableDeclarationBlock::new(source, self.source_order, level, self.specificity(), self.layer_order.raw())
+        ApplicableDeclarationBlock::new(
+            source,
+            self.source_order,
+            level,
+            self.specificity(),
+            cascade_data.layer_order_for(self.layer_id),
+        )
     }
 
     /// Creates a new Rule.
@@ -2777,14 +2860,14 @@ impl Rule {
         hashes: AncestorHashes,
         style_rule: Arc<Locked<StyleRule>>,
         source_order: u32,
-        layer_order: LayerOrder,
+        layer_id: LayerId,
     ) -> Self {
         Rule {
             selector,
             hashes,
             style_rule,
             source_order,
-            layer_order,
+            layer_id,
         }
     }
 }

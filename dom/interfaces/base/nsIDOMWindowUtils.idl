@@ -1057,6 +1057,16 @@ interface nsIDOMWindowUtils : nsISupports {
                        in float aWidth, in float aHeight);
 
   /**
+   * Transform a rectangle given in coordinates relative to the top level
+   * parent process widget to the local widget. This window should be in a
+   * child process.
+   */
+  DOMRect convertFromParentProcessWidgetToLocal(in float aX,
+                                                in float aY,
+                                                in float aWidth,
+                                                in float aHeight);
+
+  /**
    * Sets the maximum height of the dynamic toolbar in Screen pixel units.
    */
   [can_run_script]
@@ -1127,6 +1137,11 @@ interface nsIDOMWindowUtils : nsISupports {
   const unsigned long INPUT_CONTEXT_ORIGIN_MAIN = 0;
   const unsigned long INPUT_CONTEXT_ORIGIN_CONTENT = 1;
   readonly attribute unsigned long inputContextOrigin;
+
+  /**
+   * Get a root node which is observed by IMEContentObserver.
+   */
+  readonly attribute Node nodeObservedByIMEContentObserver;
 
   /**
    * Get the number of screen pixels per CSS pixel.
@@ -1503,11 +1518,6 @@ interface nsIDOMWindowUtils : nsISupports {
    * error if there is no widget associated with this window.
    */
   readonly attribute boolean layerManagerRemote;
-
-  /**
-   * True if advanced layers is enabled on this window, false otherwise.
-   */
-  readonly attribute boolean usingAdvancedLayers;
 
   /**
    * True if webrender was requested by the user (via pref or env-var), false
@@ -1915,18 +1925,6 @@ interface nsIDOMWindowUtils : nsISupports {
                        [optional] in AString aPseudoElement);
 
   /*
-   * Returns the value of the transform on the compositor, in layer pixels.
-   * Unlike the above getOMTAStyle, the transform value returned by this
-   * includes both of animating and APZ values.
-   * Note: This function doesn't work on WebRender at all.  Also this function
-   * does work only for transform layer and opacity layer with animations.
-   * NOTE: Same as above getOMTAStyle, do not use this function for elements
-   * that there was another animation running on the compositor before.
-   */
-  AString getOMTCTransform(in Element aElement,
-                           [optional] in AString aPseudoElement);
-
-  /*
    * Returns true if the given animation is being tracked by the pending
    * animation tracker for the current document.
    */
@@ -2230,9 +2228,6 @@ interface nsIDOMWindowUtils : nsISupports {
   void syncFlushCompositor();
 
   unsigned long long getLayersId();
-
-  // Returns true if we are using overlay scrollbars.
-  readonly attribute bool usesOverlayScrollbars;
 
   // Returns true if we are effectively throttling frame requests.
   readonly attribute bool effectivelyThrottlesFrameRequests;

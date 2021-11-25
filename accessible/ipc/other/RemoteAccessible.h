@@ -33,6 +33,14 @@ class RemoteAccessible : public RemoteAccessibleBase<RemoteAccessible> {
 
 #include "mozilla/a11y/RemoteAccessibleShared.h"
 
+  virtual uint32_t CharacterCount() const override;
+
+  virtual already_AddRefed<AccAttributes> TextAttributes(
+      bool aIncludeDefAttrs, int32_t aOffset, int32_t* aStartOffset,
+      int32_t* aEndOffset) override;
+
+  virtual already_AddRefed<AccAttributes> DefaultTextAttributes() override;
+
  protected:
   explicit RemoteAccessible(DocAccessibleParent* aThisAsDoc)
       : RemoteAccessibleBase(aThisAsDoc) {

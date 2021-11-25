@@ -24,7 +24,6 @@ import org.mozilla.geckoview.test.rule.GeckoSessionTestRule
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.AssertCalled
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.WithDisplay
 
-
 @RunWith(AndroidJUnit4::class)
 @MediumTest
 class AutofillDelegateTest : BaseSessionTest() {
@@ -304,7 +303,7 @@ class AutofillDelegateTest : BaseSessionTest() {
         // Now wait for the nodes to reappear.
         mainSession.waitForPageStop()
         mainSession.goBack()
-        sessionRule.waitUntilCalled(object : Autofill.Delegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate, GeckoSession.ProgressDelegate {
             @AssertCalled(count = 4)
             override fun onAutofill(session: GeckoSession,
                                     notification: Int,
@@ -315,6 +314,10 @@ class AutofillDelegateTest : BaseSessionTest() {
                                Autofill.Notify.SESSION_STARTED,
                                Autofill.Notify.NODE_ADDED)))
                 assertThat("ID should be valid", node, notNullValue())
+            }
+
+            @AssertCalled(count = 1)
+            override fun onPageStop(session: GeckoSession, success: Boolean) {
             }
         })
         assertThat("Should have auto-fill fields again",

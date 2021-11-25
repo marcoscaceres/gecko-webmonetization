@@ -29,6 +29,11 @@
 #include "GeckoProfiler.h"
 #include "nsThreadUtils.h"
 
+#ifdef MOZ_BUNDLED_FONTS
+#  include "mozilla/Telemetry.h"
+#  include "nsDirectoryServiceDefs.h"
+#endif
+
 #include <dlfcn.h>
 #include <CoreVideo/CoreVideo.h>
 
@@ -228,12 +233,6 @@ BackendPrefsData gfxPlatformMac::GetBackendPrefs() const {
   data.mContentDefault = BackendType::SKIA;
 
   return data;
-}
-
-bool gfxPlatformMac::UsesTiling() const {
-  // The non-tiling ContentClient requires CrossProcessSemaphore which
-  // isn't implemented for OSX.
-  return true;
 }
 
 bool gfxPlatformMac::CreatePlatformFontList() {
@@ -770,6 +769,11 @@ void gfxPlatformMac::GetCommonFallbackFonts(uint32_t aCh, Script aRunScript,
     case Script::DIVES_AKURU:
     case Script::KHITAN_SMALL_SCRIPT:
     case Script::YEZIDI:
+    case Script::CYPRO_MINOAN:
+    case Script::OLD_UYGHUR:
+    case Script::TANGSA:
+    case Script::TOTO:
+    case Script::VITHKUQI:
       break;
   }
 

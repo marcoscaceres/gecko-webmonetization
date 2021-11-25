@@ -8,7 +8,6 @@ import math
 import os
 import platform
 import shutil
-import site
 import sys
 
 if sys.version_info[0] < 3:
@@ -141,35 +140,6 @@ CATEGORIES = {
     },
 }
 
-
-def search_path(mozilla_dir, packages_txt):
-    with open(os.path.join(mozilla_dir, packages_txt)) as f:
-        packages = [
-            line.strip().split(":", maxsplit=1)
-            for line in f
-            if not line.lstrip().startswith("#")
-        ]
-
-    def handle_package(action, package):
-        if action == "packages.txt":
-            for p in search_path(mozilla_dir, package):
-                yield os.path.join(mozilla_dir, p)
-
-        if action == "pth":
-            yield os.path.join(mozilla_dir, package)
-
-    for current_action, current_package in packages:
-        for path in handle_package(current_action, current_package):
-            yield path
-
-
-def mach_sys_path(mozilla_dir):
-    return [
-        os.path.join(mozilla_dir, path)
-        for path in search_path(mozilla_dir, "build/mach_virtualenv_packages.txt")
-    ]
-
-
 INSTALL_PYTHON_GUIDANCE_LINUX = """
 See https://firefox-source-docs.mozilla.org/setup/linux_build.html#installingpython
 for guidance on how to install Python on your system.
@@ -196,6 +166,40 @@ install a recent enough Python 3.
 """.strip()
 
 
+def _activate_python_environment(topsrcdir, state_dir):
+    # We need the "mach" module to access the logic to activate the top-level
+    # Mach site. Since that depends on "packaging" (and, transitively,
+    # "pyparsing"), we add those to the path too.
+    sys.path[0:0] = [
+        os.path.join(topsrcdir, module)
+        for module in (
+            os.path.join("python", "mach"),
+            os.path.join("third_party", "python", "packaging"),
+            os.path.join("third_party", "python", "pyparsing"),
+        )
+    ]
+
+    from mach.site import (
+        MachSiteManager,
+        VirtualenvOutOfDateException,
+        MozSiteMetadataOutOfDateError,
+    )
+
+    try:
+        mach_environment = MachSiteManager.from_environment(
+            topsrcdir,
+            # normpath state_dir to normalize msys-style slashes.
+            os.path.normpath(state_dir),
+        )
+        mach_environment.activate()
+    except (VirtualenvOutOfDateException, MozSiteMetadataOutOfDateError):
+        print(
+            'The "mach" virtualenv is not up-to-date, please run '
+            '"./mach create-mach-environment"'
+        )
+        sys.exit(1)
+
+
 def initialize(topsrcdir):
     # Ensure we are running Python 3.6+. We run this check as soon as
     # possible to avoid a cryptic import/usage error.
@@ -219,15 +223,9 @@ def initialize(topsrcdir):
     if os.path.exists(deleted_dir):
         shutil.rmtree(deleted_dir, ignore_errors=True)
 
-    if sys.prefix == sys.base_prefix:
-        # We are not in a virtualenv. Remove global site packages
-        # from sys.path.
-        site_paths = set(site.getsitepackages() + [site.getusersitepackages()])
-        sys.path = [path for path in sys.path if path not in site_paths]
-
     state_dir = _create_state_dir()
+    _activate_python_environment(topsrcdir, state_dir)
 
-    sys.path[0:0] = mach_sys_path(topsrcdir)
     import mach.base
     import mach.main
     from mach.util import setenv
@@ -298,15 +296,14 @@ def initialize(topsrcdir):
 
                 # all environments should have an instance of build object.
                 build = MozbuildObject.from_environment()
-                if build is not None and hasattr(build, "mozconfig"):
-                    ac_options = build.mozconfig["configure_args"]
-                    if ac_options and "--disable-tests" in ac_options:
-                        print(
-                            "Tests have been disabled by mozconfig with the flag "
-                            + '"ac_add_options --disable-tests".\n'
-                            + "Remove the flag, and re-compile to enable tests."
-                        )
-                        sys.exit(1)
+                if build is not None and not getattr(
+                    build, "substs", {"ENABLE_TESTS": True}
+                ).get("ENABLE_TESTS"):
+                    print(
+                        "Tests have been disabled with --disable-tests.\n"
+                        + "Remove the flag, and re-compile to enable tests."
+                    )
+                    sys.exit(1)
             except BuildEnvironmentNotFoundException:
                 # likely automation environment, so do nothing.
                 pass

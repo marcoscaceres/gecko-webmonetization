@@ -25,6 +25,7 @@ native TimeStamp(mozilla::TimeStamp);
 
 interface nsIAsyncInputStream;
 interface nsIAsyncOutputStream;
+interface nsIEarlyHintObserver;
 interface nsIPrincipal;
 interface nsIProxyInfo;
 interface nsISecurityConsoleMessage;
@@ -256,6 +257,13 @@ interface nsIHttpChannelInternal : nsISupports
     [must_use] attribute boolean beConservative;
 
     /**
+     * If true, do not resolve any proxy for this request. Intended only for use with
+     * critical infra like the updater.
+     * default is false.
+     */
+    [must_use] attribute boolean bypassProxy;
+
+    /**
      * True if channel is used by the internal trusted recursive resolver
      * This flag places data for the request in a cache segment specific to TRR
      */
@@ -448,4 +456,9 @@ interface nsIHttpChannelInternal : nsISupports
      * This attribute indicates if the HTTPS RR is used for this channel.
      */
     [must_use] readonly attribute boolean hasHTTPSRR;
+
+    /**
+     * Set Early Hint Observer.
+     */
+    [must_use] void setEarlyHintObserver(in nsIEarlyHintObserver aObserver);
 };

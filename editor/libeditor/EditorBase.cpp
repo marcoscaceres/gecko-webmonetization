@@ -10,22 +10,22 @@
 #include <stdio.h>   // for nullptr, stdout
 #include <string.h>  // for strcmp
 
-#include "ChangeAttributeTransaction.h"       // for ChangeAttributeTransaction
-#include "CompositionTransaction.h"           // for CompositionTransaction
-#include "CreateElementTransaction.h"         // for CreateElementTransaction
-#include "DeleteNodeTransaction.h"            // for DeleteNodeTransaction
-#include "DeleteRangeTransaction.h"           // for DeleteRangeTransaction
-#include "DeleteTextTransaction.h"            // for DeleteTextTransaction
-#include "EditAggregateTransaction.h"         // for EditAggregateTransaction
-#include "EditTransactionBase.h"              // for EditTransactionBase
-#include "EditorEventListener.h"              // for EditorEventListener
-#include "gfxFontUtils.h"                     // for gfxFontUtils
-#include "HTMLEditUtils.h"                    // for HTMLEditUtils
-#include "InsertNodeTransaction.h"            // for InsertNodeTransaction
-#include "InsertTextTransaction.h"            // for InsertTextTransaction
-#include "JoinNodeTransaction.h"              // for JoinNodeTransaction
-#include "PlaceholderTransaction.h"           // for PlaceholderTransaction
-#include "SplitNodeTransaction.h"             // for SplitNodeTransaction
+#include "ChangeAttributeTransaction.h"  // for ChangeAttributeTransaction
+#include "CompositionTransaction.h"      // for CompositionTransaction
+#include "DeleteNodeTransaction.h"       // for DeleteNodeTransaction
+#include "DeleteRangeTransaction.h"      // for DeleteRangeTransaction
+#include "DeleteTextTransaction.h"       // for DeleteTextTransaction
+#include "EditAggregateTransaction.h"    // for EditAggregateTransaction
+#include "EditTransactionBase.h"         // for EditTransactionBase
+#include "EditorEventListener.h"         // for EditorEventListener
+#include "gfxFontUtils.h"                // for gfxFontUtils
+#include "HTMLEditUtils.h"               // for HTMLEditUtils
+#include "InsertNodeTransaction.h"       // for InsertNodeTransaction
+#include "InsertTextTransaction.h"       // for InsertTextTransaction
+#include "JoinNodeTransaction.h"         // for JoinNodeTransaction
+#include "PlaceholderTransaction.h"      // for PlaceholderTransaction
+#include "SplitNodeTransaction.h"        // for SplitNodeTransaction
+#include "mozilla/intl/BidiEmbeddingLevel.h"
 #include "mozilla/BasePrincipal.h"            // for BasePrincipal
 #include "mozilla/CheckedInt.h"               // for CheckedInt
 #include "mozilla/ComposerCommandsUpdater.h"  // for ComposerCommandsUpdater
@@ -62,8 +62,7 @@
 #include "mozilla/TextServicesDocument.h"  // for TextServicesDocument
 #include "mozilla/TextEditor.h"
 #include "mozilla/TextEvents.h"
-#include "mozilla/TransactionManager.h"  // for TransactionManager
-#include "mozilla/Tuple.h"
+#include "mozilla/TransactionManager.h"   // for TransactionManager
 #include "mozilla/dom/AbstractRange.h"    // for AbstractRange
 #include "mozilla/dom/Attr.h"             // for Attr
 #include "mozilla/dom/BrowsingContext.h"  // for BrowsingContext
@@ -96,6 +95,7 @@
 #include "nsGkAtoms.h"                 // for nsGkAtoms, nsGkAtoms::dir
 #include "nsIClipboard.h"              // for nsIClipboard
 #include "nsIContent.h"                // for nsIContent
+#include "nsIContentInlines.h"         // for nsINode::IsInDesignMode()
 #include "nsIDocumentEncoder.h"        // for nsIDocumentEncoder
 #include "nsIDocumentStateListener.h"  // for nsIDocumentStateListener
 #include "nsIDocShell.h"               // for nsIDocShell
@@ -458,9 +458,7 @@ nsresult EditorBase::PostCreateInternal() {
       NS_WARNING("EditorBase::GetPreferredIMEState() failed");
       return NS_OK;
     }
-    // May be null in design mode
-    nsCOMPtr<nsIContent> content = GetFocusedContentForIME();
-    IMEStateManager::UpdateIMEState(newState, content, *this);
+    IMEStateManager::UpdateIMEState(newState, focusedContent, *this);
   }
 
   // FYI: This call might cause destroying this editor.
@@ -706,7 +704,7 @@ NS_IMETHODIMP EditorBase::SetFlags(uint32_t aFlags) {
     if (NS_SUCCEEDED(rv)) {
       // NOTE: When the enabled state isn't going to be modified, this method
       // is going to do nothing.
-      nsCOMPtr<nsIContent> content = GetFocusedContentForIME();
+      nsCOMPtr<nsIContent> content = GetFocusedContent();
       IMEStateManager::UpdateIMEState(newState, content, *this);
     }
   }
@@ -1995,76 +1993,6 @@ NS_IMETHODIMP EditorBase::SetSpellcheckUserOverride(bool enable) {
   return NS_OK;
 }
 
-Result<RefPtr<Element>, nsresult> EditorBase::CreateNodeWithTransaction(
-    nsAtom& aTagName, const EditorDOMPoint& aPointToInsert) {
-  MOZ_ASSERT(IsEditActionDataAvailable());
-  MOZ_ASSERT(aPointToInsert.IsSetAndValid());
-
-  // XXX We need offset at new node for RangeUpdaterRef().  Therefore, we need
-  //     to compute the offset now but this is expensive.  So, if it's possible,
-  //     we need to redesign RangeUpdaterRef() as avoiding using indices.
-  Unused << aPointToInsert.Offset();
-
-  IgnoredErrorResult ignoredError;
-  AutoEditSubActionNotifier startToHandleEditSubAction(
-      *this, EditSubAction::eCreateNode, nsIEditor::eNext, ignoredError);
-  if (NS_WARN_IF(ignoredError.ErrorCodeIs(NS_ERROR_EDITOR_DESTROYED))) {
-    return Err(NS_ERROR_EDITOR_DESTROYED);
-  }
-  NS_WARNING_ASSERTION(
-      !ignoredError.Failed(),
-      "TextEditor::OnStartToHandleTopLevelEditSubAction() failed, but ignored");
-
-  RefPtr<Element> newElement;
-
-  RefPtr<CreateElementTransaction> transaction =
-      CreateElementTransaction::Create(*this, aTagName, aPointToInsert);
-  nsresult rv = DoTransactionInternal(transaction);
-  if (NS_WARN_IF(Destroyed())) {
-    rv = NS_ERROR_EDITOR_DESTROYED;
-  } else if (transaction->GetNewElement() &&
-             transaction->GetNewElement()->GetParentNode() !=
-                 aPointToInsert.GetContainer()) {
-    NS_WARNING("The new element was not inserted into the expected node");
-    rv = NS_ERROR_EDITOR_UNEXPECTED_DOM_TREE;
-  }
-  if (NS_FAILED(rv)) {
-    NS_WARNING("EditorBase::DoTransactionInternal() failed");
-    // XXX Why do we do this even when DoTransaction() returned error?
-    DebugOnly<nsresult> rvIgnored =
-        RangeUpdaterRef().SelAdjCreateNode(aPointToInsert);
-    NS_WARNING_ASSERTION(
-        NS_SUCCEEDED(rvIgnored),
-        "Rangeupdater::SelAdjCreateNode() failed, but ignored");
-  } else {
-    newElement = transaction->GetNewElement();
-    MOZ_ASSERT(newElement);
-
-    // If we succeeded to create and insert new element, we need to adjust
-    // ranges in RangeUpdaterRef().  It currently requires offset of the new
-    // node.  So, let's call it with original offset.  Note that if
-    // aPointToInsert stores child node, it may not be at the offset since new
-    // element must be inserted before the old child.  Although, mutation
-    // observer can do anything, but currently, we don't check it.
-    DebugOnly<nsresult> rvIgnored =
-        RangeUpdaterRef().SelAdjCreateNode(EditorRawDOMPoint(
-            aPointToInsert.GetContainer(), aPointToInsert.Offset()));
-    NS_WARNING_ASSERTION(
-        NS_SUCCEEDED(rvIgnored),
-        "Rangeupdater::SelAdjCreateNode() failed, but ignored");
-  }
-
-  if (IsHTMLEditor() && newElement) {
-    TopLevelEditSubActionDataRef().DidCreateElement(*this, *newElement);
-  }
-
-  if (NS_FAILED(rv)) {
-    return Err(rv);
-  }
-
-  return newElement;
-}
-
 NS_IMETHODIMP EditorBase::InsertNode(nsINode* aNodeToInsert,
                                      nsINode* aContainer, uint32_t aOffset) {
   nsCOMPtr<nsIContent> contentToInsert = do_QueryInterface(aNodeToInsert);
@@ -2295,14 +2223,14 @@ void EditorBase::NotifyEditorObservers(
 
       if (!mDispatchInputEvent || IsEditActionAborted() ||
           IsEditActionCanceled()) {
-        return;
+        break;
       }
 
       DispatchInputEvent();
       break;
     case eNotifyEditorObserversOfBefore:
       if (NS_WARN_IF(mIsInEditSubAction)) {
-        break;
+        return;
       }
 
       mIsInEditSubAction = true;
@@ -2311,7 +2239,7 @@ void EditorBase::NotifyEditorObservers(
         RefPtr<IMEContentObserver> observer = mIMEContentObserver;
         observer->BeforeEditAction();
       }
-      break;
+      return;
     case eNotifyEditorObserversOfCancel:
       mIsInEditSubAction = false;
 
@@ -2327,6 +2255,19 @@ void EditorBase::NotifyEditorObservers(
     default:
       MOZ_CRASH("Handle all notifications here");
       break;
+  }
+
+  if (IsHTMLEditor() && !Destroyed()) {
+    // We may need to show resizing handles or update existing ones after
+    // all transactions are done. This way of doing is preferred to DOM
+    // mutation events listeners because all the changes the user can apply
+    // to a document may result in multiple events, some of them quite hard
+    // to listen too (in particular when an ancestor of the selection is
+    // changed but the selection itself is not changed).
+    DebugOnly<nsresult> rvIgnored =
+        MOZ_KnownLive(AsHTMLEditor())->RefreshEditingUI();
+    NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),
+                         "HTMLEditor::RefreshEditingUI() failed, but ignored");
   }
 }
 
@@ -2962,24 +2903,23 @@ static bool TextFragmentBeginsWithStringAtOffset(
   return aString.EqualsLatin1(aTextFragment.Get1b() + aOffset, stringLength);
 }
 
-static Tuple<EditorDOMPointInText, EditorDOMPointInText>
+static std::tuple<EditorDOMPointInText, EditorDOMPointInText>
 AdjustTextInsertionRange(const EditorDOMPointInText& aInsertedPoint,
                          const nsAString& aInsertedString) {
   if (TextFragmentBeginsWithStringAtOffset(
           aInsertedPoint.ContainerAsText()->TextFragment(),
           aInsertedPoint.Offset(), aInsertedString)) {
-    return MakeTuple(aInsertedPoint,
-                     EditorDOMPointInText(
-                         aInsertedPoint.ContainerAsText(),
-                         aInsertedPoint.Offset() + aInsertedString.Length()));
+    return {aInsertedPoint,
+            EditorDOMPointInText(
+                aInsertedPoint.ContainerAsText(),
+                aInsertedPoint.Offset() + aInsertedString.Length())};
   }
 
-  return MakeTuple(
-      EditorDOMPointInText(aInsertedPoint.ContainerAsText(), 0),
-      EditorDOMPointInText::AtEndOf(*aInsertedPoint.ContainerAsText()));
+  return {EditorDOMPointInText(aInsertedPoint.ContainerAsText(), 0),
+          EditorDOMPointInText::AtEndOf(*aInsertedPoint.ContainerAsText())};
 }
 
-Tuple<EditorDOMPointInText, EditorDOMPointInText>
+std::tuple<EditorDOMPointInText, EditorDOMPointInText>
 EditorBase::ComputeInsertedRange(const EditorDOMPointInText& aInsertedPoint,
                                  const nsAString& aInsertedString) const {
   MOZ_ASSERT(aInsertedPoint.IsSet());
@@ -2992,13 +2932,13 @@ EditorBase::ComputeInsertedRange(const EditorDOMPointInText& aInsertedPoint,
     EditorDOMPointInText endOfInsertion(
         aInsertedPoint.ContainerAsText(),
         aInsertedPoint.Offset() + aInsertedString.Length());
-    return MakeTuple(aInsertedPoint, endOfInsertion);
+    return {aInsertedPoint, endOfInsertion};
   }
   if (aInsertedPoint.ContainerAsText()->IsInComposedDoc()) {
     EditorDOMPointInText begin, end;
     return AdjustTextInsertionRange(aInsertedPoint, aInsertedString);
   }
-  return MakeTuple(EditorDOMPointInText(), EditorDOMPointInText());
+  return {EditorDOMPointInText(), EditorDOMPointInText()};
 }
 
 nsresult EditorBase::InsertTextIntoTextNodeWithTransaction(
@@ -3038,8 +2978,7 @@ nsresult EditorBase::InsertTextIntoTextNodeWithTransaction(
   EndUpdateViewBatch();
 
   if (IsHTMLEditor() && pointToInsert.IsSet()) {
-    EditorDOMPointInText begin, end;
-    Tie(begin, end) = ComputeInsertedRange(pointToInsert, aStringToInsert);
+    auto [begin, end] = ComputeInsertedRange(pointToInsert, aStringToInsert);
     if (begin.IsSet() && end.IsSet()) {
       TopLevelEditSubActionDataRef().DidInsertText(*this, begin, end);
     }
@@ -3487,21 +3426,6 @@ void EditorBase::EndUpdateViewBatch() {
 
   // Turn selection updating and notifications back on.
   SelectionRef().EndBatchChanges();
-
-  if (!IsHTMLEditor()) {
-    return;
-  }
-
-  // We may need to show resizing handles or update existing ones after
-  // all transactions are done. This way of doing is preferred to DOM
-  // mutation events listeners because all the changes the user can apply
-  // to a document may result in multiple events, some of them quite hard
-  // to listen too (in particular when an ancestor of the selection is
-  // changed but the selection itself is not changed).
-  DebugOnly<nsresult> rvIgnored =
-      MOZ_KnownLive(AsHTMLEditor())->RefreshEditingUI();
-  NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),
-                       "HTMLEditor::RefreshEditingUI() failed, but ignored");
 }
 
 TextComposition* EditorBase::GetComposition() const { return mComposition; }
@@ -4531,7 +4455,11 @@ nsresult EditorBase::HandleDropEvent(DragEvent* aDropEvent) {
   if (IsTextEditor()) {
     newFocusedElement = GetExposedRoot();
     focusedElement = IsActiveInDOMWindow() ? newFocusedElement : nullptr;
-  } else if (!AsHTMLEditor()->IsInDesignMode()) {
+  }
+  // TODO: We need to add automated tests when dropping something into an
+  //       editing host for contenteditable which is in a shadow DOM tree
+  //       and its host which is in design mode.
+  else if (!AsHTMLEditor()->IsInDesignMode()) {
     focusedElement = AsHTMLEditor()->GetActiveEditingHost();
     if (focusedElement &&
         droppedAt.GetContainerAsContent()->IsInclusiveDescendantOf(
@@ -5229,8 +5157,7 @@ nsresult EditorBase::InitializeSelection(nsINode& aFocusEventTargetNode) {
   // Also, make sure to always ignore it for designMode, since that effectively
   // overrides everything and we allow to edit stuff with
   // contenteditable="false" subtrees in such a document.
-  caret->SetIgnoreUserModify(
-      aFocusEventTargetNode.OwnerDoc()->HasFlag(NODE_IS_EDITABLE));
+  caret->SetIgnoreUserModify(aFocusEventTargetNode.IsInDesignMode());
 
   // Init selection
   rvIgnored =
@@ -5343,7 +5270,7 @@ void EditorBase::ReinitializeSelection(Element& aElement) {
   if (NS_WARN_IF(!presContext)) {
     return;
   }
-  nsCOMPtr<nsIContent> focusedContent = GetFocusedContentForIME();
+  nsCOMPtr<nsIContent> focusedContent = GetFocusedContent();
   IMEStateManager::OnFocusInEditor(presContext, focusedContent, *this);
 }
 
@@ -5519,10 +5446,6 @@ nsIContent* EditorBase::GetFocusedContent() const {
   MOZ_ASSERT((content == piTarget) == SameCOMIdentity(content, piTarget));
 
   return (content == piTarget) ? content : nullptr;
-}
-
-nsIContent* EditorBase::GetFocusedContentForIME() const {
-  return GetFocusedContent();
 }
 
 bool EditorBase::IsActiveInDOMWindow() const {
@@ -5769,12 +5692,13 @@ EditorBase::AutoCaretBidiLevelManager::AutoCaretBidiLevelManager(
   nsPrevNextBidiLevels levels = frameSelection->GetPrevNextBidiLevels(
       aPointAtCaret.GetContainerAsContent(), aPointAtCaret.Offset(), true);
 
-  nsBidiLevel levelBefore = levels.mLevelBefore;
-  nsBidiLevel levelAfter = levels.mLevelAfter;
+  mozilla::intl::BidiEmbeddingLevel levelBefore = levels.mLevelBefore;
+  mozilla::intl::BidiEmbeddingLevel levelAfter = levels.mLevelAfter;
 
-  nsBidiLevel currentCaretLevel = frameSelection->GetCaretBidiLevel();
+  mozilla::intl::BidiEmbeddingLevel currentCaretLevel =
+      frameSelection->GetCaretBidiLevel();
 
-  nsBidiLevel levelOfDeletion;
+  mozilla::intl::BidiEmbeddingLevel levelOfDeletion;
   levelOfDeletion = (nsIEditor::eNext == aDirectionAndAmount ||
                      nsIEditor::eNextWord == aDirectionAndAmount)
                         ? levelAfter
@@ -6521,8 +6445,8 @@ void EditorBase::TopLevelEditSubActionData::WillDeleteContent(
 }
 
 void EditorBase::TopLevelEditSubActionData::DidSplitContent(
-    EditorBase& aEditorBase, nsIContent& aExistingRightContent,
-    nsIContent& aNewLeftContent) {
+    EditorBase& aEditorBase, nsIContent& aSplitContent, nsIContent& aNewContent,
+    SplitNodeDirection aSplitNodeDirection) {
   MOZ_ASSERT(aEditorBase.AsHTMLEditor());
 
   if (!aEditorBase.mInitSucceeded || aEditorBase.Destroyed()) {
@@ -6533,35 +6457,21 @@ void EditorBase::TopLevelEditSubActionData::DidSplitContent(
     return;  // Temporarily disabled by edit sub-action handler.
   }
 
-  DebugOnly<nsresult> rvIgnored = AddRangeToChangedRange(
-      *aEditorBase.AsHTMLEditor(), EditorRawDOMPoint(&aNewLeftContent, 0),
-      EditorRawDOMPoint(&aExistingRightContent, 0));
+  DebugOnly<nsresult> rvIgnored =
+      aSplitNodeDirection == SplitNodeDirection::LeftNodeIsNewOne
+          ? AddRangeToChangedRange(*aEditorBase.AsHTMLEditor(),
+                                   EditorRawDOMPoint(&aNewContent, 0),
+                                   EditorRawDOMPoint(&aSplitContent, 0))
+          : AddRangeToChangedRange(*aEditorBase.AsHTMLEditor(),
+                                   EditorRawDOMPoint::AtEndOf(aSplitContent),
+                                   EditorRawDOMPoint::AtEndOf(aNewContent));
   NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),
                        "TopLevelEditSubActionData::AddRangeToChangedRange() "
                        "failed, but ignored");
 }
 
-void EditorBase::TopLevelEditSubActionData::WillJoinContents(
-    EditorBase& aEditorBase, nsIContent& aLeftContent,
-    nsIContent& aRightContent) {
-  MOZ_ASSERT(aEditorBase.AsHTMLEditor());
-
-  if (!aEditorBase.mInitSucceeded || aEditorBase.Destroyed()) {
-    return;  // We have not been initialized yet or already been destroyed.
-  }
-
-  if (!aEditorBase.EditSubActionDataRef().mAdjustChangedRangeFromListener) {
-    return;  // Temporarily disabled by edit sub-action handler.
-  }
-
-  // remember split point
-  aEditorBase.EditSubActionDataRef().mJoinedLeftNodeLength =
-      aLeftContent.Length();
-}
-
 void EditorBase::TopLevelEditSubActionData::DidJoinContents(
-    EditorBase& aEditorBase, nsIContent& aLeftContent,
-    nsIContent& aRightContent) {
+    EditorBase& aEditorBase, const EditorRawDOMPoint& aJoinedPoint) {
   MOZ_ASSERT(aEditorBase.AsHTMLEditor());
 
   if (!aEditorBase.mInitSucceeded || aEditorBase.Destroyed()) {
@@ -6572,11 +6482,8 @@ void EditorBase::TopLevelEditSubActionData::DidJoinContents(
     return;  // Temporarily disabled by edit sub-action handler.
   }
 
-  DebugOnly<nsresult> rvIgnored = AddPointToChangedRange(
-      *aEditorBase.AsHTMLEditor(),
-      EditorRawDOMPoint(
-          &aRightContent,
-          aEditorBase.EditSubActionDataRef().mJoinedLeftNodeLength));
+  DebugOnly<nsresult> rvIgnored =
+      AddPointToChangedRange(*aEditorBase.AsHTMLEditor(), aJoinedPoint);
   NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),
                        "TopLevelEditSubActionData::AddPointToChangedRange() "
                        "failed, but ignored");

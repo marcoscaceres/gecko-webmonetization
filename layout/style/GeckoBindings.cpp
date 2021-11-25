@@ -56,6 +56,7 @@
 #include "mozilla/StaticPresData.h"
 #include "mozilla/StaticPrefs_browser.h"
 #include "mozilla/StaticPrefs_layout.h"
+#include "mozilla/StaticPtr.h"
 #include "mozilla/RestyleManager.h"
 #include "mozilla/SizeOfState.h"
 #include "mozilla/StyleAnimationValue.h"
@@ -87,31 +88,26 @@ using namespace mozilla::dom;
 bool ServoTraversalStatistics::sActive = false;
 ServoTraversalStatistics ServoTraversalStatistics::sSingleton;
 
-static RWLock* sServoFFILock = nullptr;
+static StaticAutoPtr<RWLock> sServoFFILock;
 
-static const nsFont* ThreadSafeGetDefaultFontHelper(
-    const Document& aDocument, nsAtom* aLanguage,
-    StyleGenericFontFamily aGenericId) {
+static const LangGroupFontPrefs* ThreadSafeGetLangGroupFontPrefs(
+    const Document& aDocument, nsAtom* aLanguage) {
   bool needsCache = false;
-  const nsFont* retval;
-
-  auto GetDefaultFont = [&](bool* aNeedsToCache) {
-    auto* prefs = aDocument.GetFontPrefsForLang(aLanguage, aNeedsToCache);
-    return prefs ? prefs->GetDefaultFont(aGenericId) : nullptr;
-  };
-
   {
     AutoReadLock guard(*sServoFFILock);
-    retval = GetDefaultFont(&needsCache);
+    if (auto* prefs = aDocument.GetFontPrefsForLang(aLanguage, &needsCache)) {
+      return prefs;
+    }
   }
-  if (!needsCache) {
-    return retval;
-  }
-  {
-    AutoWriteLock guard(*sServoFFILock);
-    retval = GetDefaultFont(nullptr);
-  }
-  return retval;
+  MOZ_ASSERT(needsCache);
+  AutoWriteLock guard(*sServoFFILock);
+  return aDocument.GetFontPrefsForLang(aLanguage);
+}
+
+static const nsFont& ThreadSafeGetDefaultVariableFont(const Document& aDocument,
+                                                      nsAtom* aLanguage) {
+  return ThreadSafeGetLangGroupFontPrefs(aDocument, aLanguage)
+      ->mDefaultVariableFont;
 }
 
 /*
@@ -686,31 +682,42 @@ bool Gecko_IsDocumentBody(const Element* aElement) {
   return doc && doc->GetBodyElement() == aElement;
 }
 
-nscolor Gecko_GetLookAndFeelSystemColor(int32_t aId, const Document* aDoc,
-                                        StyleSystemColorScheme aColorScheme,
-                                        const StyleColorScheme* aStyle) {
-  auto colorId = static_cast<LookAndFeel::ColorID>(aId);
-  auto useStandins = LookAndFeel::ShouldUseStandins(*aDoc, colorId);
-  auto colorScheme = [&] {
-    switch (aColorScheme) {
-      case StyleSystemColorScheme::Default:
-        break;
-      case StyleSystemColorScheme::Light:
-        return LookAndFeel::ColorScheme::Light;
-      case StyleSystemColorScheme::Dark:
-        return LookAndFeel::ColorScheme::Dark;
-    }
-    return LookAndFeel::ColorSchemeForStyle(*aDoc, aStyle->bits);
-  }();
+nscolor Gecko_ComputeSystemColor(StyleSystemColor aColor, const Document* aDoc,
+                                 const StyleColorScheme* aStyle) {
+  auto colorScheme = LookAndFeel::ColorSchemeForStyle(*aDoc, aStyle->bits);
+
+  const auto& colors = PreferenceSheet::PrefsFor(*aDoc).ColorsFor(colorScheme);
+  switch (aColor) {
+    case StyleSystemColor::Canvastext:
+      return colors.mDefault;
+    case StyleSystemColor::Canvas:
+      return colors.mDefaultBackground;
+    case StyleSystemColor::Linktext:
+      return colors.mLink;
+    case StyleSystemColor::Activetext:
+      return colors.mActiveLink;
+    case StyleSystemColor::Visitedtext:
+      return colors.mVisitedLink;
+    default:
+      break;
+  }
+
+  auto useStandins = LookAndFeel::ShouldUseStandins(*aDoc, aColor);
 
   AutoWriteLock guard(*sServoFFILock);
-  return LookAndFeel::Color(colorId, colorScheme, useStandins);
+  return LookAndFeel::Color(aColor, colorScheme, useStandins);
 }
 
 int32_t Gecko_GetLookAndFeelInt(int32_t aId) {
   auto intId = static_cast<LookAndFeel::IntID>(aId);
   AutoWriteLock guard(*sServoFFILock);
   return LookAndFeel::GetInt(intId);
+}
+
+float Gecko_GetLookAndFeelFloat(int32_t aId) {
+  auto id = static_cast<LookAndFeel::FloatID>(aId);
+  AutoWriteLock guard(*sServoFFILock);
+  return LookAndFeel::GetFloat(id);
 }
 
 bool Gecko_MatchLang(const Element* aElement, nsAtom* aOverrideLang,
@@ -764,10 +771,6 @@ nsAtom* Gecko_GetXMLLangValue(const Element* aElement) {
   return atom.forget().take();
 }
 
-Document::DocumentTheme Gecko_GetDocumentLWTheme(const Document* aDocument) {
-  return aDocument->ThreadSafeGetDocumentLWTheme();
-}
-
 const PreferenceSheet::Prefs* Gecko_GetPrefSheetPrefs(const Document* aDoc) {
   return &PreferenceSheet::PrefsFor(*aDoc);
 }
@@ -816,10 +819,10 @@ static bool DoMatch(Implementor* aElement, nsAtom* aNS, nsAtom* aName,
   if (MOZ_LIKELY(aNS)) {
     int32_t ns = aNS == nsGkAtoms::_empty
                      ? kNameSpaceID_None
-                     : nsContentUtils::NameSpaceManager()->GetNameSpaceID(
+                     : nsNameSpaceManager::GetInstance()->GetNameSpaceID(
                            aNS, aElement->IsInChromeDocument());
 
-    MOZ_ASSERT(ns == nsContentUtils::NameSpaceManager()->GetNameSpaceID(
+    MOZ_ASSERT(ns == nsNameSpaceManager::GetInstance()->GetNameSpaceID(
                          aNS, aElement->IsInChromeDocument()));
     NS_ENSURE_TRUE(ns != kNameSpaceID_Unknown, false);
     const nsAttrValue* value = aElement->GetParsedAttr(aName, ns);
@@ -970,14 +973,14 @@ void Gecko_ReleaseAtom(nsAtom* aAtom) { NS_RELEASE(aAtom); }
 void Gecko_nsFont_InitSystem(nsFont* aDest, StyleSystemFont aFontId,
                              const nsStyleFont* aFont,
                              const Document* aDocument) {
-  const nsFont* defaultVariableFont = ThreadSafeGetDefaultFontHelper(
-      *aDocument, aFont->mLanguage, StyleGenericFontFamily::None);
+  const nsFont& defaultVariableFont =
+      ThreadSafeGetDefaultVariableFont(*aDocument, aFont->mLanguage);
 
   // We have passed uninitialized memory to this function,
   // initialize it. We can't simply return an nsFont because then
   // we need to know its size beforehand. Servo cannot initialize nsFont
   // itself, so this will do.
-  new (aDest) nsFont(*defaultVariableFont);
+  new (aDest) nsFont(defaultVariableFont);
 
   AutoWriteLock guard(*sServoFFILock);
   nsLayoutUtils::ComputeSystemFont(aDest, aFontId, defaultVariableFont,
@@ -986,12 +989,9 @@ void Gecko_nsFont_InitSystem(nsFont* aDest, StyleSystemFont aFontId,
 
 void Gecko_nsFont_Destroy(nsFont* aDest) { aDest->~nsFont(); }
 
-StyleGenericFontFamily Gecko_nsStyleFont_ComputeDefaultFontType(
-    const Document* aDoc, StyleGenericFontFamily aGenericId,
-    nsAtom* aLanguage) {
-  const nsFont* defaultFont =
-      ThreadSafeGetDefaultFontHelper(*aDoc, aLanguage, aGenericId);
-  return defaultFont->family.families.fallback;
+StyleGenericFontFamily Gecko_nsStyleFont_ComputeFallbackFontTypeForLanguage(
+    const Document* aDoc, nsAtom* aLanguage) {
+  return ThreadSafeGetLangGroupFontPrefs(*aDoc, aLanguage)->GetDefaultGeneric();
 }
 
 gfxFontFeatureValueSet* Gecko_ConstructFontFeatureValueSet() {
@@ -1231,7 +1231,12 @@ void Gecko_GetComputedURLSpec(const StyleComputedUrl* aURL, nsCString* aOut) {
 
 void Gecko_GetComputedImageURLSpec(const StyleComputedUrl* aURL,
                                    nsCString* aOut) {
-  // Image URIs don't serialize local refs as local.
+  if (aURL->IsLocalRef() &&
+      StaticPrefs::layout_css_computed_style_dont_resolve_image_local_refs()) {
+    aOut->Assign(aURL->SpecifiedSerialization());
+    return;
+  }
+
   if (nsIURI* uri = aURL->GetURI()) {
     nsresult rv = uri->GetSpec(*aOut);
     if (NS_SUCCEEDED(rv)) {
@@ -1388,7 +1393,6 @@ void ShutdownServo() {
   UnregisterWeakMemoryReporter(gUACacheReporter);
   gUACacheReporter = nullptr;
 
-  delete sServoFFILock;
   sServoFFILock = nullptr;
   Servo_Shutdown();
 
@@ -1452,8 +1456,7 @@ void Gecko_StyleSheet_FinishAsyncParse(
                  counters = std::move(useCounters)]() mutable {
         MOZ_ASSERT(NS_IsMainThread());
         SheetLoadData* data = d->get();
-        data->mUseCounters = std::move(counters);
-        data->mSheet->FinishAsyncParse(contents.forget());
+        data->mSheet->FinishAsyncParse(contents.forget(), std::move(counters));
       }));
 }
 

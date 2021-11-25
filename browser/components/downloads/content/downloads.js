@@ -89,6 +89,17 @@ ChromeUtils.defineModuleGetter(
   "resource://gre/modules/PlacesUtils.jsm"
 );
 
+const { Integration } = ChromeUtils.import(
+  "resource://gre/modules/Integration.jsm"
+);
+
+/* global DownloadIntegration */
+Integration.downloads.defineModuleGetter(
+  this,
+  "DownloadIntegration",
+  "resource://gre/modules/DownloadIntegration.jsm"
+);
+
 // DownloadsPanel
 
 /**
@@ -150,6 +161,11 @@ var DownloadsPanel = {
     DownloadsCommon.getSummary(window, DownloadsView.kItemCountLimit).addView(
       DownloadsSummary
     );
+
+    DownloadIntegration.getDownloadSpamProtection().spamList.addView(
+      DownloadsView
+    );
+
     DownloadsCommon.log(
       "DownloadsView attached - the panel for this window",
       "should now see download items come in."
@@ -184,7 +200,9 @@ var DownloadsPanel = {
       DownloadsView.kItemCountLimit
     ).removeView(DownloadsSummary);
     this._unattachEventListeners();
-
+    DownloadIntegration.getDownloadSpamProtection().spamList.removeView(
+      DownloadsView
+    );
     this._state = this.kStateUninitialized;
 
     DownloadsSummary.active = false;
@@ -1028,7 +1046,8 @@ class DownloadsViewItem extends DownloadsViewUI.DownloadElementShell {
       case "downloadsCmd_open:current":
       case "downloadsCmd_open:tab":
       case "downloadsCmd_open:tabshifted":
-      case "downloadsCmd_open:window": {
+      case "downloadsCmd_open:window":
+      case "downloadsCmd_alwaysOpenSimilarFiles": {
         if (!this.download.succeeded) {
           return false;
         }
@@ -1113,6 +1132,14 @@ class DownloadsViewItem extends DownloadsViewUI.DownloadElementShell {
 
   downloadsCmd_alwaysOpenInSystemViewer() {
     super.downloadsCmd_alwaysOpenInSystemViewer();
+
+    // We explicitly close the panel here to give the user the feedback that
+    // their click has been received, and we're handling the action.
+    DownloadsPanel.hidePanel();
+  }
+
+  downloadsCmd_alwaysOpenSimilarFiles() {
+    super.downloadsCmd_alwaysOpenSimilarFiles();
 
     // We explicitly close the panel here to give the user the feedback that
     // their click has been received, and we're handling the action.
@@ -1551,8 +1578,19 @@ var DownloadsBlockedSubview = {
 
     let e = this.elements;
     let s = DownloadsCommon.strings;
-    e.title.textContent = title;
-    e.details1.textContent = details[0];
+
+    title.l10n
+      ? document.l10n.setAttributes(e.title, title.l10n.id, title.l10n.args)
+      : (e.title.textContent = title);
+
+    details[0].l10n
+      ? document.l10n.setAttributes(
+          e.details1,
+          details[0].l10n.id,
+          details[0].l10n.args
+        )
+      : (e.details1.textContent = details[0]);
+
     e.details2.textContent = details[1];
 
     if (download.launchWhenSucceeded) {

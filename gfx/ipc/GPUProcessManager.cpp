@@ -24,6 +24,7 @@
 #include "mozilla/gfx/gfxVars.h"
 #include "mozilla/gfx/GPUChild.h"
 #include "mozilla/ipc/Endpoint.h"
+#include "mozilla/ipc/ProcessChild.h"
 #include "mozilla/layers/APZCTreeManagerChild.h"
 #include "mozilla/layers/APZInputBridgeChild.h"
 #include "mozilla/layers/CompositorBridgeChild.h"
@@ -38,6 +39,7 @@
 #include "mozilla/layers/RemoteCompositorSession.h"
 #include "mozilla/widget/PlatformWidgetTypes.h"
 #include "nsAppRunner.h"
+#include "mozilla/widget/CompositorWidget.h"
 #ifdef MOZ_WIDGET_SUPPORTS_OOP_COMPOSITING
 #  include "mozilla/widget/CompositorWidgetChild.h"
 #endif
@@ -55,6 +57,10 @@
 #  include "mozilla/widget/AndroidUiThread.h"
 #  include "mozilla/layers/UiCompositorControllerChild.h"
 #endif  // defined(MOZ_WIDGET_ANDROID)
+
+#if defined(XP_WIN)
+#  include "gfxWindowsPlatform.h"
+#endif
 
 namespace mozilla {
 namespace gfx {
@@ -191,9 +197,7 @@ void GPUProcessManager::LaunchGPUProcess() {
   mProcessStable = false;
 
   std::vector<std::string> extraArgs;
-  nsCString parentBuildID(mozilla::PlatformBuildID());
-  extraArgs.push_back("-parentBuildID");
-  extraArgs.push_back(parentBuildID.get());
+  ipc::ProcessChild::AddPlatformBuildID(extraArgs);
 
   // The subprocess is launched asynchronously, so we wait for a callback to
   // acquire the IPDL actor.
@@ -473,7 +477,7 @@ void GPUProcessManager::SimulateDeviceReset() {
 
   if (mProcess) {
     GPUDeviceData data;
-    if (mGPUChild->SendSimulateDeviceReset(&data)) {
+    if (mGPUChild && mGPUChild->SendSimulateDeviceReset(&data)) {
       gfxPlatform::GetPlatform()->ImportGPUDeviceData(data);
     }
     OnRemoteProcessDeviceReset(mProcess);
@@ -607,7 +611,11 @@ void GPUProcessManager::OnInProcessDeviceReset(bool aTrackThreshold) {
     DisableWebRenderConfig(wr::WebRenderError::EXCESSIVE_RESETS, nsCString());
 #endif
   }
-
+#ifdef XP_WIN
+  // Ensure device reset handling before re-creating in process sessions.
+  // Normally nsWindow::OnPaint() already handled it.
+  gfxWindowsPlatform::GetPlatform()->HandleDeviceReset();
+#endif
   RebuildInProcessSessions();
   NotifyListenersOnCompositeDeviceReset();
 }
@@ -925,11 +933,23 @@ RefPtr<CompositorSession> GPUProcessManager::CreateRemoteSession(
     }
     apz = static_cast<APZCTreeManagerChild*>(papz);
 
-    RefPtr<APZInputBridgeChild> pinput = new APZInputBridgeChild();
-    if (!mGPUChild->SendPAPZInputBridgeConstructor(pinput, aRootLayerTreeId)) {
+    ipc::Endpoint<PAPZInputBridgeParent> parentPipe;
+    ipc::Endpoint<PAPZInputBridgeChild> childPipe;
+    nsresult rv = PAPZInputBridge::CreateEndpoints(mGPUChild->OtherPid(),
+                                                   base::GetCurrentProcId(),
+                                                   &parentPipe, &childPipe);
+    if (NS_FAILED(rv)) {
       return nullptr;
     }
-    apz->SetInputBridge(pinput);
+    mGPUChild->SendInitAPZInputBridge(aRootLayerTreeId, std::move(parentPipe));
+
+    RefPtr<APZInputBridgeChild> inputBridge =
+        APZInputBridgeChild::Create(mProcessToken, std::move(childPipe));
+    if (!inputBridge) {
+      return nullptr;
+    }
+
+    apz->SetInputBridge(inputBridge);
   }
 
   return new RemoteCompositorSession(aWidget, child, widget, apz,

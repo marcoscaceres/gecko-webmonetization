@@ -108,48 +108,25 @@ void nsLookAndFeel::NativeInit() { EnsureInit(); }
 
 /* virtual */
 void nsLookAndFeel::RefreshImpl() {
-  nsXPLookAndFeel::RefreshImpl();
   mInitialized = false;  // Fetch system colors next time they're used.
+  nsXPLookAndFeel::RefreshImpl();
 }
 
-nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme,
+nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme aScheme,
                                        nscolor& aColor) {
   EnsureInit();
+
+  if (aScheme == ColorScheme::Dark) {
+    if (auto color = GenericDarkColor(aID)) {
+      aColor = *color;
+      return NS_OK;
+    }
+  }
 
   nsresult res = NS_OK;
 
   int idx;
   switch (aID) {
-    case ColorID::WindowBackground:
-      idx = COLOR_WINDOW;
-      break;
-    case ColorID::WindowForeground:
-      idx = COLOR_WINDOWTEXT;
-      break;
-    case ColorID::WidgetBackground:
-      idx = COLOR_BTNFACE;
-      break;
-    case ColorID::WidgetForeground:
-      idx = COLOR_BTNTEXT;
-      break;
-    case ColorID::WidgetSelectBackground:
-      idx = COLOR_HIGHLIGHT;
-      break;
-    case ColorID::WidgetSelectForeground:
-      idx = COLOR_HIGHLIGHTTEXT;
-      break;
-    case ColorID::Widget3DHighlight:
-      idx = COLOR_BTNHIGHLIGHT;
-      break;
-    case ColorID::Widget3DShadow:
-      idx = COLOR_BTNSHADOW;
-      break;
-    case ColorID::TextBackground:
-      idx = COLOR_WINDOW;
-      break;
-    case ColorID::TextForeground:
-      idx = COLOR_WINDOWTEXT;
-      break;
     case ColorID::IMERawInputBackground:
     case ColorID::IMEConvertedTextBackground:
       aColor = NS_TRANSPARENT;
@@ -185,6 +162,8 @@ nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme,
       break;
     case ColorID::Buttonface:
     case ColorID::MozButtonhoverface:
+    case ColorID::MozButtonactiveface:
+    case ColorID::MozButtondisabledface:
       idx = COLOR_BTNFACE;
       break;
     case ColorID::Buttonhighlight:
@@ -195,11 +174,18 @@ nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme,
       break;
     case ColorID::Buttontext:
     case ColorID::MozButtonhovertext:
+    case ColorID::MozButtonactivetext:
       idx = COLOR_BTNTEXT;
       break;
     case ColorID::Captiontext:
       idx = COLOR_CAPTIONTEXT;
       break;
+    case ColorID::MozCellhighlighttext:
+      aColor = NS_RGB(0, 0, 0);
+      return NS_OK;
+    case ColorID::MozCellhighlight:
+      aColor = NS_RGB(206, 206, 206);
+      return NS_OK;
     case ColorID::Graytext:
       idx = COLOR_GRAYTEXT;
       break;
@@ -264,6 +250,7 @@ nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme,
       idx = COLOR_3DHIGHLIGHT;
       break;
     case ColorID::Threedlightshadow:
+    case ColorID::MozDisabledfield:
       idx = COLOR_3DLIGHT;
       break;
     case ColorID::Threedshadow:
@@ -289,7 +276,6 @@ nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme,
       idx = COLOR_WINDOWTEXT;
       break;
     case ColorID::MozDialog:
-    case ColorID::MozCellhighlight:
       idx = COLOR_3DFACE;
       break;
     case ColorID::MozAccentColor:
@@ -324,7 +310,6 @@ nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme,
       idx = COLOR_WINDOWTEXT;
       break;
     case ColorID::MozDialogtext:
-    case ColorID::MozCellhighlighttext:
     case ColorID::MozColheadertext:
     case ColorID::MozColheaderhovertext:
       idx = COLOR_WINDOWTEXT;
@@ -339,7 +324,6 @@ nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme,
       idx = COLOR_HOTLIGHT;
       break;
     default:
-      NS_WARNING("Unknown color for nsLookAndFeel");
       idx = COLOR_WINDOW;
       res = NS_ERROR_FAILURE;
       break;
@@ -442,18 +426,10 @@ nsresult nsLookAndFeel::NativeGetInt(IntID aID, int32_t& aResult) {
     case IntID::WindowsDefaultTheme:
       aResult = nsUXThemeData::IsDefaultWindowTheme();
       break;
-    case IntID::WindowsThemeIdentifier:
-      aResult = nsUXThemeData::GetNativeThemeId();
-      break;
     case IntID::OperatingSystemVersionIdentifier: {
       aResult = int32_t(GetOperatingSystemVersion());
       break;
     }
-
-    case IntID::MacGraphiteTheme:
-      aResult = 0;
-      res = NS_ERROR_NOT_IMPLEMENTED;
-      break;
     case IntID::DWMCompositor:
       aResult = gfxWindowsPlatform::GetPlatform()->DwmCompositionEnabled();
       break;

@@ -386,6 +386,34 @@ const TESTCASES = [
       "cc-exp-year": "25",
     },
   },
+  {
+    description:
+      "Fill credit card number fields in a form with multiple cc-number inputs",
+    document: `<form>
+                <input id="cc-number1" maxlength="4">
+                <input id="cc-number2" maxlength="4">
+                <input id="cc-number3" maxlength="4">
+                <input id="cc-number4" maxlength="4">
+                <input id="cc-exp-month" autocomplete="cc-exp-month">
+                <input id="cc-exp-year" autocomplete="cc-exp-year">
+                </form>`,
+    focusedInputId: "cc-number1",
+    profileData: {
+      guid: "123",
+      "cc-number": "371449635398431",
+      "cc-exp-month": 6,
+      "cc-exp-year": 25,
+    },
+    expectedResult: {
+      guid: "123",
+      "cc-number1": "3714",
+      "cc-number2": "4963",
+      "cc-number3": "5398",
+      "cc-number4": "431",
+      "cc-exp-month": "6",
+      "cc-exp-year": "25",
+    },
+  },
 ];
 
 const TESTCASES_INPUT_UNCHANGED = [
@@ -613,6 +641,38 @@ const TESTCASES_FILL_SELECT = [
       "cc-name": "test name",
       "cc-exp-month": "6",
       "cc-exp-year": "2025",
+    },
+  },
+  {
+    description:
+      "Fill credit card information correctly when one of the card type options is 'American Express'",
+    document: `<form>
+                <select id="cc-type" autocomplete="cc-type">
+                  <option value="">Please select</option>
+                  <option value="MA">Mastercard</option>
+                  <option value="AX">American Express</option>
+                </select>
+                <input id="cc-number" autocomplete="cc-number">
+                <input id="cc-name" autocomplete="cc-name">
+                <input id="cc-exp-month" autocomplete="cc-exp-month">
+                <input id="cc-exp-year" autocomplete="cc-exp-year">
+              </form>`,
+    focusedInputId: "cc-number",
+    profileData: {
+      guid: "123",
+      "cc-number": "378282246310005",
+      "cc-type": "amex",
+      "cc-name": "test name",
+      "cc-exp-month": 8,
+      "cc-exp-year": 26,
+    },
+    expectedResult: {
+      guid: "123",
+      "cc-number": "378282246310005",
+      "cc-type": "AX",
+      "cc-name": "test name",
+      "cc-exp-month": 8,
+      "cc-exp-year": 26,
     },
   },
 ];

@@ -395,30 +395,6 @@
       return document.getElementById(this.getAttribute("datetimepicker"));
     }
 
-    /**
-     * Provides a node to hang popups (such as the datetimepicker) from.
-     * If this <browser> isn't the descendant of a <stack>, null is returned
-     * instead and popup code must handle this case.
-     */
-    get popupAnchor() {
-      let stack = this.closest("stack");
-      if (!stack) {
-        return null;
-      }
-
-      let popupAnchor = stack.querySelector(".popup-anchor");
-      if (popupAnchor) {
-        return popupAnchor;
-      }
-
-      // Create an anchor for the popup
-      popupAnchor = document.createElement("div");
-      popupAnchor.className = "popup-anchor";
-      popupAnchor.hidden = true;
-      stack.appendChild(popupAnchor);
-      return popupAnchor;
-    }
-
     set suspendMediaWhenInactive(val) {
       this.browsingContext.suspendMediaWhenInactive = val;
     }
@@ -1299,7 +1275,9 @@
         return { autoscrollEnabled: false, usingApz: false };
       }
 
-      const POPUP_SIZE = 32;
+      // The popup size is 32px for the circle plus space for a 4px box-shadow
+      // on each side.
+      const POPUP_SIZE = 40;
       if (!this._autoScrollPopup) {
         this._autoScrollPopup = this._getAndMaybeCreateAutoScrollPopup();
         document.documentElement.appendChild(this._autoScrollPopup);
@@ -1705,8 +1683,43 @@
       };
     }
 
-    async drawSnapshot(x, y, w, h, scale, backgroundColor) {
-      let rect = new DOMRect(x, y, w, h);
+    /**
+     * Gets a screenshot of this browser as an ImageBitmap.
+     *
+     * @param {Number} x
+     *   The x coordinate of the region from the underlying document to capture
+     *   as a screenshot. This is ignored if fullViewport is true.
+     * @param {Number} y
+     *   The y coordinate of the region from the underlying document to capture
+     *   as a screenshot. This is ignored if fullViewport is true.
+     * @param {Number} w
+     *   The width of the region from the underlying document to capture as a
+     *   screenshot. This is ignored if fullViewport is true.
+     * @param {Number} h
+     *   The height of the region from the underlying document to capture as a
+     *   screenshot. This is ignored if fullViewport is true.
+     * @param {Number} scale
+     *   The scale factor for the captured screenshot. See the documentation for
+     *   WindowGlobalParent.drawSnapshot for more detail.
+     * @param {String} backgroundColor
+     *   The default background color for the captured screenshot. See the
+     *   documentation for WindowGlobalParent.drawSnapshot for more detail.
+     * @param {boolean|undefined} fullViewport
+     *   True if the viewport rect should be captured. If this is true, the
+     *   x, y, w and h parameters are ignored. Defaults to false.
+     * @returns {Promise}
+     * @resolves {ImageBitmap}
+     */
+    async drawSnapshot(
+      x,
+      y,
+      w,
+      h,
+      scale,
+      backgroundColor,
+      fullViewport = false
+    ) {
+      let rect = fullViewport ? null : new DOMRect(x, y, w, h);
       try {
         return this.browsingContext.currentWindowGlobal.drawSnapshot(
           rect,
@@ -1825,25 +1838,6 @@
         this._devicePermissionOrigins.set(key, origins);
       }
       return origins;
-    }
-
-    get processSwitchBehavior() {
-      // If a `remotenessChangeHandler` is attached to this browser, it supports
-      // having its toplevel process switched dynamically in response to
-      // navigations.
-      if (this.hasAttribute("maychangeremoteness")) {
-        return Ci.nsIBrowser.PROCESS_BEHAVIOR_STANDARD;
-      }
-
-      // For backwards compatibility, we need to mark remote, but
-      // non-`allowremote`, frames as `PROCESS_BEHAVIOR_SUBFRAME_ONLY`, as some
-      // tests rely on it.
-      // FIXME: Remove this?
-      if (this.isRemoteBrowser) {
-        return Ci.nsIBrowser.PROCESS_BEHAVIOR_SUBFRAME_ONLY;
-      }
-      // Otherwise, don't allow gecko-initiated toplevel process switches.
-      return Ci.nsIBrowser.PROCESS_BEHAVIOR_DISABLED;
     }
 
     // This method is replaced by frontend code in order to delay performing the

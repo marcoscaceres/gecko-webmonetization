@@ -1492,7 +1492,7 @@ void nsGlobalWindowOuter::ShutDown() {
 void nsGlobalWindowOuter::DropOuterWindowDocs() {
   MOZ_ASSERT_IF(mDoc, !mDoc->EventHandlingSuppressed());
   mDoc = nullptr;
-  mSuspendedDoc = nullptr;
+  mSuspendedDocs.Clear();
 }
 
 void nsGlobalWindowOuter::CleanUp() {
@@ -1597,7 +1597,7 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INTERNAL(nsGlobalWindowOuter)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mArguments)
 
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mLocalStorage)
-  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSuspendedDoc)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSuspendedDocs)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mDocumentPrincipal)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mDocumentStoragePrincipal)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mDocumentPartitionedPrincipal)
@@ -1629,7 +1629,7 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(nsGlobalWindowOuter)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mArguments)
 
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mLocalStorage)
-  NS_IMPL_CYCLE_COLLECTION_UNLINK(mSuspendedDoc)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mSuspendedDocs)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mDocumentPrincipal)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mDocumentStoragePrincipal)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mDocumentPartitionedPrincipal)
@@ -1687,6 +1687,20 @@ bool nsGlobalWindowOuter::IsBlackForCC(bool aTracingNeeded) {
 //*****************************************************************************
 // nsGlobalWindowOuter::nsIScriptGlobalObject
 //*****************************************************************************
+
+bool nsGlobalWindowOuter::ShouldResistFingerprinting() const {
+  if (mDoc) {
+    return nsContentUtils::ShouldResistFingerprinting(mDoc);
+  }
+  return nsIScriptGlobalObject::ShouldResistFingerprinting();
+}
+
+uint32_t nsGlobalWindowOuter::GetPrincipalHashValue() const {
+  if (mDoc) {
+    return mDoc->NodePrincipal()->GetHashValue();
+  }
+  return 0;
+}
 
 nsresult nsGlobalWindowOuter::EnsureScriptEnvironment() {
   if (GetWrapperPreserveColor()) {
@@ -1890,7 +1904,14 @@ bool nsGlobalWindowOuter::ComputeIsSecureContext(Document* aDocument,
   }
 
   if (principal->GetIsNullPrincipal()) {
-    nsCOMPtr<nsIURI> uri = aDocument->GetOriginalURI();
+    // If the NullPrincipal has a valid precursor URI we want to use it to
+    // construct the principal otherwise we fall back to the original document
+    // URI.
+    nsCOMPtr<nsIPrincipal> precursorPrin = principal->GetPrecursorPrincipal();
+    nsCOMPtr<nsIURI> uri = precursorPrin ? precursorPrin->GetURI() : nullptr;
+    if (!uri) {
+      uri = aDocument->GetOriginalURI();
+    }
     // IsOriginPotentiallyTrustworthy doesn't care about origin attributes so
     // it doesn't actually matter what we use here, but reusing the document
     // principal's attributes is convenient.
@@ -2150,9 +2171,9 @@ nsresult nsGlobalWindowOuter::SetNewDocument(Document* aDocument,
   mDelayedCloseForPrinting = false;
   mDelayedPrintUntilAfterLoad = false;
 
-  // Take this opportunity to clear mSuspendedDoc. Our old inner window is now
+  // Take this opportunity to clear mSuspendedDocs. Our old inner window is now
   // responsible for unsuspending it.
-  mSuspendedDoc = nullptr;
+  mSuspendedDocs.Clear();
 
 #ifdef DEBUG
   mLastOpenedURI = aDocument->GetDocumentURI();
@@ -3029,37 +3050,29 @@ nsScreen* nsGlobalWindowOuter::GetScreen() {
   FORWARD_TO_INNER(GetScreen, (IgnoreErrors()), nullptr);
 }
 
-void nsPIDOMWindowOuter::MaybeActiveMediaComponents() {
-  if (mMediaSuspend != nsISuspendedTypes::SUSPENDED_BLOCK) {
+void nsPIDOMWindowOuter::ActivateMediaComponents() {
+  if (!ShouldDelayMediaFromStart()) {
     return;
   }
-
   MOZ_LOG(AudioChannelService::GetAudioChannelLog(), LogLevel::Debug,
-          ("nsPIDOMWindowOuter, MaybeActiveMediaComponents, "
-           "resume the window from blocked, this = %p\n",
+          ("nsPIDOMWindowOuter, ActiveMediaComponents, "
+           "no longer to delay media from start, this = %p\n",
            this));
-
-  SetMediaSuspend(nsISuspendedTypes::NONE_SUSPENDED);
+  if (BrowsingContext* bc = GetBrowsingContext()) {
+    Unused << bc->Top()->SetShouldDelayMediaFromStart(false);
+  }
+  NotifyResumingDelayedMedia();
 }
 
-SuspendTypes nsPIDOMWindowOuter::GetMediaSuspend() const {
-  return mMediaSuspend;
+bool nsPIDOMWindowOuter::ShouldDelayMediaFromStart() const {
+  BrowsingContext* bc = GetBrowsingContext();
+  return bc && bc->Top()->GetShouldDelayMediaFromStart();
 }
 
-void nsPIDOMWindowOuter::SetMediaSuspend(SuspendTypes aSuspend) {
-  MaybeNotifyMediaResumedFromBlock(aSuspend);
-  mMediaSuspend = aSuspend;
-  RefreshMediaElementsSuspend(aSuspend);
-}
-
-void nsPIDOMWindowOuter::MaybeNotifyMediaResumedFromBlock(
-    SuspendTypes aSuspend) {
-  if (mMediaSuspend == nsISuspendedTypes::SUSPENDED_BLOCK &&
-      aSuspend == nsISuspendedTypes::NONE_SUSPENDED) {
-    RefPtr<AudioChannelService> service = AudioChannelService::GetOrCreate();
-    if (service) {
-      service->NotifyMediaResumedFromBlock(this);
-    }
+void nsPIDOMWindowOuter::NotifyResumingDelayedMedia() {
+  RefPtr<AudioChannelService> service = AudioChannelService::GetOrCreate();
+  if (service) {
+    service->NotifyResumingDelayedMedia(this);
   }
 }
 
@@ -3073,13 +3086,6 @@ void nsPIDOMWindowOuter::RefreshMediaElementsVolume() {
   if (service) {
     // TODO: RefreshAgentsVolume can probably be simplified further.
     service->RefreshAgentsVolume(this, 1.0f, GetAudioMuted());
-  }
-}
-
-void nsPIDOMWindowOuter::RefreshMediaElementsSuspend(SuspendTypes aSuspend) {
-  RefPtr<AudioChannelService> service = AudioChannelService::GetOrCreate();
-  if (service) {
-    service->RefreshAgentsSuspend(this, aSuspend);
   }
 }
 
@@ -5195,9 +5201,8 @@ void nsGlobalWindowOuter::StopOuter(ErrorResult& aError) {
 
 void nsGlobalWindowOuter::PrintOuter(ErrorResult& aError) {
   if (!AreDialogsEnabled()) {
-    // We probably want to keep throwing here; silently doing nothing is a bit
-    // weird given the typical use cases of print().
-    return aError.ThrowNotSupportedError("Dialogs not enabled for this window");
+    // Per spec, silently return. https://github.com/whatwg/html/commit/21a1de1
+    return;
   }
 
   if (!StaticPrefs::print_tab_modal_enabled() && ShouldPromptToBlockDialogs() &&
@@ -5431,7 +5436,8 @@ Nullable<WindowProxyHolder> nsGlobalWindowOuter::Print(
   }();
 
   if (shouldBlock) {
-    SpinEventLoopUntil([&] { return bc->IsDiscarded(); });
+    SpinEventLoopUntil("nsGlobalWindowOuter::Print"_ns,
+                       [&] { return bc->IsDiscarded(); });
   }
 
   return WindowProxyHolder(std::move(bc));
@@ -6349,6 +6355,44 @@ void nsGlobalWindowOuter::ReallyCloseWindow() {
   CleanUp();
 }
 
+void nsGlobalWindowOuter::SuppressEventHandling() {
+  if (mSuppressEventHandlingDepth == 0) {
+    if (BrowsingContext* bc = GetBrowsingContext()) {
+      bc->PreOrderWalk([&](BrowsingContext* aBC) {
+        if (nsCOMPtr<nsPIDOMWindowOuter> win = aBC->GetDOMWindow()) {
+          if (RefPtr<Document> doc = win->GetExtantDoc()) {
+            mSuspendedDocs.AppendElement(doc);
+            // Note: Document::SuppressEventHandling will also automatically
+            // suppress event handling for any in-process sub-documents.
+            // However, since we need to deal with cases where remote
+            // BrowsingContexts may be interleaved with in-process ones, we
+            // still need to walk the entire tree ourselves. This may be
+            // slightly redundant in some cases, but since event handling
+            // suppressions maintain a count of current blockers, it does not
+            // cause any problems.
+            doc->SuppressEventHandling();
+          }
+        }
+      });
+    }
+  }
+  mSuppressEventHandlingDepth++;
+}
+
+void nsGlobalWindowOuter::UnsuppressEventHandling() {
+  MOZ_ASSERT(mSuppressEventHandlingDepth != 0);
+  mSuppressEventHandlingDepth--;
+
+  if (mSuppressEventHandlingDepth == 0 && mSuspendedDocs.Length()) {
+    RefPtr<Document> currentDoc = GetExtantDoc();
+    bool fireEvent = currentDoc == mSuspendedDocs[0];
+    nsTArray<RefPtr<Document>> suspendedDocs = std::move(mSuspendedDocs);
+    for (const auto& doc : suspendedDocs) {
+      doc->UnsuppressEventHandlingAndFireEvents(fireEvent);
+    }
+  }
+}
+
 nsGlobalWindowOuter* nsGlobalWindowOuter::EnterModalState() {
   // GetInProcessScriptableTop, not GetInProcessTop, so that EnterModalState
   // works properly with <iframe mozbrowser>.
@@ -6399,12 +6443,7 @@ nsGlobalWindowOuter* nsGlobalWindowOuter::EnterModalState() {
   }
 
   if (topWin->mModalStateDepth == 0) {
-    NS_ASSERTION(!topWin->mSuspendedDoc, "Shouldn't have mSuspendedDoc here!");
-
-    topWin->mSuspendedDoc = topDoc;
-    if (topDoc) {
-      topDoc->SuppressEventHandling();
-    }
+    topWin->SuppressEventHandling();
 
     if (nsGlobalWindowInner* inner = topWin->GetCurrentInnerWindowInternal()) {
       inner->Suspend();
@@ -6438,12 +6477,7 @@ void nsGlobalWindowOuter::LeaveModalState() {
       inner->Resume();
     }
 
-    if (mSuspendedDoc) {
-      nsCOMPtr<Document> currentDoc = GetExtantDoc();
-      mSuspendedDoc->UnsuppressEventHandlingAndFireEvents(currentDoc ==
-                                                          mSuspendedDoc);
-      mSuspendedDoc = nullptr;
-    }
+    UnsuppressEventHandling();
   }
 
   // Remember the time of the last dialog quit.
@@ -6721,7 +6755,7 @@ void nsGlobalWindowOuter::SetIsBackground(bool aIsBackground) {
   nsGlobalWindowInner* inner = GetCurrentInnerWindowInternal();
 
   if (inner && changed) {
-    inner->mTimeoutManager->UpdateBackgroundState();
+    inner->UpdateBackgroundState();
   }
 
   if (aIsBackground) {
@@ -7704,10 +7738,8 @@ mozilla::dom::DocGroup* nsPIDOMWindowOuter::GetDocGroup() const {
 nsPIDOMWindowOuter::nsPIDOMWindowOuter(uint64_t aWindowID)
     : mFrameElement(nullptr),
       mModalStateDepth(0),
+      mSuppressEventHandlingDepth(0),
       mIsBackground(false),
-      mMediaSuspend(StaticPrefs::media_block_autoplay_until_in_foreground()
-                        ? nsISuspendedTypes::SUSPENDED_BLOCK
-                        : nsISuspendedTypes::NONE_SUSPENDED),
       mDesktopModeViewport(false),
       mIsRootOuterWindow(false),
       mInnerWindow(nullptr),

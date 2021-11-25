@@ -360,8 +360,7 @@ static NS_tchar* mstrtok(const NS_tchar* delims, NS_tchar** str) {
   return ret;
 }
 
-#if defined(TEST_UPDATER) || defined(MOZ_MAINTENANCE_SERVICE) || \
-    defined(XP_MACOSX)
+#if defined(TEST_UPDATER) || defined(XP_WIN) || defined(XP_MACOSX)
 static bool EnvHasValue(const char* name) {
   const char* val = getenv(name);
   return (val && *val);
@@ -2243,7 +2242,7 @@ static bool IsUpdateStatusPendingService() {
 }
 #endif
 
-#if defined(XP_WIN) && defined(MOZ_MAINTENANCE_SERVICE)
+#if defined(XP_WIN)
 /*
  * Reads the secure update status file and sets isSucceeded to true if the
  * status is set to succeeded.
@@ -2777,14 +2776,6 @@ int NS_main(int argc, NS_tchar** argv) {
     }
 #endif
 
-#ifdef XP_MACOSX
-    if (!isElevated) {
-#endif
-      InitProgressUI(&argc, &argv);
-#ifdef XP_MACOSX
-    }
-#endif
-
     // To process an update the updater command line must at a minimum have the
     // directory path containing the updater.mar file to process as the first
     // argument, the install directory as the second argument, and the directory
@@ -3013,6 +3004,14 @@ int NS_main(int argc, NS_tchar** argv) {
     }
 
   }  // if (!isDMGInstall)
+
+  if (!sUpdateSilently && !isDMGInstall
+#ifdef XP_MACOSX
+      && !isElevated
+#endif
+  ) {
+    InitProgressUI(&argc, &argv);
+  }
 
 #ifdef XP_MACOSX
   if (!isElevated && (!IsRecursivelyWritable(argv[2]) || isDMGInstall)) {

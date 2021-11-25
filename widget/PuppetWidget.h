@@ -117,9 +117,6 @@ class PuppetWidget : public nsBaseWidget,
 
   virtual void SetFocus(Raise, mozilla::dom::CallerType aCallerType) override;
 
-  virtual nsresult ConfigureChildren(
-      const nsTArray<Configuration>& aConfigurations) override;
-
   virtual void Invalidate(const LayoutDeviceIntRect& aRect) override;
 
   // PuppetWidgets don't have native data, as they're purely nonnative.
@@ -186,7 +183,7 @@ class PuppetWidget : public nsBaseWidget,
   bool CreateRemoteLayerManager(
       const std::function<bool(WebRenderLayerManager*)>& aInitializeFunc);
 
-  bool HasLayerManager() { return !!mWindowRenderer; }
+  bool HasWindowRenderer() { return !!mWindowRenderer; }
 
   virtual void SetInputContext(const InputContext& aContext,
                                const InputContextAction& aAction) override;

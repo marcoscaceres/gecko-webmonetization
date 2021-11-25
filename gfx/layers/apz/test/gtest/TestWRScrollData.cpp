@@ -13,6 +13,7 @@
 #include "mozilla/layers/LayersTypes.h"
 #include "mozilla/layers/ScrollableLayerGuid.h"
 #include "mozilla/layers/WebRenderScrollDataWrapper.h"
+#include "mozilla/UniquePtr.h"
 #include "apz/src/APZCTreeManager.h"
 
 using mozilla::layers::APZCTreeManager;
@@ -62,8 +63,6 @@ TestWRScrollData TestWRScrollData::Create(const char* aTreeShape,
     if (aVisibleRegions) {
       layer.SetVisibleRegion(LayerIntRegion::FromUnknownRegion(
           aVisibleRegions[entry.mLayerIndex]));
-      APZTestAccess::SetEventRegions(
-          layer, EventRegions(aVisibleRegions[entry.mLayerIndex]));
     }
     if (aTransforms) {
       layer.SetTransform(aTransforms[entry.mLayerIndex]);
@@ -162,8 +161,7 @@ class WebRenderScrollDataWrapperTester : public ::testing::Test {
     // This ensures ScrollMetadata::sNullMetadata is initialized.
     gfxPlatform::GetPlatform();
 
-    mManager = new APZCTreeManager(LayersId{0},
-                                   APZCTreeManager::HitTestKind::Internal);
+    mManager = new APZCTreeManager(LayersId{0});
     mUpdater = new APZUpdater(mManager, false);
   }
 

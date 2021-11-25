@@ -42,6 +42,7 @@ browser/components/enterprisepolicies/schemas/schema.jsm
 browser/components/translation/cld2/
 # generated or library files in pocket
 browser/components/pocket/content/panels/js/tmpl.js
+browser/components/pocket/content/panels/js/main.bundle.js
 
 # Ignore newtab files
 browser/components/newtab/aboutwelcome/content/aboutwelcome.bundle.js
@@ -76,6 +77,8 @@ devtools/client/inspector/markup/test/events_bundle.js
 devtools/client/netmonitor/test/xhr_bundle.js
 devtools/client/webconsole/test/browser/code_bundle_nosource.js
 devtools/client/webconsole/test/browser/code_bundle_invalidmap.js
+devtools/client/webconsole/test/browser/test-autocomplete-mapped.js
+devtools/client/webconsole/test/browser/test-autocomplete-mapped.src.js
 devtools/server/tests/xpcshell/setBreakpoint*
 devtools/server/tests/xpcshell/sourcemapped.js
 
@@ -160,6 +163,9 @@ remote/cdp/Protocol.jsm
 remote/cdp/test/browser/chrome-remote-interface.js
 remote/marionette/atom.js
 
+# This file explicitly has a syntax error and cannot be parsed by eslint.
+remote/shared/messagehandler/test/browser/resources/modules/root/invalid.jsm
+
 # services/ exclusions
 
 # Third party services
@@ -214,6 +220,9 @@ tools/update-packaging/**/*refs.js
 
 # Ignore backgroundtasks preferences files.
 toolkit/components/backgroundtasks/defaults
+
+# Uses preprocessing
+toolkit/components/crashes/CrashManager.jsm
 
 # Ignore pre-generated webpack and typescript transpiled files for translations
 browser/extensions/translations/extension/

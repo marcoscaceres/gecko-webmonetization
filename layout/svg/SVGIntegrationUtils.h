@@ -38,10 +38,6 @@ namespace gfx {
 class DrawTarget;
 }  // namespace gfx
 
-namespace layers {
-class LayerManager;
-}  // namespace layers
-
 /**
  * Integration of SVG effects (clipPath clipping, masking and filters) into
  * regular display list based painting and hit-testing.
@@ -154,7 +150,6 @@ class SVGIntegrationUtils final {
     nsRect dirtyRect;
     nsRect borderArea;
     nsDisplayListBuilder* builder;
-    layers::LayerManager* layerManager;
     bool handleOpacity;  // If true, PaintMaskAndClipPath/ PaintFilter should
                          // apply css opacity.
     Maybe<gfx::Rect> maskRect;
@@ -164,7 +159,6 @@ class SVGIntegrationUtils final {
                                const nsRect& aDirtyRect,
                                const nsRect& aBorderArea,
                                nsDisplayListBuilder* aBuilder,
-                               layers::LayerManager* aLayerManager,
                                bool aHandleOpacity,
                                imgDrawingParams& aImgParams)
         : ctx(aCtx),
@@ -172,7 +166,6 @@ class SVGIntegrationUtils final {
           dirtyRect(aDirtyRect),
           borderArea(aBorderArea),
           builder(aBuilder),
-          layerManager(aLayerManager),
           handleOpacity(aHandleOpacity),
           imgParams(aImgParams) {}
   };
@@ -192,11 +185,6 @@ class SVGIntegrationUtils final {
    */
   static bool PaintMask(const PaintFramesParams& aParams,
                         bool& aOutIsMaskComplete);
-
-  /**
-   * Return true if all the mask resource of aFrame are ready.
-   */
-  static bool IsMaskResourceReady(nsIFrame* aFrame);
 
   /**
    * Paint the frame contents.
@@ -234,7 +222,8 @@ class SVGIntegrationUtils final {
   static bool BuildWebRenderFilters(nsIFrame* aFilteredFrame,
                                     Span<const StyleFilter> aFilters,
                                     WrFiltersHolder& aWrFilters,
-                                    Maybe<nsRect>& aPostFilterClip);
+                                    Maybe<nsRect>& aPostFilterClip,
+                                    bool& aInitialized);
 
   /**
    * Check if the filters present on |aFrame| are supported by WebRender.

@@ -13,13 +13,14 @@ const MAX_ORDINAL = 99;
 const SPLITCONSOLE_ENABLED_PREF = "devtools.toolbox.splitconsoleEnabled";
 const SPLITCONSOLE_HEIGHT_PREF = "devtools.toolbox.splitconsoleHeight";
 const DISABLE_AUTOHIDE_PREF = "ui.popup.disable_autohide";
+const FORCE_THEME_NOTIFICATION_PREF = "devtools.theme.force-auto-theme-info";
+const SHOW_THEME_NOTIFICATION_PREF = "devtools.theme.show-auto-theme-info";
 const HOST_HISTOGRAM = "DEVTOOLS_TOOLBOX_HOST";
 const CURRENT_THEME_SCALAR = "devtools.current_theme";
 const HTML_NS = "http://www.w3.org/1999/xhtml";
 const REGEX_4XX_5XX = /^[4,5]\d\d$/;
 
 var { Ci, Cc } = require("chrome");
-var promise = require("promise");
 const { debounce } = require("devtools/shared/debounce");
 const { throttle } = require("devtools/shared/throttle");
 const { safeAsyncMethod } = require("devtools/shared/async-utils");
@@ -39,12 +40,13 @@ var Startup = Cc["@mozilla.org/devtools/startup-clh;1"].getService(
 const { createCommandsDictionary } = require("devtools/shared/commands/index");
 
 const { BrowserLoader } = ChromeUtils.import(
-  "resource://devtools/client/shared/browser-loader.js"
+  "resource://devtools/shared/loader/browser-loader.js"
 );
 
-const { LocalizationHelper } = require("devtools/shared/l10n");
-const L10N = new LocalizationHelper(
-  "devtools/client/locales/toolbox.properties"
+const { MultiLocalizationHelper } = require("devtools/shared/l10n");
+const L10N = new MultiLocalizationHelper(
+  "devtools/client/locales/toolbox.properties",
+  "chrome://branding/locale/brand.properties"
 );
 
 loader.lazyRequireGetter(
@@ -317,11 +319,12 @@ function Toolbox(
   this.toggleSplitConsole = this.toggleSplitConsole.bind(this);
   this.toggleOptions = this.toggleOptions.bind(this);
   this.togglePaintFlashing = this.togglePaintFlashing.bind(this);
-  this.toggleDragging = this.toggleDragging.bind(this);
   this._onTargetAvailable = this._onTargetAvailable.bind(this);
   this._onTargetDestroyed = this._onTargetDestroyed.bind(this);
+  this._onTargetSelected = this._onTargetSelected.bind(this);
   this._onResourceAvailable = this._onResourceAvailable.bind(this);
   this._onResourceUpdated = this._onResourceUpdated.bind(this);
+  this._onToolSelectedStopPicker = this._onToolSelectedStopPicker.bind(this);
 
   this._throttledSetToolboxButtons = throttle(
     () => this.component.setToolboxButtons(this.toolbarButtons),
@@ -521,10 +524,6 @@ Toolbox.prototype = {
     return this._toolPanels.get(this.currentToolId);
   },
 
-  toggleDragging: function() {
-    this.doc.querySelector("window").classList.toggle("dragging");
-  },
-
   /**
    * Get the current top level target the toolbox is debugging.
    *
@@ -646,35 +645,43 @@ Toolbox.prototype = {
    */
   _onThreadStateChanged(resource) {
     if (resource.state == "paused") {
-      const reason = resource.why.type;
-      // Suppress interrupted events by default because the thread is
-      // paused/resumed a lot for various actions.
-      if (reason === "interrupted") {
-        return;
-      }
-
-      this.highlightTool("jsdebugger");
-
-      if (
-        reason === "debuggerStatement" ||
-        reason === "mutationBreakpoint" ||
-        reason === "eventBreakpoint" ||
-        reason === "breakpoint" ||
-        reason === "exception" ||
-        reason === "resumeLimit" ||
-        reason === "XHR"
-      ) {
-        this.raise();
-        this.selectTool("jsdebugger", reason);
-        // Each Target/Thread can be paused only once at a time,
-        // so, for each pause, we should have a related resumed event.
-        // But we may have multiple targets paused at the same time
-        this._pausedTargets++;
-        this.emit("toolbox-paused");
-      }
+      this._pauseToolbox(resource.why.type);
     } else if (resource.state == "resumed") {
-      this._pausedTargets--;
+      this._resumeToolbox();
+    }
+  },
 
+  _pauseToolbox(reason) {
+    // Suppress interrupted events by default because the thread is
+    // paused/resumed a lot for various actions.
+    if (reason === "interrupted") {
+      return;
+    }
+
+    this.highlightTool("jsdebugger");
+
+    if (
+      reason === "debuggerStatement" ||
+      reason === "mutationBreakpoint" ||
+      reason === "eventBreakpoint" ||
+      reason === "breakpoint" ||
+      reason === "exception" ||
+      reason === "resumeLimit" ||
+      reason === "XHR"
+    ) {
+      this.raise();
+      this.selectTool("jsdebugger", reason);
+      // Each Target/Thread can be paused only once at a time,
+      // so, for each pause, we should have a related resumed event.
+      // But we may have multiple targets paused at the same time
+      this._pausedTargets++;
+      this.emit("toolbox-paused");
+    }
+  },
+
+  _resumeToolbox() {
+    if (this.isHighlighted("jsdebugger")) {
+      this._pausedTargets--;
       if (this._pausedTargets == 0) {
         this.emit("toolbox-resumed");
         this.unhighlightTool("jsdebugger");
@@ -695,8 +702,11 @@ Toolbox.prototype = {
 
       // Attach to a new top-level target.
       // For now, register these event listeners only on the top level target
-      targetFront.on("frame-update", this._updateFrames);
-      targetFront.on("inspect-object", this._onInspectObject);
+      if (!targetFront.targetForm.ignoreSubFrames) {
+        targetFront.on("frame-update", this._updateFrames);
+      }
+      const consoleFront = await targetFront.getFront("console");
+      consoleFront.on("inspectObject", this._onInspectObject);
     }
 
     // Walker listeners allow to monitor DOM Mutation breakpoint updates.
@@ -713,18 +723,65 @@ Toolbox.prototype = {
       // These methods expect the target to be attached, which is guaranteed by the time
       // _onTargetAvailable is called by the targetCommand.
       await this._listFrames();
+      // The target may have been destroyed while calling _listFrames if we navigate quickly
+      if (targetFront.isDestroyed()) {
+        return;
+      }
       await this.initPerformance();
     }
+
+    if (targetFront.targetForm.ignoreSubFrames) {
+      this._updateFrames({
+        frames: [
+          {
+            id: targetFront.actorID,
+            targetFront,
+            url: targetFront.url,
+            title: targetFront.title,
+            isTopLevel: targetFront.isTopLevel,
+          },
+        ],
+      });
+    }
+  },
+
+  async _onTargetSelected({ targetFront }) {
+    this._updateFrames({ selected: targetFront.actorID });
+    this.selectTarget(targetFront.actorID);
   },
 
   _onTargetDestroyed({ targetFront }) {
     if (targetFront.isTopLevel) {
-      this.target.off("inspect-object", this._onInspectObject);
-      this.target.off("frame-update", this._updateFrames);
+      const consoleFront = targetFront.getCachedFront("console");
+      // If the target has already been destroyed, its console front will
+      // also already be destroyed and so we won't be able to retrieve it.
+      // Nor is it important to clear its listener as fronts automatically clears
+      // all their listeners on destroy.
+      if (consoleFront) {
+        consoleFront.off("inspectObject", this._onInspectObject);
+      }
+      targetFront.off("frame-update", this._updateFrames);
+      // When navigating the old target can get destroyed before the thread state changed
+      // event for the target is received, so it gets lost. This currently happens with bf-cache
+      // navigations when paused, so lets make sure we resumed if not.
+      this._resumeToolbox();
+    } else if (this.selection) {
+      this.selection.onTargetDestroyed(targetFront);
     }
 
     if (this.hostType !== Toolbox.HostType.PAGE) {
       this.store.dispatch(unregisterTarget(targetFront));
+    }
+
+    if (targetFront.targetForm.ignoreSubFrames) {
+      this._updateFrames({
+        frames: [
+          {
+            id: targetFront.actorID,
+            destroy: true,
+          },
+        ],
+      });
     }
   },
 
@@ -735,6 +792,58 @@ Toolbox.prototype = {
       "wrong-resume-order",
       "",
       box.PRIORITY_WARNING_HIGH
+    );
+  },
+
+  _showAutoThemeNotification() {
+    // Skip the notification when:
+    if (
+      // - Firefox is not using a dark color scheme.
+      !Services.appinfo.chromeColorSchemeIsDark &&
+      // - The test preference to bypasse the dark-color-scheme check is false.
+      !Services.prefs.getBoolPref(FORCE_THEME_NOTIFICATION_PREF, false)
+    ) {
+      return;
+    }
+
+    // Only show the notification for users with the auto theme.
+    if (Services.prefs.getCharPref("devtools.theme") !== "auto") {
+      return;
+    }
+
+    // Do not show the notification again if it was previously dismissed.
+    if (!Services.prefs.getBoolPref(SHOW_THEME_NOTIFICATION_PREF, false)) {
+      return;
+    }
+
+    // Show the notification.
+    const box = this.getNotificationBox();
+    const brandShorterName = Services.strings
+      .createBundle("chrome://branding/locale/brand.properties")
+      .GetStringFromName("brandShorterName");
+
+    box.appendNotification(
+      L10N.getFormatStr("toolbox.autoThemeNotification", brandShorterName),
+      "auto-theme-notification",
+      "",
+      box.PRIORITY_NEW,
+      [
+        {
+          label: L10N.getStr("toolbox.autoThemeNotification.settingsButton"),
+          callback: async () => {
+            const { panelDoc } = await this.selectTool("options");
+            panelDoc.querySelector("#devtools-theme-box").scrollIntoView();
+            // Emit a test event to avoid unhandled promise rejections in tests.
+            this.emitForTests("test-theme-settings-opened");
+          },
+        },
+      ],
+      evt => {
+        if (evt === "removed") {
+          // Flip the preference when the notification is dismissed.
+          Services.prefs.setBoolPref(SHOW_THEME_NOTIFICATION_PREF, false);
+        }
+      }
     );
   },
 
@@ -791,11 +900,12 @@ Toolbox.prototype = {
       // and we are registering the first target listener, which means
       // Toolbox._onTargetAvailable will be called first, before any other
       // onTargetAvailable listener that might be registered on targetCommand.
-      await this.commands.targetCommand.watchTargets(
-        this.commands.targetCommand.ALL_TYPES,
-        this._onTargetAvailable,
-        this._onTargetDestroyed
-      );
+      await this.commands.targetCommand.watchTargets({
+        types: this.commands.targetCommand.ALL_TYPES,
+        onAvailable: this._onTargetAvailable,
+        onSelected: this._onTargetSelected,
+        onDestroyed: this._onTargetDestroyed,
+      });
 
       const onResourcesWatched = this.resourceCommand.watchResources(
         [
@@ -844,8 +954,12 @@ Toolbox.prototype = {
       this._mountReactComponent();
       this._buildDockOptions();
       this._buildTabs();
+
+      // Forward configuration flags to the DevTools server.
       this._applyCacheSettings();
       this._applyServiceWorkersTestingSettings();
+      this._applyNewPerfPanelEnabled();
+
       this._addWindowListeners();
       this._addChromeEventHandlerEvents();
 
@@ -904,7 +1018,7 @@ Toolbox.prototype = {
 
       // Wait until the original tool is selected so that the split
       // console input will receive focus.
-      let splitConsolePromise = promise.resolve();
+      let splitConsolePromise = Promise.resolve();
       if (Services.prefs.getBoolPref(SPLITCONSOLE_ENABLED_PREF)) {
         splitConsolePromise = this.openSplitConsole();
         this.telemetry.addEventProperty(
@@ -926,7 +1040,7 @@ Toolbox.prototype = {
         );
       }
 
-      await promise.all([
+      await Promise.all([
         splitConsolePromise,
         framesPromise,
         onResourcesWatched,
@@ -955,6 +1069,8 @@ Toolbox.prototype = {
       }
 
       await this.initHarAutomation();
+
+      this._showAutoThemeNotification();
 
       this.emit("ready");
       this._resolveIsOpen();
@@ -1956,7 +2072,7 @@ Toolbox.prototype = {
       if (currentPanel.cancelPicker) {
         currentPanel.cancelPicker();
       } else {
-        this.nodePicker.cancel();
+        this.nodePicker.stop({ canceled: true });
       }
       // Stop the console from toggling.
       event.stopImmediatePropagation();
@@ -1972,7 +2088,7 @@ Toolbox.prototype = {
     await this.selectTool("inspector", "inspect_dom");
     // turn off color picker when node picker is starting
     this.getPanel("inspector").hideEyeDropper();
-    this.on("select", this.nodePicker.stop);
+    this.on("select", this._onToolSelectedStopPicker);
   },
 
   _onPickerStarted: async function() {
@@ -1984,9 +2100,13 @@ Toolbox.prototype = {
       return;
     }
     this.tellRDMAboutPickerState(false, PICKER_TYPES.ELEMENT);
-    this.off("select", this.nodePicker.stop);
+    this.off("select", this._onToolSelectedStopPicker);
     this.doc.removeEventListener("keypress", this._onPickerKeypress, true);
     this.pickerButton.isChecked = false;
+  },
+
+  _onToolSelectedStopPicker: function() {
+    this.nodePicker.stop({ canceled: true });
   },
 
   /**
@@ -2097,6 +2217,23 @@ Toolbox.prototype = {
   },
 
   /**
+   * When the new performance panel is enabled, the profiler and recorder will
+   * not react to console.profile calls. The server should instead log a message
+   * to warn the user that the API has no effect.
+   *
+   * Forward the value of the new perf panel preference so that the server can
+   * decide to warn or not.
+   */
+  _applyNewPerfPanelEnabled: function() {
+    this.commands.targetConfigurationCommand.updateConfiguration({
+      isNewPerfPanelEnabled: Services.prefs.getBoolPref(
+        "devtools.performance.new-panel-enabled",
+        false
+      ),
+    });
+  },
+
+  /**
    * Update the visibility of the buttons.
    */
   updateToolboxButtonsVisibility() {
@@ -2197,7 +2334,7 @@ Toolbox.prototype = {
     this.frameButton.isVisible = isVisible;
 
     if (isVisible) {
-      this.frameButton.isChecked = selectedFrame.parentID != null;
+      this.frameButton.isChecked = !selectedFrame.isTopLevel;
     }
   },
 
@@ -2372,6 +2509,10 @@ Toolbox.prototype = {
     }
 
     const inspector = this.getPanel("inspector");
+    if (!inspector) {
+      return;
+    }
+
     inspector.addExtensionSidebar(id, options);
   },
 
@@ -2520,7 +2661,7 @@ Toolbox.prototype = {
         }
 
         // Wait till the panel is fully ready and fire 'ready' events.
-        promise.resolve(built).then(panel => {
+        Promise.resolve(built).then(panel => {
           this._toolPanels.set(id, panel);
 
           // Make sure to decorate panel object with event API also in case
@@ -2661,12 +2802,12 @@ Toolbox.prototype = {
         this.focusTool(id);
 
         // Return the existing panel in order to have a consistent return value.
-        return promise.resolve(panel);
+        return Promise.resolve(panel);
       }
       // Otherwise, if there is no panel instance, it is still loading,
       // so we are racing another call to selectTool with the same id.
       return this.once("select").then(() =>
-        promise.resolve(this._toolPanels.get(id))
+        Promise.resolve(this._toolPanels.get(id))
       );
     }
 
@@ -2884,7 +3025,7 @@ Toolbox.prototype = {
     if (this._lastFocusedElement) {
       this._lastFocusedElement.focus();
     }
-    return promise.resolve();
+    return Promise.resolve();
   },
 
   /**
@@ -2901,7 +3042,7 @@ Toolbox.prototype = {
         : this.openSplitConsole();
     }
 
-    return promise.resolve();
+    return Promise.resolve();
   },
 
   /**
@@ -3126,14 +3267,22 @@ Toolbox.prototype = {
   },
 
   _listFrames: async function(event) {
-    if (!this.target.getTrait("frames")) {
-      // We are not targetting a regular BrowsingContextTargetActor
-      // it can be either an addon or browser toolbox actor
-      return promise.resolve();
+    if (
+      !this.target.getTrait("frames") ||
+      this.target.targetForm.ignoreSubFrames
+    ) {
+      // We are not targetting a regular WindowGlobalTargetActor (it can be either an
+      // addon or browser toolbox actor), or EFT is enabled.
+      return Promise.resolve();
     }
 
     try {
       const { frames } = await this.target.listFrames();
+
+      // @backward-compat { version 95 } frame.isTopLevel was added in 95.
+      for (const frame of frames) {
+        frame.isTopLevel = !frame.parentID;
+      }
       this._updateFrames({ frames });
     } catch (e) {
       console.error("Error while listing frames", e);
@@ -3141,48 +3290,96 @@ Toolbox.prototype = {
   },
 
   /**
-   * Select a frame by sending 'switchToFrame' packet to the backend.
+   * Called by the iframe picker when the user selected a frame.
+   *
+   * @param {String} frameIdOrTargetActorId
    */
-  onSelectFrame: function(frameId) {
-    // Send packet to the backend to select specified frame and
-    // wait for 'frameUpdate' event packet to update the UI.
-    this.target.switchToFrame({ windowId: frameId });
+  onIframePickerFrameSelected: function(frameIdOrTargetActorId) {
+    if (!this.frameMap.has(frameIdOrTargetActorId)) {
+      console.error(
+        `Can't focus on frame "${frameIdOrTargetActorId}", it is not a known frame`
+      );
+      return;
+    }
+
+    const frameInfo = this.frameMap.get(frameIdOrTargetActorId);
+    // If there is no targetFront in the frameData, this means EFT is not enabled.
+    // Send packet to the backend to select specified frame and  wait for 'frameUpdate'
+    // event packet to update the UI.
+    if (!frameInfo.targetFront) {
+      this.target.switchToFrame({ windowId: frameIdOrTargetActorId });
+      return;
+    }
+
+    // Here, EFT is enabled, so we want to focus the toolbox on the specific targetFront
+    // that was selected by the user. This will trigger this._onTargetSelected which will
+    // take care of updating the iframe picker state.
+    this.commands.targetCommand.selectTarget(frameInfo.targetFront);
   },
 
   /**
    * Highlight a frame in the page
+   *
+   * @param {String} frameIdOrTargetActorId
    */
-  onHighlightFrame: async function(frameId) {
-    const inspectorFront = await this.target.getFront("inspector");
-    const highlighter = this.getHighlighter();
-
+  onHighlightFrame: async function(frameIdOrTargetActorId) {
     // Only enable frame highlighting when the top level document is targeted
-    if (this.rootFrameSelected) {
-      const nodeFront = await inspectorFront.walker.getNodeActorFromWindowID(
-        frameId
-      );
-      return highlighter.highlight(nodeFront);
+    if (!this.rootFrameSelected) {
+      return;
     }
+
+    const frameInfo = this.frameMap.get(frameIdOrTargetActorId);
+    if (!frameInfo) {
+      return;
+    }
+
+    let nodeFront;
+    if (frameInfo.targetFront) {
+      const inspectorFront = await frameInfo.targetFront.getFront("inspector");
+      nodeFront = await inspectorFront.walker.documentElement();
+    } else {
+      const inspectorFront = await this.target.getFront("inspector");
+      nodeFront = await inspectorFront.walker.getNodeActorFromWindowID(
+        frameIdOrTargetActorId
+      );
+    }
+    const highlighter = this.getHighlighter();
+    return highlighter.highlight(nodeFront);
   },
 
   /**
-   * A handler for 'frameUpdate' packets received from the backend.
-   * Following properties might be set on the packet:
+   * Handles changes in document frames.
    *
-   * destroyAll {Boolean}: All frames have been destroyed.
-   * selected {Number}: A frame has been selected
-   * frames {Array}: list of frames. Every frame can have:
-   *                 id {Number}: frame ID
-   *                 url {String}: frame URL
-   *                 title {String}: frame title
-   *                 destroy {Boolean}: Set to true if destroyed
-   *                 parentID {Number}: ID of the parent frame (not set
-   *                                    for top level window)
+   * @param {Object} data
+   * @param {Boolean} data.destroyAll: All frames have been destroyed.
+   * @param {Number} data.selected: A frame has been selected
+   * @param {Object} data.frameData: Some frame data were updated
+   * @param {String} data.frameData.url: new frame URL (it might have been blank or about:blank)
+   * @param {String} data.frameData.title: new frame title
+   * @param {Number|String} data.frameData.id: frame ID / targetFront actorID when EFT is enabled.
+   * @param {Array<Object>} data.frames: List of frames. Every frame can have:
+   * @param {Number|String} data.frames[].id: frame ID / targetFront actorID when EFT is enabled.
+   * @param {String} data.frames[].url: frame URL
+   * @param {String} data.frames[].title: frame title
+   * @param {Boolean} data.frames[].destroy: Set to true if destroyed
+   * @param {Boolean} data.frames[].isTopLevel: true for top level window
    */
   _updateFrames: function(data) {
-    // We may receive this event before the toolbox is ready.
-    if (!this.isReady) {
-      return;
+    // At the moment, frames `id` can either be outerWindowID (a Number),
+    // or a targetActorID (a String).
+    // In order to have the same type of data as a key of `frameMap`, we transform any
+    // outerWindowID into a string.
+    // This can be removed once EFT is enabled by default
+    if (data.selected) {
+      data.selected = data.selected.toString();
+    } else if (data.frameData) {
+      data.frameData.id = data.frameData.id.toString();
+    } else if (data.frames) {
+      data.frames.forEach(frame => {
+        if (frame.id) {
+          frame.id = frame.id.toString();
+        }
+      });
     }
 
     // Store (synchronize) data about all existing frames on the backend
@@ -3191,6 +3388,20 @@ Toolbox.prototype = {
       this.selectedFrameId = null;
     } else if (data.selected) {
       this.selectedFrameId = data.selected;
+    } else if (data.frameData && this.frameMap.has(data.frameData.id)) {
+      const existingFrameData = this.frameMap.get(data.frameData.id);
+      if (
+        existingFrameData.title == data.frameData.title &&
+        existingFrameData.url == data.frameData.url
+      ) {
+        return;
+      }
+
+      this.frameMap.set(data.frameData.id, {
+        ...existingFrameData,
+        url: data.frameData.url,
+        title: data.frameData.title,
+      });
     } else if (data.frames) {
       data.frames.forEach(frame => {
         if (frame.destroy) {
@@ -3211,18 +3422,18 @@ Toolbox.prototype = {
     // frames in case of the BrowserToolbox.
     if (!this.selectedFrameId) {
       const frames = [...this.frameMap.values()];
-      const topFrames = frames.filter(frame => !frame.parentID);
+      const topFrames = frames.filter(frame => frame.isTopLevel);
       this.selectedFrameId = topFrames.length ? topFrames[0].id : null;
     }
-
-    // We may need to hide/show the frames button now.
-    this.updateFrameButton();
 
     // Debounce the update to avoid unnecessary flickering/rendering.
     if (!this.debouncedToolbarUpdate) {
       this.debouncedToolbarUpdate = debounce(
         () => {
-          this.component.setToolboxButtons(this.toolbarButtons);
+          // Toolbox may have been destroyed in the meantime
+          if (this.component) {
+            this.component.setToolboxButtons(this.toolbarButtons);
+          }
           this.debouncedToolbarUpdate = null;
         },
         200,
@@ -3230,37 +3441,35 @@ Toolbox.prototype = {
       );
     }
 
-    if (this.debouncedToolbarUpdate) {
-      this.debouncedToolbarUpdate();
-    }
-  },
+    const updateUiElements = () => {
+      // We may need to hide/show the frames button now.
+      this.updateFrameButton();
 
-  /**
-   * Returns a 0-based selected frame depth.
-   *
-   * For example, if the root frame is selected, the returned value is 0.  For a sub-frame
-   * of the root document, the returned value is 1, and so on.
-   */
-  get selectedFrameDepth() {
-    // If the frame switcher is disabled, we won't have a selected frame ID.
-    // In this case, we're always showing the root frame.
-    if (!this.selectedFrameId) {
-      return 0;
+      if (this.debouncedToolbarUpdate) {
+        this.debouncedToolbarUpdate();
+      }
+    };
+
+    // This may have been called before the toolbox is ready (= the dom elements for
+    // the iframe picker don't exist yet).
+    if (!this.isReady) {
+      this.once("ready").then(() => updateUiElements);
+    } else {
+      updateUiElements();
     }
-    let depth = 0;
-    let frame = this.frameMap.get(this.selectedFrameId);
-    while (frame) {
-      depth++;
-      frame = this.frameMap.get(frame.parentID);
-    }
-    return depth - 1;
   },
 
   /**
    * Returns whether a root frame (with no parent frame) is selected.
    */
   get rootFrameSelected() {
-    return this.selectedFrameDepth == 0;
+    // If the frame switcher is disabled, we won't have a selected frame ID.
+    // In this case, we're always showing the root frame.
+    if (!this.selectedFrameId) {
+      return true;
+    }
+
+    return this.frameMap.get(this.selectedFrameId).isTopLevel;
   },
 
   /**
@@ -3586,10 +3795,6 @@ Toolbox.prototype = {
     }
   },
 
-  _onInspectObject: function(packet) {
-    this.inspectObjectActor(packet.objectActor, packet.inspectFromAnnotation);
-  },
-
   _onToolSelected: function() {
     this._refreshHostTitle();
 
@@ -3599,6 +3804,13 @@ Toolbox.prototype = {
 
     // Calling setToolboxButtons in case the visibility of a button changed.
     this.component.setToolboxButtons(this.toolbarButtons);
+  },
+
+  /**
+   * Listener for "inspectObject" event on console top level target actor.
+   */
+  _onInspectObject(packet) {
+    this.inspectObjectActor(packet.objectActor, packet.inspectFromAnnotation);
   },
 
   inspectObjectActor: async function(objectActor, inspectFromAnnotation) {
@@ -3727,12 +3939,9 @@ Toolbox.prototype = {
         this._onToolbarArrowKeypress
       );
       this.ReactDOM.unmountComponentAtNode(this._componentMount);
+      this.component = null;
       this._componentMount = null;
       this._tabBar = null;
-    }
-    if (this._nodePicker) {
-      this._nodePicker.stop();
-      this._nodePicker = null;
     }
     this.destroyHarAutomation();
 
@@ -3755,11 +3964,12 @@ Toolbox.prototype = {
     // Reset preferences set by the toolbox
     outstanding.push(this.resetPreference());
 
-    this.commands.targetCommand.unwatchTargets(
-      this.commands.targetCommand.ALL_TYPES,
-      this._onTargetAvailable,
-      this._onTargetDestroyed
-    );
+    this.commands.targetCommand.unwatchTargets({
+      types: this.commands.targetCommand.ALL_TYPES,
+      onAvailable: this._onTargetAvailable,
+      onSelected: this._onTargetSelected,
+      onDestroyed: this._onTargetDestroyed,
+    });
     this.resourceCommand.unwatchResources(
       [
         this.resourceCommand.TYPES.CONSOLE_MESSAGE,
@@ -3808,6 +4018,12 @@ Toolbox.prototype = {
         settleAll(outstanding)
           .catch(console.error)
           .then(async () => {
+            // Destroy the node picker *after* destroying the panel,
+            // which may still try to access it. (And might spawn a new one)
+            if (this._nodePicker) {
+              this._nodePicker.destroy();
+              this._nodePicker = null;
+            }
             this.selection.destroy();
             this.selection = null;
 
@@ -3824,6 +4040,8 @@ Toolbox.prototype = {
 
             this._removeWindowListeners();
             this._removeChromeEventHandlerEvents();
+
+            this._store = null;
 
             // Notify toolbox-host-manager that the host can be destroyed.
             this.emit("toolbox-unload");
@@ -3848,6 +4066,9 @@ Toolbox.prototype = {
             this._host = null;
             this._win = null;
             this._toolPanels.clear();
+            this.descriptorFront = null;
+            this.resourceCommand = null;
+            this.commands = null;
 
             // Force GC to prevent long GC pauses when running tests and to free up
             // memory in general when the toolbox is closed.
@@ -4365,12 +4586,20 @@ Toolbox.prototype = {
         // the "newer" event.
         resource.name === "dom-interactive"
       ) {
-        // the targetFront title and url are update on dom-interactive, so delay refreshing
+        // the targetFront title and url are updated on dom-interactive, so delay refreshing
         // the host title a bit in order for the event listener in targetCommand to be
         // executed.
         setTimeout(() => {
           // Update the EvaluationContext selector so url/title of targets can be updated
           this.store.dispatch(refreshTargets());
+
+          this._updateFrames({
+            frameData: {
+              id: resource.targetFront.actorID,
+              url: resource.targetFront.url,
+              title: resource.targetFront.title,
+            },
+          });
 
           if (resource.targetFront.isTopLevel) {
             this._refreshHostTitle();

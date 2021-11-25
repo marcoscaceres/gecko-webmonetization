@@ -14,8 +14,8 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   EventEmitter: "resource://gre/modules/EventEmitter.jsm",
 
   Log: "chrome://remote/content/shared/Log.jsm",
-  MessageHandlerInfo:
-    "chrome://remote/content/shared/messagehandler/MessageHandlerInfo.jsm",
+  readSessionData:
+    "chrome://remote/content/shared/messagehandler/sessiondata/SessionDataReader.jsm",
   RootMessageHandler:
     "chrome://remote/content/shared/messagehandler/RootMessageHandler.jsm",
   WindowGlobalMessageHandler:
@@ -55,24 +55,33 @@ function getMessageHandlerClass(type) {
 }
 
 /**
- * The MessageHandlerRegistry is a singleton (per process) which allows to
- * create and retrieve MessageHandler instances.
+ * The MessageHandlerRegistry allows to create and retrieve MessageHandler
+ * instances for different session ids.
  *
- * Such a singleton is useful to retrieve the appropriate MessageHandler
- * instance after crossing a technical boundary (eg process, thread...).
+ * A MessageHandlerRegistry instance is bound to a specific MessageHandler type
+ * and context. All MessageHandler instances created by the same registry will
+ * use the type and context of the registry, but each will be associated to a
+ * different session id.
  *
- * Note: this is still created as a class, but exposed as a singleton.
+ * The registry is useful to retrieve the appropriate MessageHandler instance
+ * after crossing a technical boundary (eg process, thread...).
  */
-class MessageHandlerRegistryClass extends EventEmitter {
-  constructor() {
+class MessageHandlerRegistry extends EventEmitter {
+  /*
+   * @param {String} type
+   *     MessageHandler type, one of MessageHandler.type.
+   * @param {Object} context
+   *     The context object, which depends on the type.
+   */
+  constructor(type, context) {
     super();
 
+    this._messageHandlerClass = getMessageHandlerClass(type);
+    this._context = context;
+    this._type = type;
+
     /**
-     * Map of all message handlers registered in this process.
-     * Keys are based on session id, message handler type and message handler
-     * context id.
-     * MessageHandlers for various contexts and sessions might be instantiated
-     * in the same process and might therefore be stored together in this map.
+     * Map of session id to MessageHandler instance
      */
     this._messageHandlersMap = new Map();
 
@@ -83,52 +92,40 @@ class MessageHandlerRegistryClass extends EventEmitter {
   }
 
   /**
-   * Retrieve an existing MessageHandler instance matching the provided
-   * arguments. Returns null if no MessageHandler was found.
-   *
-   * @param {String} sessionId
-   *     ID of the session the handler is used for.
-   * @param {String} type
-   *     MessageHandler type, one of MessageHandler.type.
-   * @param {Object=} context
-   *     The context object, which depends on the type. Can be null for ROOT
-   *     type MessageHandlers.
-   * @return {MessageHandler=}
-   *     A MessageHandler instance, null if not found.
+   * Create all message handlers for the current context, based on the content
+   * of the session data.
+   * This should typically be called when the context is ready to be used and
+   * to receive/send commands.
    */
-  getExistingMessageHandler(sessionId, type, context) {
-    const messageHandlerInfo = new MessageHandlerInfo(
-      sessionId,
-      type,
-      getMessageHandlerClass(type).getIdFromContext(context)
-    );
+  createAllMessageHandlers() {
+    const data = readSessionData();
+    for (const [sessionId, sessionDataItems] of data) {
+      // Create a message handler for this context for each active message
+      // handler session.
+      // TODO: In the future, to support debugging use cases we might want to
+      // only create a message handler if there is relevant data.
+      // For automation scenarios, this is less critical.
+      this._createMessageHandler(sessionId, sessionDataItems);
+    }
+  }
 
-    return this._messageHandlersMap.get(messageHandlerInfo.key);
+  destroy() {
+    this._messageHandlersMap.forEach(messageHandler => {
+      messageHandler.destroy();
+    });
   }
 
   /**
-   * Notify the registry that the provided context of the provided type has been
-   * destroyed, so that all corresponding MessageHandlers can be properly
-   * destroyed.
+   * Retrieve an existing MessageHandler instance matching the provided session
+   * id. Returns null if no MessageHandler was found.
    *
-   * @param {Object} context
-   *     The context object, which depends on the type.
-   * @param {String} type
-   *     MessageHandler type, one of MessageHandler.type.
+   * @param {String} sessionId
+   *     ID of the session the handler is used for.
+   * @return {MessageHandler=}
+   *     A MessageHandler instance, null if not found.
    */
-  contextDestroyed(context, type) {
-    const MessageHandlerClass = getMessageHandlerClass(type);
-    const contextId = MessageHandlerClass.getIdFromContext(context);
-
-    // Destroy all MessageHandlers matching the provided type and contextId.
-    return this._messageHandlersMap.forEach(messageHandler => {
-      if (
-        messageHandler.constructor.type === type &&
-        messageHandler.contextId === contextId
-      ) {
-        messageHandler.destroy();
-      }
-    });
+  getExistingMessageHandler(sessionId) {
+    return this._messageHandlersMap.get(sessionId);
   }
 
   /**
@@ -145,15 +142,10 @@ class MessageHandlerRegistryClass extends EventEmitter {
    * @return {MessageHandler}
    *     A MessageHandler instance.
    */
-  getOrCreateMessageHandler(sessionId, type, context) {
-    let messageHandler = this.getExistingMessageHandler(
-      sessionId,
-      type,
-      context
-    );
-
+  getOrCreateMessageHandler(sessionId) {
+    let messageHandler = this.getExistingMessageHandler(sessionId);
     if (!messageHandler) {
-      messageHandler = this._createMessageHandler(sessionId, type, context);
+      messageHandler = this._createMessageHandler(sessionId);
     }
 
     return messageHandler;
@@ -192,20 +184,23 @@ class MessageHandlerRegistryClass extends EventEmitter {
    *
    * @param {String} sessionId
    *     ID of the session the handler will be used for.
-   * @param {String} type
-   *     MessageHandler type, one of MessageHandler.type.
-   * @param {Object=} context
-   *     The context object, which depends on the type. Can be null for ROOT
-   *     type MessageHandlers.
+   * @param {Array<SessionDataItem>=} sessionDataItems
+   *     Optional array of session data items to be applied automatically to the
+   *     MessageHandler.
    * @return {MessageHandler}
    *     A new MessageHandler instance.
    */
-  _createMessageHandler(sessionId, type, context) {
-    const messageHandlerClass = getMessageHandlerClass(type);
-    const messageHandler = new messageHandlerClass(sessionId, context);
-    this._registerMessageHandler(messageHandler);
+  _createMessageHandler(sessionId, sessionDataItems) {
+    const messageHandler = new this._messageHandlerClass(
+      sessionId,
+      this._context,
+      sessionDataItems
+    );
+    this._messageHandlersMap.set(sessionId, messageHandler);
 
-    logger.trace(`Created MessageHandler ${type} for session ${sessionId}`);
+    logger.trace(
+      `Created MessageHandler ${this._type} for session ${sessionId}`
+    );
 
     messageHandler.on(
       "message-handler-destroyed",
@@ -213,17 +208,6 @@ class MessageHandlerRegistryClass extends EventEmitter {
     );
     messageHandler.on("message-handler-event", this._onMessageHandlerEvent);
     return messageHandler;
-  }
-
-  _registerMessageHandler(messageHandler) {
-    this._messageHandlersMap.set(messageHandler.key, messageHandler);
-  }
-
-  _unregisterMessageHandler(messageHandler) {
-    this._messageHandlersMap.delete(messageHandler.key);
-    logger.trace(
-      `Unregistered MessageHandler ${messageHandler.type} for session ${messageHandler.sessionId}`
-    );
   }
 
   // Event handlers
@@ -234,7 +218,11 @@ class MessageHandlerRegistryClass extends EventEmitter {
       this._onMessageHandlerDestroyed
     );
     messageHandler.off("message-handler-event", this._onMessageHandlerEvent);
-    this._unregisterMessageHandler(messageHandler);
+    this._messageHandlersMap.delete(messageHandler.sessionId);
+
+    logger.trace(
+      `Unregistered MessageHandler ${messageHandler.type} for session ${messageHandler.sessionId}`
+    );
   }
 
   _onMessageHandlerEvent(eventName, messageHandlerEvent) {
@@ -243,5 +231,3 @@ class MessageHandlerRegistryClass extends EventEmitter {
     this.emit("message-handler-registry-event", messageHandlerEvent);
   }
 }
-
-const MessageHandlerRegistry = new MessageHandlerRegistryClass();

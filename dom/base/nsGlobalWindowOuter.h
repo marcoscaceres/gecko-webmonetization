@@ -190,6 +190,8 @@ class nsGlobalWindowOuter final : public mozilla::dom::EventTarget,
     return Cast(nsPIDOMWindowOuter::From(aWin));
   }
 
+  bool IsOuterWindow() const final { return true; }  // Overriding EventTarget
+
   static nsGlobalWindowOuter* GetOuterWindowWithId(uint64_t aWindowID) {
     AssertIsOnMainThread();
 
@@ -229,6 +231,10 @@ class nsGlobalWindowOuter final : public mozilla::dom::EventTarget,
                                JS::Handle<JSObject*> aGivenProto) override {
     return EnsureInnerWindow() ? GetWrapper() : nullptr;
   }
+
+  // nsIGlobalObject
+  bool ShouldResistFingerprinting() const final;
+  uint32_t GetPrincipalHashValue() const final;
 
   // nsIGlobalJSObjectHolder
   JSObject* GetGlobalJSObject() final { return GetWrapper(); }
@@ -327,6 +333,9 @@ class nsGlobalWindowOuter final : public mozilla::dom::EventTarget,
 
   // Outer windows only.
   virtual void EnsureSizeAndPositionUpToDate() override;
+
+  virtual void SuppressEventHandling() override;
+  virtual void UnsuppressEventHandling() override;
 
   MOZ_CAN_RUN_SCRIPT_BOUNDARY virtual nsGlobalWindowOuter* EnterModalState()
       override;
@@ -623,8 +632,6 @@ class nsGlobalWindowOuter final : public mozilla::dom::EventTarget,
                  bool aWrapAround, bool aWholeWord, bool aSearchInFrames,
                  bool aShowDialog, mozilla::ErrorResult& aError);
   uint64_t GetMozPaintCountOuter();
-
-  bool ShouldResistFingerprinting();
 
   mozilla::dom::Nullable<mozilla::dom::WindowProxyHolder> OpenDialogOuter(
       JSContext* aCx, const nsAString& aUrl, const nsAString& aName,
@@ -1128,10 +1135,10 @@ class nsGlobalWindowOuter final : public mozilla::dom::EventTarget,
 
   // It's useful when we get matched EnterModalState/LeaveModalState calls, in
   // which case the outer window is responsible for unsuspending events on the
-  // document. If we don't (for example, if the outer window is closed before
-  // the LeaveModalState call), then the inner window whose mDoc is our
-  // mSuspendedDoc is responsible for unsuspending it.
-  RefPtr<Document> mSuspendedDoc;
+  // documents. If we don't (for example, if the outer window is closed before
+  // the LeaveModalState call), then the inner window whose mDoc is in our
+  // mSuspendedDocs is responsible for unsuspending.
+  nsTArray<RefPtr<Document>> mSuspendedDocs;
 
   // This is the CC generation the last time we called CanSkip.
   uint32_t mCanSkipCCGeneration;

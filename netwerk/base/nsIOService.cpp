@@ -220,6 +220,11 @@ static const char* gCallbackPrefsForSocketProcess[] = {
     "network.dns.disableIPv6",
     "network.dns.skipTRR-when-parental-control-enabled",
     "network.offline-mirrors-connectivity",
+    "network.disable-localhost-when-offline",
+    "network.proxy.parse_pac_on_socket_process",
+    "network.proxy.allow_hijacking_localhost",
+    "network.connectivity-service.",
+    "network.captive-portal-service.testMode",
     nullptr,
 };
 
@@ -623,9 +628,9 @@ void nsIOService::OnProcessLaunchComplete(SocketProcessHost* aHost,
 
   LOG(("nsIOService::OnProcessLaunchComplete aSucceeded=%d\n", aSucceeded));
 
-  mSocketProcessLaunchComplete = true;
+  mSocketProcessLaunchComplete = aSucceeded;
 
-  if (mShutdown || !SocketProcessReady()) {
+  if (mShutdown || !SocketProcessReady() || !aSucceeded) {
     return;
   }
 

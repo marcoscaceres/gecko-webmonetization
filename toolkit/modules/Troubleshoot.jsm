@@ -213,6 +213,12 @@ var dataProviders = {
       safeMode: Services.appinfo.inSafeMode,
     };
 
+    if (Services.sysinfo.getProperty("name") == "Windows_NT") {
+      if (Services.sysinfo.processInfo.isWindowsSMode) {
+        data.osVersion += " S";
+      }
+    }
+
     if (AppConstants.MOZ_UPDATER) {
       data.updateChannel = ChromeUtils.import(
         "resource://gre/modules/UpdateUtils.jsm",
@@ -549,7 +555,6 @@ var dataProviders = {
         data.numTotalWindows++;
         data.windowLayerManagerType = winUtils.layerManagerType;
         data.windowLayerManagerRemote = winUtils.layerManagerRemote;
-        data.windowUsingAdvancedLayers = winUtils.usingAdvancedLayers;
       } catch (e) {
         continue;
       }
@@ -607,7 +612,6 @@ var dataProviders = {
       DWriteEnabled: "directWriteEnabled",
       DWriteVersion: "directWriteVersion",
       cleartypeParameters: "clearTypeParameters",
-      UsesTiling: "usesTiling",
       TargetFrameRate: "targetFrameRate",
       windowProtocol: null,
       desktopEnvironment: null,

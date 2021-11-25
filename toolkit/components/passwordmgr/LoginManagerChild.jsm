@@ -256,6 +256,11 @@ const observer = {
         );
         if (!docState.fieldModificationsByRootElement.get(formLikeRoot)) {
           log("Ignoring change event on form that hasn't been user-modified");
+          if (aEvent.composedTarget.hasBeenTypePassword) {
+            // Send notification that the password field has not been changed.
+            // This is used only for testing.
+            LoginManagerChild.forWindow(window)._ignorePasswordEdit();
+          }
           break;
         }
 
@@ -284,6 +289,10 @@ const observer = {
                 triggeredByFillingGenerated,
               }
             );
+          } else {
+            // Send a notification that we are not saving the edit to the password field.
+            // This is used only for testing.
+            LoginManagerChild.forWindow(window)._ignorePasswordEdit();
           }
         }
         break;
@@ -1919,7 +1928,7 @@ this.LoginManagerChild = class LoginManagerChild extends JSWindowActorChild {
 
     this._maybeSendFormInteractionMessage(
       form,
-      "PasswordManager:onFormSubmit",
+      "PasswordManager:ShowDoorhanger",
       {
         targetField: null,
         isSubmission: true,
@@ -1934,7 +1943,15 @@ this.LoginManagerChild = class LoginManagerChild extends JSWindowActorChild {
    * Extracts and validates information from a form-like element on the page.  If validation is
    * successful, sends a message to the parent process requesting that it show a dialog.
    *
-   * If validation fails, this method is a noop.
+   * The validation works are divided into two parts:
+   * 1. Whether this is a valid form with a password (validate in this function)
+   * 2. Whether the password manager decides to send interaction message for this form
+   *    (validate in _maybeSendFormInteractionMessageContinue)
+   *
+   * When the function is triggered by a form submission event, and the form is valid (pass #1),
+   * We still send the message to the parent even the validation of #2 fails. This is because
+   * there might be someone who is interested in form submission events regardless of whether
+   * the password manager decides to show the doorhanger or not.
    *
    * @param {LoginForm} form
    * @param {string} messageName used to categorize the type of message sent to the parent process.
@@ -1942,6 +1959,9 @@ this.LoginManagerChild = class LoginManagerChild extends JSWindowActorChild {
    * @param {boolean} options.isSubmission if true, this function call was prompted by a form submission.
    * @param {boolean?} options.triggeredByFillingGenerated whether or not this call was triggered by a
    *        generated password being filled into a form-like element.
+   * @param {boolean?} options.ignoreConnect Whether to ignore isConnected attribute of a element.
+   *
+   * @returns {Boolean} whether the message is sent to the parent process.
    */
   _maybeSendFormInteractionMessage(
     form,
@@ -1950,12 +1970,90 @@ this.LoginManagerChild = class LoginManagerChild extends JSWindowActorChild {
   ) {
     let doc = form.ownerDocument;
     let win = doc.defaultView;
+    let logMessagePrefix = isSubmission ? "form submission" : "field edit";
     let passwordField = null;
     if (targetField && targetField.hasBeenTypePassword) {
       passwordField = targetField;
     }
+
+    let origin = LoginHelper.getLoginOrigin(doc.documentURI);
+    if (!origin) {
+      log(`(${logMessagePrefix} ignored -- invalid origin)`);
+      return;
+    }
+
+    // Get the appropriate fields from the form.
+    let recipes = LoginRecipesContent.getRecipes(this, origin, win);
+    let fields = {
+      targetField,
+      ...this._getFormFields(form, true, recipes, { ignoreConnect }),
+    };
+
+    // It's possible the field triggering this message isn't one of those found by _getFormFields' heuristics
+    if (
+      passwordField &&
+      passwordField != fields.newPasswordField &&
+      passwordField != fields.oldPasswordField &&
+      passwordField != fields.confirmPasswordField
+    ) {
+      fields.newPasswordField = passwordField;
+    }
+
+    // Need at least 1 valid password field to do anything.
+    if (fields.newPasswordField == null) {
+      if (isSubmission && fields.usernameField) {
+        log(
+          "_onFormSubmit: username-only form. Record the username field but not sending prompt"
+        );
+        this.stateForDocument(doc).mockUsernameOnlyField = {
+          name: fields.usernameField.name,
+          value: fields.usernameField.value,
+        };
+      }
+      return;
+    }
+
+    this._maybeSendFormInteractionMessageContinue(form, messageName, {
+      ...fields,
+      isSubmission,
+      triggeredByFillingGenerated,
+    });
+
+    if (isSubmission) {
+      // Notify `PasswordManager:onFormSubmit` as long as we detect submission event on a
+      // valid form with a password field.
+      this.sendAsyncMessage(
+        "PasswordManager:onFormSubmit",
+        {},
+        {
+          fields,
+          isSubmission,
+          triggeredByFillingGenerated,
+        }
+      );
+    }
+  }
+
+  /**
+   * Continues the works that are not done in _maybeSendFormInteractionMessage.
+   * See comments in _maybeSendFormInteractionMessage for more details.
+   */
+  _maybeSendFormInteractionMessageContinue(
+    form,
+    messageName,
+    {
+      targetField,
+      usernameField,
+      newPasswordField,
+      oldPasswordField,
+      confirmPasswordField,
+      isSubmission,
+      triggeredByFillingGenerated,
+    }
+  ) {
     let logMessagePrefix = isSubmission ? "form submission" : "field edit";
-    let dismissedPrompt = !isSubmission;
+    let doc = form.ownerDocument;
+    let win = doc.defaultView;
 
     let detail = { messageSent: false };
     try {
@@ -1976,50 +2074,6 @@ this.LoginManagerChild = class LoginManagerChild extends JSWindowActorChild {
         return;
       }
 
-      let origin = LoginHelper.getLoginOrigin(doc.documentURI);
-      if (!origin) {
-        log(`(${logMessagePrefix} ignored -- invalid origin)`);
-        return;
-      }
-
-      let formActionOrigin = LoginHelper.getFormActionOrigin(form);
-
-      let recipes = LoginRecipesContent.getRecipes(this, origin, win);
-
-      // Get the appropriate fields from the form.
-      let {
-        usernameField,
-        newPasswordField,
-        oldPasswordField,
-        confirmPasswordField,
-      } = this._getFormFields(form, true, recipes, { ignoreConnect });
-
-      // It's possible the field triggering this message isn't one of those found by _getFormFields' heuristics
-      if (
-        passwordField &&
-        passwordField != newPasswordField &&
-        passwordField != oldPasswordField &&
-        passwordField != confirmPasswordField
-      ) {
-        newPasswordField = passwordField;
-      }
-
-      let docState = this.stateForDocument(doc);
-
-      // Need at least 1 valid password field to do anything.
-      if (newPasswordField == null) {
-        if (isSubmission && usernameField) {
-          log(
-            "_onFormSubmit: username-only form. Record the username field but not sending prompt"
-          );
-          docState.mockUsernameOnlyField = {
-            name: usernameField.name,
-            value: usernameField.value,
-          };
-        }
-        return;
-      }
-
       let fullyMungedPattern = /^\*+$|^•+$|^\.+$/;
       // Check `isSubmission` to allow munged passwords in dismissed by default doorhangers (since
       // they are initiated by the user) in case this matches their actual password.
@@ -2034,6 +2088,7 @@ this.LoginManagerChild = class LoginManagerChild extends JSWindowActorChild {
       // form doesn't have one. This means if there is a username field found in the current
       // form, we don't compare it to the saved one, which might be a better choice in some cases.
       // The reason we are not doing it now is because we haven't found a real world example.
+      let docState = this.stateForDocument(doc);
       if (!usernameField) {
         if (docState.mockUsernameOnlyField) {
           usernameField = docState.mockUsernameOnlyField;
@@ -2078,6 +2133,7 @@ this.LoginManagerChild = class LoginManagerChild extends JSWindowActorChild {
       // if the password field is a three digit number. Also dismiss prompt if
       // the password is a credit card number and the password field has attribute
       // autocomplete="cc-number".
+      let dismissedPrompt = !isSubmission;
       let newPasswordFieldValue = newPasswordField.value;
       if (
         (!dismissedPrompt &&
@@ -2119,6 +2175,7 @@ this.LoginManagerChild = class LoginManagerChild extends JSWindowActorChild {
       let { login: autoFilledLogin } =
         docState.fillsByRootElement.get(form.rootElement) || {};
       let browsingContextId = win.windowGlobalChild.browsingContext.id;
+      let formActionOrigin = LoginHelper.getFormActionOrigin(form);
 
       detail = {
         browsingContextId,
@@ -2225,6 +2282,16 @@ this.LoginManagerChild = class LoginManagerChild extends JSWindowActorChild {
     this._fillConfirmFieldWithGeneratedPassword(passwordField);
   }
 
+  /**
+   * Notify the parent that we are ignoring the password edit
+   * so that tests can listen for this as opposed to waiting for
+   * nothing to happen.
+   */
+  _ignorePasswordEdit() {
+    if (Cu.isInAutomation) {
+      this.sendAsyncMessage("PasswordManager:onIgnorePasswordEdit", {});
+    }
+  }
   /**
    * Notify the parent that a generated password was filled into a field or
    * edited so that it can potentially be saved.

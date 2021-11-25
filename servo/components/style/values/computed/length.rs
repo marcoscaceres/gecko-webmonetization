@@ -37,7 +37,9 @@ impl ToComputedValue for specified::NoCalcLength {
                 length.to_computed_value(context, FontBaseSize::CurrentStyle)
             },
             specified::NoCalcLength::ViewportPercentage(length) => {
-                context.builder.add_flags(ComputedValueFlags::USES_VIEWPORT_UNITS);
+                context
+                    .builder
+                    .add_flags(ComputedValueFlags::USES_VIEWPORT_UNITS);
                 length.to_computed_value(context.viewport_size_for_viewport_unit_resolution())
             },
             specified::NoCalcLength::ServoCharacterWidth(length) => {
@@ -189,9 +191,9 @@ impl Size {
             #[cfg(feature = "gecko")]
             GenericSize::MinContent |
             GenericSize::MaxContent |
-            GenericSize::MozFitContent |
+            GenericSize::FitContent |
             GenericSize::MozAvailable |
-            GenericSize::FitContentFunction(_) => false
+            GenericSize::FitContentFunction(_) => false,
         }
     }
 }

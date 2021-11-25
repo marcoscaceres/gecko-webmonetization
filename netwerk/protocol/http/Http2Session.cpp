@@ -32,6 +32,7 @@
 #include "nsStandardURL.h"
 #include "nsURLHelper.h"
 #include "prnetdb.h"
+#include "sslerr.h"
 #include "sslt.h"
 #include "mozilla/Sprintf.h"
 #include "nsSocketTransportService2.h"
@@ -48,6 +49,8 @@ namespace net {
 NS_IMPL_ADDREF(Http2Session)
 NS_IMPL_RELEASE(Http2Session)
 NS_INTERFACE_MAP_BEGIN(Http2Session)
+  NS_INTERFACE_MAP_ENTRY(nsISupportsWeakReference)
+  NS_INTERFACE_MAP_ENTRY_CONCRETE(Http2Session)
   NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsISupports, nsAHttpConnection)
 NS_INTERFACE_MAP_END
 
@@ -193,7 +196,7 @@ Http2Session::Http2Session(nsISocketTransport* aSocketTransport,
   mDecompressor.SetDumpTables(dumpHpackTables);
 }
 
-void Http2Session::Shutdown() {
+void Http2Session::Shutdown(nsresult aReason) {
   for (const auto& stream : mStreamTransactionHash.Values()) {
     // On a clean server hangup the server sets the GoAwayID to be the ID of
     // the last transaction it processed. If the ID of stream in the
@@ -210,6 +213,9 @@ void Http2Session::Shutdown() {
       CloseStream(stream, NS_ERROR_NET_INADEQUATE_SECURITY);
     } else if (!mCleanShutdown && (mGoAwayReason != NO_HTTP_ERROR)) {
       CloseStream(stream, NS_ERROR_NET_HTTP2_SENT_GOAWAY);
+    } else if (!mCleanShutdown &&
+               SecurityErrorToBeHandledByTransaction(aReason)) {
+      CloseStream(stream, aReason);
     } else {
       CloseStream(stream, NS_ERROR_ABORT);
     }
@@ -217,10 +223,11 @@ void Http2Session::Shutdown() {
 }
 
 Http2Session::~Http2Session() {
+  MOZ_DIAGNOSTIC_ASSERT(OnSocketThread());
   LOG3(("Http2Session::~Http2Session %p mDownstreamState=%X", this,
         mDownstreamState));
 
-  Shutdown();
+  Shutdown(NS_OK);
 
   if (mTrrStreams) {
     Telemetry::Accumulate(Telemetry::DNS_TRR_REQUEST_PER_CONN, mTrrStreams);
@@ -3281,6 +3288,9 @@ nsresult Http2Session::WriteSegmentsAgain(nsAHttpSegmentWriter* writer,
     MOZ_ASSERT(!mNeedsCleanup, "cleanup stream set unexpectedly");
     mNeedsCleanup = nullptr; /* just in case */
 
+    if (!mInputFrameDataStream) {
+      return NS_ERROR_UNEXPECTED;
+    }
     uint32_t streamID = mInputFrameDataStream->StreamID();
     mSegmentWriter = writer;
     rv = mInputFrameDataStream->WriteSegments(this, count, countWritten);
@@ -3708,7 +3718,7 @@ void Http2Session::Close(nsresult aReason) {
 
   mClosed = true;
 
-  Shutdown();
+  Shutdown(aReason);
 
   mStreamIDHash.Clear();
   mStreamTransactionHash.Clear();
@@ -4422,7 +4432,13 @@ nsresult Http2Session::OnHeadersAvailable(nsAHttpTransaction* transaction,
                                          reset);
 }
 
-bool Http2Session::IsReused() { return mConnection->IsReused(); }
+bool Http2Session::IsReused() {
+  if (!mConnection) {
+    return false;
+  }
+
+  return mConnection->IsReused();
+}
 
 nsresult Http2Session::PushBack(const char* buf, uint32_t len) {
   return mConnection->PushBack(buf, len);
@@ -4652,6 +4668,8 @@ bool Http2Session::CanAcceptWebsocket() {
   return mEnableWebsockets &&
          (mPeerAllowsWebsockets || !mProcessedWaitingWebsockets);
 }
+
+void Http2Session::SanityCheck() { MOZ_DIAGNOSTIC_ASSERT(mConnection); }
 
 }  // namespace net
 }  // namespace mozilla

@@ -102,16 +102,16 @@ use api::units::*;
 use crate::batch::BatchFilter;
 use crate::box_shadow::BLUR_SAMPLE_SCALE;
 use crate::clip::{ClipStore, ClipChainInstance, ClipChainId, ClipInstance};
-use crate::spatial_tree::{SpatialTree, CoordinateSpaceMapping, SpatialNodeIndex, VisibleFace, SpatialNodeContainer};
+use crate::spatial_tree::{SpatialTree, CoordinateSpaceMapping, SpatialNodeIndex, VisibleFace};
 use crate::composite::{CompositorKind, CompositeState, NativeSurfaceId, NativeTileId, CompositeTileSurface, tile_kind};
 use crate::composite::{ExternalSurfaceDescriptor, ExternalSurfaceDependency, CompositeTileDescriptor, CompositeTile};
 use crate::composite::{CompositorTransformIndex};
 use crate::debug_colors;
-use euclid::{vec2, vec3, Point2D, Scale, Vector2D, Box2D, Transform3D, SideOffsets2D};
+use euclid::{vec2, vec3, Point2D, Scale, Vector2D, Box2D, SideOffsets2D};
 use euclid::approxeq::ApproxEq;
 use crate::filterdata::SFilterData;
 use crate::intern::ItemUid;
-use crate::internal_types::{FastHashMap, FastHashSet, PlaneSplitter, Filter};
+use crate::internal_types::{FastHashMap, FastHashSet, PlaneSplitter, Filter, FrameId};
 use crate::internal_types::{PlaneSplitterIndex, PlaneSplitAnchor, TextureSource};
 use crate::frame_builder::{FrameBuildingContext, FrameBuildingState, PictureState, PictureContext};
 use crate::gpu_cache::{GpuCache, GpuCacheAddress, GpuCacheHandle};
@@ -120,7 +120,7 @@ use plane_split::{Clipper, Polygon, Splitter};
 use crate::prim_store::{PrimitiveTemplateKind, PictureIndex, PrimitiveInstance, PrimitiveInstanceKind};
 use crate::prim_store::{ColorBindingStorage, ColorBindingIndex, PrimitiveScratchBuffer};
 use crate::print_tree::{PrintTree, PrintTreePrinter};
-use crate::render_backend::{DataStores, FrameId};
+use crate::render_backend::DataStores;
 use crate::render_task_graph::RenderTaskId;
 use crate::render_target::RenderTargetKind;
 use crate::render_task::{BlurTask, RenderTask, RenderTaskLocation, BlurTaskCache};
@@ -134,50 +134,13 @@ use std::{mem, u8, marker, u32};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::hash_map::Entry;
 use std::ops::Range;
-use crate::texture_cache::TextureCacheHandle;
+use crate::picture_textures::PictureCacheTextureHandle;
 use crate::util::{MaxRect, VecHelper, MatrixHelpers, Recycler, raster_rect_to_device_pixels, ScaleOffset};
 use crate::filterdata::{FilterDataHandle};
 use crate::tile_cache::{SliceDebugInfo, TileDebugInfo, DirtyTileDebugInfo};
 use crate::visibility::{PrimitiveVisibilityFlags, FrameVisibilityContext};
 use crate::visibility::{VisibilityState, FrameVisibilityState};
-#[cfg(any(feature = "capture", feature = "replay"))]
-use ron;
-#[cfg(feature = "capture")]
-use crate::scene_builder_thread::InternerUpdates;
-#[cfg(any(feature = "capture", feature = "replay"))]
-use crate::intern::{Internable, UpdateList};
-#[cfg(any(feature = "capture", feature = "replay"))]
-use crate::clip::{ClipIntern, PolygonIntern};
-#[cfg(any(feature = "capture", feature = "replay"))]
-use crate::filterdata::FilterDataIntern;
-#[cfg(any(feature = "capture", feature = "replay"))]
-use api::PrimitiveKeyKind;
-#[cfg(any(feature = "capture", feature = "replay"))]
-use crate::prim_store::backdrop::Backdrop;
-#[cfg(any(feature = "capture", feature = "replay"))]
-use crate::prim_store::borders::{ImageBorder, NormalBorderPrim};
-#[cfg(any(feature = "capture", feature = "replay"))]
-use crate::prim_store::gradient::{LinearGradient, RadialGradient, ConicGradient};
-#[cfg(any(feature = "capture", feature = "replay"))]
-use crate::prim_store::image::{Image, YuvImage};
-#[cfg(any(feature = "capture", feature = "replay"))]
-use crate::prim_store::line_dec::LineDecoration;
-#[cfg(any(feature = "capture", feature = "replay"))]
-use crate::prim_store::picture::Picture;
-#[cfg(any(feature = "capture", feature = "replay"))]
-use crate::prim_store::text_run::TextRun;
-
-#[cfg(feature = "capture")]
-use std::fs::File;
-#[cfg(feature = "capture")]
-use std::io::prelude::*;
-#[cfg(feature = "capture")]
-use std::path::PathBuf;
 use crate::scene_building::{SliceFlags};
-
-#[cfg(feature = "replay")]
-// used by tileview so don't use an internal_types FastHashMap
-use std::collections::HashMap;
 
 // Maximum blur radius for blur filter (different than box-shadow blur).
 // Taken from FilterNodeSoftware.cpp in Gecko.
@@ -617,7 +580,7 @@ pub enum SurfaceTextureDescriptor {
     /// When using the WR compositor, the tile is drawn into an entry
     /// in the WR texture cache.
     TextureCache {
-        handle: TextureCacheHandle
+        handle: Option<PictureCacheTextureHandle>,
     },
     /// When using an OS compositor, the tile is drawn into a native
     /// surface identified by arbitrary id.
@@ -655,11 +618,11 @@ impl SurfaceTextureDescriptor {
     ) -> ResolvedSurfaceTexture {
         match self {
             SurfaceTextureDescriptor::TextureCache { handle } => {
-                let cache_item = resource_cache.texture_cache.get(handle);
+                let texture = resource_cache
+                    .picture_textures
+                    .get_texture_source(handle.as_ref().unwrap());
 
-                ResolvedSurfaceTexture::TextureCache {
-                    texture: cache_item.texture_id,
-                }
+                ResolvedSurfaceTexture::TextureCache { texture }
             }
             SurfaceTextureDescriptor::Native { id } => {
                 ResolvedSurfaceTexture::Native {
@@ -744,97 +707,29 @@ pub enum PrimitiveCompareResult {
     ColorBinding,
 }
 
-/// A more detailed version of PrimitiveCompareResult used when
-/// debug logging is enabled.
-#[derive(Debug, Copy, Clone, PartialEq)]
-#[cfg_attr(feature = "capture", derive(Serialize))]
-#[cfg_attr(feature = "replay", derive(Deserialize))]
-pub enum PrimitiveCompareResultDetail {
-    /// Primitives match
-    Equal,
-    /// Something in the PrimitiveDescriptor was different
-    Descriptor {
-        old: PrimitiveDescriptor,
-        new: PrimitiveDescriptor,
-    },
-    /// The clip node content or spatial node changed
-    Clip {
-        detail: CompareHelperResult<ItemUid>,
-    },
-    /// The value of the transform changed
-    Transform {
-        detail: CompareHelperResult<SpatialNodeKey>,
-    },
-    /// An image dependency was dirty
-    Image {
-        detail: CompareHelperResult<ImageDependency>,
-    },
-    /// The value of an opacity binding changed
-    OpacityBinding {
-        detail: CompareHelperResult<OpacityBinding>,
-    },
-    /// The value of a color binding changed
-    ColorBinding {
-        detail: CompareHelperResult<ColorBinding>,
-    },
-}
-
 /// Debugging information about why a tile was invalidated
 #[derive(Debug,Clone)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub enum InvalidationReason {
     /// The background color changed
-    BackgroundColor {
-        old: Option<ColorF>,
-        new: Option<ColorF>,
-    },
+    BackgroundColor,
     /// The opaque state of the backing native surface changed
-    SurfaceOpacityChanged{
-        became_opaque: bool
-    },
+    SurfaceOpacityChanged,
     /// There was no backing texture (evicted or never rendered)
     NoTexture,
     /// There was no backing native surface (never rendered, or recreated)
     NoSurface,
     /// The primitive count in the dependency list was different
-    PrimCount {
-        old: Option<Vec<ItemUid>>,
-        new: Option<Vec<ItemUid>>,
-    },
+    PrimCount,
     /// The content of one of the primitives was different
-    Content {
-        /// What changed in the primitive that was different
-        prim_compare_result: PrimitiveCompareResult,
-        prim_compare_result_detail: Option<PrimitiveCompareResultDetail>,
-    },
+    Content,
     // The compositor type changed
     CompositorKindChanged,
     // The valid region of the tile changed
     ValidRectChanged,
     // The overall scale of the picture cache changed
     ScaleChanged,
-}
-
-/// A minimal subset of Tile for debug capturing
-#[cfg_attr(feature = "capture", derive(Serialize))]
-#[cfg_attr(feature = "replay", derive(Deserialize))]
-pub struct TileSerializer {
-    pub rect: PictureRect,
-    pub current_descriptor: TileDescriptor,
-    pub id: TileId,
-    pub root: TileNode,
-    pub background_color: Option<ColorF>,
-    pub invalidation_reason: Option<InvalidationReason>
-}
-
-/// A minimal subset of TileCacheInstance for debug capturing
-#[cfg_attr(feature = "capture", derive(Serialize))]
-#[cfg_attr(feature = "replay", derive(Deserialize))]
-pub struct TileCacheInstanceSerializer {
-    pub slice: usize,
-    pub tiles: FastHashMap<TileOffset, TileSerializer>,
-    pub background_color: Option<ColorF>,
 }
 
 /// Information about a cached tile.
@@ -1057,9 +952,7 @@ impl Tile {
         }
 
         if ctx.background_color != self.background_color {
-            self.invalidate(None, InvalidationReason::BackgroundColor {
-                                    old: self.background_color,
-                                    new: ctx.background_color });
+            self.invalidate(None, InvalidationReason::BackgroundColor);
             self.background_color = ctx.background_color;
         }
 
@@ -1274,7 +1167,7 @@ impl Tile {
             }
 
             // Invalidate the entire tile to force a redraw.
-            self.invalidate(None, InvalidationReason::SurfaceOpacityChanged { became_opaque: is_opaque });
+            self.invalidate(None, InvalidationReason::SurfaceOpacityChanged);
             self.is_opaque = is_opaque;
         }
 
@@ -1295,7 +1188,7 @@ impl Tile {
         //           native compositors that don't support dirty rects.
         if supports_dirty_rects {
             // Only allow splitting for normal content sized tiles
-            if ctx.current_tile_size == state.resource_cache.texture_cache.default_picture_tile_size() {
+            if ctx.current_tile_size == state.resource_cache.picture_textures.default_tile_size() {
                 let max_split_level = 3;
 
                 // Consider splitting / merging dirty regions
@@ -1366,7 +1259,7 @@ impl Tile {
                             // For a texture cache entry, create an invalid handle that
                             // will be allocated when update_picture_cache is called.
                             SurfaceTextureDescriptor::TextureCache {
-                                handle: TextureCacheHandle::invalid(),
+                                handle: None,
                             }
                         }
                         CompositorKind::Native { .. } => {
@@ -1472,22 +1365,18 @@ impl<'a, T> CompareHelper<'a, T> where T: Copy + PartialEq {
         prev_count: u8,
         curr_count: u8,
         mut f: F,
-        opt_detail: Option<&mut CompareHelperResult<T>>,
     ) -> bool where F: FnMut(&T, &T) -> bool {
         // If the number of items is different, trivial reject.
         if prev_count != curr_count {
-            if let Some(detail) = opt_detail { *detail = CompareHelperResult::Count{ prev_count, curr_count }; }
             return false;
         }
         // If both counts are 0, then no need to check these dependencies.
         if curr_count == 0 {
-            if let Some(detail) = opt_detail { *detail = CompareHelperResult::Equal; }
             return true;
         }
         // If both counts are u8::MAX, this is a sentinel that we can't compare these
         // deps, so just trivial reject.
         if curr_count as usize == MAX_PRIM_SUB_DEPS {
-            if let Some(detail) = opt_detail { *detail = CompareHelperResult::Sentinel; }
             return false;
         }
 
@@ -1499,12 +1388,10 @@ impl<'a, T> CompareHelper<'a, T> where T: Copy + PartialEq {
 
         for (curr, prev) in curr_items.iter().zip(prev_items.iter()) {
             if !f(prev, curr) {
-                if let Some(detail) = opt_detail { *detail = CompareHelperResult::PredicateTrue{ curr: *curr }; }
                 return false;
             }
         }
 
-        if let Some(detail) = opt_detail { *detail = CompareHelperResult::Equal; }
         true
     }
 
@@ -1777,273 +1664,6 @@ impl BackdropInfo {
         BackdropInfo {
             opaque_rect: PictureRect::zero(),
             kind: None,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct TileCacheLoggerSlice {
-    pub serialized_slice: String,
-    pub local_to_world_transform: Transform3D<f32, PicturePixel, WorldPixel>,
-}
-
-#[cfg(any(feature = "capture", feature = "replay"))]
-macro_rules! declare_tile_cache_logger_updatelists {
-    ( $( $name:ident : $ty:ty, )+ ) => {
-        #[cfg_attr(feature = "capture", derive(Serialize))]
-        #[cfg_attr(feature = "replay", derive(Deserialize))]
-        struct TileCacheLoggerUpdateListsSerializer {
-            pub ron_string: Vec<String>,
-        }
-
-        pub struct TileCacheLoggerUpdateLists {
-            $(
-                /// Generate storage, one per interner.
-                /// the tuple is a workaround to avoid the need for multiple
-                /// fields that start with $name (macro concatenation).
-                /// the string is .ron serialized updatelist at capture time;
-                /// the updates is the list of DataStore updates (avoid UpdateList
-                /// due to Default() requirements on the Keys) reconstructed at
-                /// load time.
-                pub $name: (Vec<String>, Vec<UpdateList<<$ty as Internable>::Key>>),
-            )+
-        }
-
-        impl TileCacheLoggerUpdateLists {
-            pub fn new() -> Self {
-                TileCacheLoggerUpdateLists {
-                    $(
-                        $name : ( Vec::new(), Vec::new() ),
-                    )+
-                }
-            }
-
-            /// serialize all interners in updates to .ron
-            #[cfg(feature = "capture")]
-            fn serialize_updates(
-                &mut self,
-                updates: &InternerUpdates
-            ) {
-                $(
-                    self.$name.0.push(ron::ser::to_string_pretty(&updates.$name, Default::default()).unwrap());
-                )+
-            }
-
-            fn is_empty(&self) -> bool {
-                $(
-                    if !self.$name.0.is_empty() { return false; }
-                )+
-                true
-            }
-
-            #[cfg(feature = "capture")]
-            fn to_ron(&self) -> String {
-                let mut serializer =
-                    TileCacheLoggerUpdateListsSerializer { ron_string: Vec::new() };
-                $(
-                    serializer.ron_string.push(
-                        ron::ser::to_string_pretty(&self.$name.0, Default::default()).unwrap());
-                )+
-                ron::ser::to_string_pretty(&serializer, Default::default()).unwrap()
-            }
-
-            #[cfg(feature = "replay")]
-            pub fn from_ron(&mut self, text: &str) {
-                let serializer : TileCacheLoggerUpdateListsSerializer =
-                    match ron::de::from_str(&text) {
-                        Ok(data) => { data }
-                        Err(e) => {
-                            println!("ERROR: failed to deserialize updatelist: {:?}\n{:?}", &text, e);
-                            return;
-                        }
-                    };
-                let mut index = 0;
-                $(
-                    let ron_lists : Vec<String> = ron::de::from_str(&serializer.ron_string[index]).unwrap();
-                    self.$name.1 = ron_lists.iter()
-                                            .map( |list| ron::de::from_str(&list).unwrap() )
-                                            .collect();
-                    index = index + 1;
-                )+
-                // error: value assigned to `index` is never read
-                let _ = index;
-            }
-
-            /// helper method to add a stringified version of all interned keys into
-            /// a lookup table based on ItemUid.  Use strings as a form of type erasure
-            /// so all UpdateLists can go into a single map.
-            /// Then during analysis, when we see an invalidation reason due to
-            /// "ItemUid such and such was added to the tile primitive list", the lookup
-            /// allows mapping that back into something readable.
-            #[cfg(feature = "replay")]
-            pub fn insert_in_lookup(
-                        &mut self,
-                        itemuid_to_string: &mut HashMap<ItemUid, String>)
-            {
-                $(
-                    {
-                        for list in &self.$name.1 {
-                            for insertion in &list.insertions {
-                                itemuid_to_string.insert(
-                                    insertion.uid,
-                                    format!("{:?}", insertion.value));
-                            }
-                        }
-                    }
-                )+
-            }
-        }
-    }
-}
-
-#[cfg(any(feature = "capture", feature = "replay"))]
-crate::enumerate_interners!(declare_tile_cache_logger_updatelists);
-
-#[cfg(not(any(feature = "capture", feature = "replay")))]
-pub struct TileCacheLoggerUpdateLists {
-}
-
-#[cfg(not(any(feature = "capture", feature = "replay")))]
-impl TileCacheLoggerUpdateLists {
-    pub fn new() -> Self { TileCacheLoggerUpdateLists {} }
-    fn is_empty(&self) -> bool { true }
-}
-
-/// Log tile cache activity for one single frame.
-/// Also stores the commands sent to the interning data_stores
-/// so we can see which items were created or destroyed this frame,
-/// and correlate that with tile invalidation activity.
-pub struct TileCacheLoggerFrame {
-    /// slices in the frame, one per take_context call
-    pub slices: Vec<TileCacheLoggerSlice>,
-    /// interning activity
-    pub update_lists: TileCacheLoggerUpdateLists
-}
-
-impl TileCacheLoggerFrame {
-    pub fn new() -> Self {
-        TileCacheLoggerFrame {
-            slices: Vec::new(),
-            update_lists: TileCacheLoggerUpdateLists::new()
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.slices.is_empty() && self.update_lists.is_empty()
-    }
-}
-
-/// Log tile cache activity whenever anything happens in take_context.
-pub struct TileCacheLogger {
-    /// next write pointer
-    pub write_index : usize,
-    /// ron serialization of tile caches;
-    pub frames: Vec<TileCacheLoggerFrame>
-}
-
-impl TileCacheLogger {
-    pub fn new(
-        num_frames: usize
-    ) -> Self {
-        let mut frames = Vec::with_capacity(num_frames);
-        for _i in 0..num_frames { // no Clone so no resize
-            frames.push(TileCacheLoggerFrame::new());
-        }
-        TileCacheLogger {
-            write_index: 0,
-            frames
-        }
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        !self.frames.is_empty()
-    }
-
-    #[cfg(feature = "capture")]
-    pub fn add(
-            &mut self,
-            serialized_slice: String,
-            local_to_world_transform: Transform3D<f32, PicturePixel, WorldPixel>
-    ) {
-        if !self.is_enabled() {
-            return;
-        }
-        self.frames[self.write_index].slices.push(
-            TileCacheLoggerSlice {
-                serialized_slice,
-                local_to_world_transform });
-    }
-
-    #[cfg(feature = "capture")]
-    pub fn serialize_updates(&mut self, updates: &InternerUpdates) {
-        if !self.is_enabled() {
-            return;
-        }
-        self.frames[self.write_index].update_lists.serialize_updates(updates);
-    }
-
-    /// see if anything was written in this frame, and if so,
-    /// advance the write index in a circular way and clear the
-    /// recorded string.
-    pub fn advance(&mut self) {
-        if !self.is_enabled() || self.frames[self.write_index].is_empty() {
-            return;
-        }
-        self.write_index = self.write_index + 1;
-        if self.write_index >= self.frames.len() {
-            self.write_index = 0;
-        }
-        self.frames[self.write_index] = TileCacheLoggerFrame::new();
-    }
-
-    #[cfg(feature = "capture")]
-    pub fn save_capture(
-        &self, root: &PathBuf
-    ) {
-        if !self.is_enabled() {
-            return;
-        }
-        use std::fs;
-
-        info!("saving tile cache log");
-        let path_tile_cache = root.join("tile_cache");
-        if !path_tile_cache.is_dir() {
-            fs::create_dir(&path_tile_cache).unwrap();
-        }
-
-        let mut files_written = 0;
-        for ix in 0..self.frames.len() {
-            // ...and start with write_index, since that's the oldest entry
-            // that we're about to overwrite. However when we get to
-            // save_capture, we've add()ed entries but haven't advance()d yet,
-            // so the actual oldest entry is write_index + 1
-            let index = (self.write_index + 1 + ix) % self.frames.len();
-            if self.frames[index].is_empty() {
-                continue;
-            }
-
-            let filename = path_tile_cache.join(format!("frame{:05}.ron", files_written));
-            let mut output = File::create(filename).unwrap();
-            output.write_all(b"// slice data\n").unwrap();
-            output.write_all(b"[\n").unwrap();
-            for item in &self.frames[index].slices {
-                output.write_all(b"( transform:\n").unwrap();
-                let transform =
-                    ron::ser::to_string_pretty(
-                        &item.local_to_world_transform, Default::default()).unwrap();
-                output.write_all(transform.as_bytes()).unwrap();
-                output.write_all(b",\n tile_cache:\n").unwrap();
-                output.write_all(item.serialized_slice.as_bytes()).unwrap();
-                output.write_all(b"\n),\n").unwrap();
-            }
-            output.write_all(b"]\n\n").unwrap();
-
-            output.write_all(b"// @@@ chunk @@@\n\n").unwrap();
-
-            output.write_all(b"// interning data\n").unwrap();
-            output.write_all(self.frames[index].update_lists.to_ron().as_bytes()).unwrap();
-
-            files_written = files_written + 1;
         }
     }
 }
@@ -2599,7 +2219,7 @@ impl TileCacheInstance {
                             TILE_SIZE_SCROLLBAR_HORIZONTAL
                         }
                     } else {
-                        frame_state.resource_cache.texture_cache.default_picture_tile_size()
+                        frame_state.resource_cache.picture_textures.default_tile_size()
                     }
                 }
             };
@@ -3706,7 +3326,7 @@ impl TileCacheInstance {
 
         let sub_slice = &mut self.sub_slices[sub_slice_index];
 
-        if let Some(backdrop_candidate) = backdrop_candidate {
+        if let Some(mut backdrop_candidate) = backdrop_candidate {
             let is_suitable_backdrop = match backdrop_candidate.kind {
                 Some(BackdropKind::Clear) => {
                     // Clear prims are special - they always end up in their own slice,
@@ -3739,8 +3359,19 @@ impl TileCacheInstance {
 
             if sub_slice_index == 0 &&
                is_suitable_backdrop &&
-               sub_slice.compositor_surfaces.is_empty() &&
-               !prim_clip_chain.needs_mask {
+               sub_slice.compositor_surfaces.is_empty() {
+
+                // If the backdrop candidate has a clip-mask, try to extract an opaque inner
+                // rect that is safe to use for subpixel rendering
+                if prim_clip_chain.needs_mask {
+                    backdrop_candidate.opaque_rect = clip_store
+                        .get_inner_rect_for_clip_chain(
+                            prim_clip_chain,
+                            &data_stores.clip,
+                            frame_context.spatial_tree,
+                        )
+                        .unwrap_or(PictureRect::zero());
+                }
 
                 if backdrop_candidate.opaque_rect.contains_box(&self.backdrop.opaque_rect) {
                     self.backdrop.opaque_rect = backdrop_candidate.opaque_rect;
@@ -4347,8 +3978,11 @@ impl PrimitiveCluster {
         &self,
         spatial_node_index: SpatialNodeIndex,
         flags: ClusterFlags,
+        instance_index: usize,
     ) -> bool {
-        self.flags == flags && self.spatial_node_index == spatial_node_index
+        self.flags == flags &&
+        self.spatial_node_index == spatial_node_index &&
+        instance_index == self.prim_range.end
     }
 
     pub fn prim_range(&self) -> Range<usize> {
@@ -4375,7 +4009,6 @@ impl PrimitiveCluster {
 pub struct PrimitiveList {
     /// List of primitives grouped into clusters.
     pub clusters: Vec<PrimitiveCluster>,
-    pub prim_instances: Vec<PrimitiveInstance>,
     pub child_pictures: Vec<PictureIndex>,
     /// The number of preferred compositor surfaces that were found when
     /// adding prims to this list.
@@ -4390,7 +4023,6 @@ impl PrimitiveList {
     pub fn empty() -> Self {
         PrimitiveList {
             clusters: Vec::new(),
-            prim_instances: Vec::new(),
             child_pictures: Vec::new(),
             compositor_surface_count: 0,
         }
@@ -4403,6 +4035,7 @@ impl PrimitiveList {
         prim_rect: LayoutRect,
         spatial_node_index: SpatialNodeIndex,
         prim_flags: PrimitiveFlags,
+        prim_instances: &mut Vec<PrimitiveInstance>,
     ) {
         let mut flags = ClusterFlags::empty();
 
@@ -4430,34 +4063,11 @@ impl PrimitiveList {
             .intersection(&prim_rect)
             .unwrap_or_else(LayoutRect::zero);
 
-        // Primitive lengths aren't evenly distributed among primitive lists:
-        // We often have a large amount of single primitive lists, a
-        // few below 20~30 primitives, and even fewer lists (maybe a couple)
-        // in the multiple hundreds with nothing in between.
-        // We can see in profiles that reallocating vectors while pushing
-        // primitives is taking a large amount of the total scene build time,
-        // so we take advantage of what we know about the length distributions
-        // to go for an adapted vector growth pattern that avoids over-allocating
-        // for the many small allocations while avoiding a lot of reallocation by
-        // quickly converging to the common sizes.
-        // Rust's default vector growth strategy (when pushing elements one by one)
-        // is to double the capacity every time.
-        let prims_len = self.prim_instances.len();
-        if prims_len == self.prim_instances.capacity() {
-            let next_alloc = match prims_len {
-                1 ..= 31 => 32 - prims_len,
-                32 ..= 256 => 512 - prims_len,
-                _ => prims_len * 2,
-            };
-
-            self.prim_instances.reserve(next_alloc);
-        }
-
-        let instance_index = prims_len;
-        self.prim_instances.push(prim_instance);
+        let instance_index = prim_instances.len();
+        prim_instances.push(prim_instance);
 
         if let Some(cluster) = self.clusters.last_mut() {
-            if cluster.is_compatible(spatial_node_index, flags) {
+            if cluster.is_compatible(spatial_node_index, flags, instance_index) {
                 cluster.add_instance(&culling_rect, instance_index);
                 return;
             }
@@ -4685,7 +4295,6 @@ impl PicturePrimitive {
         frame_state: &mut FrameBuildingState,
         frame_context: &FrameBuildingContext,
         scratch: &mut PrimitiveScratchBuffer,
-        tile_cache_logger: &mut TileCacheLogger,
         tile_caches: &mut FastHashMap<SliceId, Box<TileCacheInstance>>,
     ) -> Option<(PictureContext, PictureState, PrimitiveList)> {
         self.primary_render_task_id = None;
@@ -4814,11 +4423,9 @@ impl PicturePrimitive {
                         // This ensures that we retain valid tiles that are off-screen, but still in the
                         // display port of this tile cache instance.
                         if let Some(TileSurface::Texture { descriptor, .. }) = tile.surface.as_ref() {
-                            if let SurfaceTextureDescriptor::TextureCache { ref handle, .. } = descriptor {
-                                frame_state.resource_cache.texture_cache.request(
-                                    handle,
-                                    frame_state.gpu_cache,
-                                );
+                            if let SurfaceTextureDescriptor::TextureCache { handle: Some(handle), .. } = descriptor {
+                                frame_state.resource_cache
+                                    .picture_textures.request(handle, frame_state.gpu_cache);
                             }
                         }
 
@@ -4868,8 +4475,11 @@ impl PicturePrimitive {
                         if let TileSurface::Texture { descriptor, .. } = tile.surface.as_mut().unwrap() {
                             match descriptor {
                                 SurfaceTextureDescriptor::TextureCache { ref handle, .. } => {
+                                    let exists = handle.as_ref().map_or(false,
+                                        |handle| frame_state.resource_cache.picture_textures.entry_exists(handle)
+                                    );
                                     // Invalidate if the backing texture was evicted.
-                                    if frame_state.resource_cache.texture_cache.is_allocated(handle) {
+                                    if exists {
                                         // Request the backing texture so it won't get evicted this frame.
                                         // We specifically want to mark the tile texture as used, even
                                         // if it's detected not visible below and skipped. This is because
@@ -4878,7 +4488,9 @@ impl PicturePrimitive {
                                         // assuming that it's either visible or we want to retain it for
                                         // a while in case it gets scrolled back onto screen soon.
                                         // TODO(gw): Consider switching to manual eviction policy?
-                                        frame_state.resource_cache.texture_cache.request(handle, frame_state.gpu_cache);
+                                        frame_state.resource_cache
+                                            .picture_textures
+                                            .request(handle.as_ref().unwrap(), frame_state.gpu_cache);
                                     } else {
                                         // If the texture was evicted on a previous frame, we need to assume
                                         // that the entire tile rect is dirty.
@@ -4929,13 +4541,14 @@ impl PicturePrimitive {
                             if let TileSurface::Texture { ref mut descriptor } = tile.surface.as_mut().unwrap() {
                                 match descriptor {
                                     SurfaceTextureDescriptor::TextureCache { ref mut handle } => {
-                                        if !frame_state.resource_cache.texture_cache.is_allocated(handle) {
-                                            frame_state.resource_cache.texture_cache.update_picture_cache(
-                                                tile_cache.current_tile_size,
-                                                handle,
-                                                frame_state.gpu_cache,
-                                            );
-                                        }
+
+                                        frame_state.resource_cache.picture_textures.update(
+                                            tile_cache.current_tile_size,
+                                            handle,
+                                            frame_state.gpu_cache,
+                                            &mut frame_state.resource_cache.texture_cache.next_id,
+                                            &mut frame_state.resource_cache.texture_cache.pending_updates,
+                                        );
                                     }
                                     SurfaceTextureDescriptor::Native { id } => {
                                         if id.is_none() {
@@ -5784,40 +5397,6 @@ impl PicturePrimitive {
             None => {}
         };
 
-
-        #[cfg(feature = "capture")]
-        {
-            if frame_context.debug_flags.contains(DebugFlags::TILE_CACHE_LOGGING_DBG) {
-                if let Some(PictureCompositeMode::TileCache { slice_id }) = self.composite_mode {
-                    if let Some(ref tile_cache) = tile_caches.get(&slice_id) {
-                        // extract just the fields that we're interested in
-                        let mut tile_cache_tiny = TileCacheInstanceSerializer {
-                            slice: tile_cache.slice,
-                            tiles: FastHashMap::default(),
-                            background_color: tile_cache.background_color,
-                        };
-                        // TODO(gw): Debug output only writes the primary sub-slice for now
-                        for (key, tile) in &tile_cache.sub_slices.first().unwrap().tiles {
-                            tile_cache_tiny.tiles.insert(*key, TileSerializer {
-                                rect: tile.local_tile_rect,
-                                current_descriptor: tile.current_descriptor.clone(),
-                                id: tile.id,
-                                root: tile.root.clone(),
-                                background_color: tile.background_color,
-                                invalidation_reason: tile.invalidation_reason.clone()
-                            });
-                        }
-                        let text = ron::ser::to_string_pretty(&tile_cache_tiny, Default::default()).unwrap();
-                        tile_cache_logger.add(text, map_pic_to_world.get_transform());
-                    }
-                }
-            }
-        }
-        #[cfg(not(feature = "capture"))]
-        {
-            let _tile_cache_logger = tile_cache_logger;   // unused variable fix
-        }
-
         let state = PictureState {
             //TODO: check for MAX_CACHE_SIZE here?
             map_local_to_pic,
@@ -6266,6 +5845,7 @@ impl PicturePrimitive {
         surfaces: &mut [SurfaceInfo],
         frame_context: &FrameBuildingContext,
         data_stores: &mut DataStores,
+        prim_instances: &mut Vec<PrimitiveInstance>,
     ) {
         let surface = &mut surfaces[surface_index.0];
 
@@ -6307,7 +5887,7 @@ impl PicturePrimitive {
                     frame_context.spatial_tree,
                 );
 
-                for prim_instance in &mut self.prim_list.prim_instances[cluster.prim_range()] {
+                for prim_instance in &mut prim_instances[cluster.prim_range()] {
                     match prim_instance.kind {
                         PrimitiveInstanceKind::Backdrop { data_handle, .. } => {
                             // The actual size and clip rect of this primitive are determined by computing the bounding
@@ -6598,22 +6178,10 @@ fn get_transform_key(
     cache_spatial_node_index: SpatialNodeIndex,
     spatial_tree: &SpatialTree,
 ) -> TransformKey {
-    // Note: this is the only place where we don't know beforehand if the tile-affecting
-    // spatial node is below or above the current picture.
-    let transform = if cache_spatial_node_index >= spatial_node_index {
-        spatial_tree
-            .get_relative_transform(
-                cache_spatial_node_index,
-                spatial_node_index,
-            )
-    } else {
-        spatial_tree
-            .get_relative_transform(
-                spatial_node_index,
-                cache_spatial_node_index,
-            )
-    };
-    transform.into()
+    spatial_tree.get_relative_transform(
+        spatial_node_index,
+        cache_spatial_node_index,
+    ).into()
 }
 
 /// A key for storing primitive comparison results during tile dependency tests.
@@ -6728,7 +6296,6 @@ impl<'a> PrimitiveComparer<'a> {
         &mut self,
         prev: &PrimitiveDescriptor,
         curr: &PrimitiveDescriptor,
-        opt_detail: Option<&mut PrimitiveCompareResultDetail>,
     ) -> PrimitiveCompareResult {
         let resource_cache = self.resource_cache;
         let spatial_node_comparer = &mut self.spatial_node_comparer;
@@ -6737,44 +6304,32 @@ impl<'a> PrimitiveComparer<'a> {
 
         // Check equality of the PrimitiveDescriptor
         if prev != curr {
-            if let Some(detail) = opt_detail {
-                *detail = PrimitiveCompareResultDetail::Descriptor{ old: *prev, new: *curr };
-            }
             return PrimitiveCompareResult::Descriptor;
         }
 
         // Check if any of the clips  this prim has are different.
-        let mut clip_result = CompareHelperResult::Equal;
         if !self.clip_comparer.is_same(
             prev.clip_dep_count,
             curr.clip_dep_count,
             |prev, curr| {
                 prev == curr
             },
-            if opt_detail.is_some() { Some(&mut clip_result) } else { None }
         ) {
-            if let Some(detail) = opt_detail { *detail = PrimitiveCompareResultDetail::Clip{ detail: clip_result }; }
             return PrimitiveCompareResult::Clip;
         }
 
         // Check if any of the transforms  this prim has are different.
-        let mut transform_result = CompareHelperResult::Equal;
         if !self.transform_comparer.is_same(
             prev.transform_dep_count,
             curr.transform_dep_count,
             |prev, curr| {
                 spatial_node_comparer.are_transforms_equivalent(prev, curr)
             },
-            if opt_detail.is_some() { Some(&mut transform_result) } else { None },
         ) {
-            if let Some(detail) = opt_detail {
-                *detail = PrimitiveCompareResultDetail::Transform{ detail: transform_result };
-            }
             return PrimitiveCompareResult::Transform;
         }
 
         // Check if any of the images this prim has are different.
-        let mut image_result = CompareHelperResult::Equal;
         if !self.image_comparer.is_same(
             prev.image_dep_count,
             curr.image_dep_count,
@@ -6782,16 +6337,11 @@ impl<'a> PrimitiveComparer<'a> {
                 prev == curr &&
                 resource_cache.get_image_generation(curr.key) == curr.generation
             },
-            if opt_detail.is_some() { Some(&mut image_result) } else { None },
         ) {
-            if let Some(detail) = opt_detail {
-                *detail = PrimitiveCompareResultDetail::Image{ detail: image_result };
-            }
             return PrimitiveCompareResult::Image;
         }
 
         // Check if any of the opacity bindings this prim has are different.
-        let mut bind_result = CompareHelperResult::Equal;
         if !self.opacity_comparer.is_same(
             prev.opacity_binding_dep_count,
             curr.opacity_binding_dep_count,
@@ -6810,16 +6360,11 @@ impl<'a> PrimitiveComparer<'a> {
 
                 true
             },
-            if opt_detail.is_some() { Some(&mut bind_result) } else { None },
         ) {
-            if let Some(detail) = opt_detail {
-                *detail = PrimitiveCompareResultDetail::OpacityBinding{ detail: bind_result };
-            }
             return PrimitiveCompareResult::OpacityBinding;
         }
 
         // Check if any of the color bindings this prim has are different.
-        let mut bind_result = CompareHelperResult::Equal;
         if !self.color_comparer.is_same(
             prev.color_binding_dep_count,
             curr.color_binding_dep_count,
@@ -6838,11 +6383,7 @@ impl<'a> PrimitiveComparer<'a> {
 
                 true
             },
-            if opt_detail.is_some() { Some(&mut bind_result) } else { None },
         ) {
-            if let Some(detail) = opt_detail {
-                *detail = PrimitiveCompareResultDetail::ColorBinding{ detail: bind_result };
-            }
             return PrimitiveCompareResult::ColorBinding;
         }
 
@@ -7251,36 +6792,18 @@ impl TileNode {
                             curr_index: *curr_index,
                         };
 
-                        #[cfg(any(feature = "capture", feature = "replay"))]
-                        let mut compare_detail = PrimitiveCompareResultDetail::Equal;
-                        #[cfg(any(feature = "capture", feature = "replay"))]
-                        let prim_compare_result_detail =
-                            if frame_context.debug_flags.contains(DebugFlags::TILE_CACHE_LOGGING_DBG) {
-                                Some(&mut compare_detail)
-                            } else {
-                                None
-                            };
-
-                        #[cfg(not(any(feature = "capture", feature = "replay")))]
-                        let compare_detail = PrimitiveCompareResultDetail::Equal;
-                        #[cfg(not(any(feature = "capture", feature = "replay")))]
-                        let prim_compare_result_detail = None;
-
                         let prim_compare_result = *compare_cache
                             .entry(key)
                             .or_insert_with(|| {
                                 let prev = &prev_prims[i0];
                                 let curr = &curr_prims[i1];
-                                prim_comparer.compare_prim(prev, curr, prim_compare_result_detail)
+                                prim_comparer.compare_prim(prev, curr)
                             });
 
                         // If not the same, mark this node as dirty and update the dirty rect
                         if prim_compare_result != PrimitiveCompareResult::Equal {
                             if invalidation_reason.is_none() {
-                                *invalidation_reason = Some(InvalidationReason::Content {
-                                    prim_compare_result,
-                                    prim_compare_result_detail: Some(compare_detail)
-                                });
+                                *invalidation_reason = Some(InvalidationReason::Content);
                             }
                             *dirty_rect = self.rect.union(dirty_rect);
                             *dirty_tracker = *dirty_tracker | 1;
@@ -7292,29 +6815,7 @@ impl TileNode {
                     }
                 } else {
                     if invalidation_reason.is_none() {
-                        // if and only if tile logging is enabled, do the expensive step of
-                        // converting indices back to ItemUids and allocating old and new vectors
-                        // to store them in.
-                        #[cfg(any(feature = "capture", feature = "replay"))]
-                        {
-                            if frame_context.debug_flags.contains(DebugFlags::TILE_CACHE_LOGGING_DBG) {
-                                let old = prev_indices.iter().map( |i| prev_prims[i.0 as usize].prim_uid ).collect();
-                                let new = curr_indices.iter().map( |i| curr_prims[i.0 as usize].prim_uid ).collect();
-                                *invalidation_reason = Some(InvalidationReason::PrimCount {
-                                                                old: Some(old),
-                                                                new: Some(new) });
-                            } else {
-                                *invalidation_reason = Some(InvalidationReason::PrimCount {
-                                                                old: None,
-                                                                new: None });
-                            }
-                        }
-                        #[cfg(not(any(feature = "capture", feature = "replay")))]
-                        {
-                            *invalidation_reason = Some(InvalidationReason::PrimCount {
-                                                                old: None,
-                                                                new: None });
-                        }
+                        *invalidation_reason = Some(InvalidationReason::PrimCount);
                     }
                     *dirty_rect = self.rect.union(dirty_rect);
                     *dirty_tracker = *dirty_tracker | 1;

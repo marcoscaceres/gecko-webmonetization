@@ -11,10 +11,14 @@ const { XPCOMUtils } = ChromeUtils.import(
 );
 
 XPCOMUtils.defineLazyModuleGetters(this, {
+  CONTEXT_DESCRIPTOR_TYPES:
+    "chrome://remote/content/shared/messagehandler/MessageHandler.jsm",
   FrameTransport:
     "chrome://remote/content/shared/messagehandler/transports/FrameTransport.jsm",
   MessageHandler:
     "chrome://remote/content/shared/messagehandler/MessageHandler.jsm",
+  SessionData:
+    "chrome://remote/content/shared/messagehandler/sessiondata/SessionData.jsm",
   WindowGlobalMessageHandler:
     "chrome://remote/content/shared/messagehandler/WindowGlobalMessageHandler.jsm",
 });
@@ -61,6 +65,54 @@ class RootMessageHandler extends MessageHandler {
     super(sessionId, null);
 
     this._frameTransport = new FrameTransport(this);
+    this._sessionData = new SessionData(this);
+  }
+
+  get sessionData() {
+    return this._sessionData;
+  }
+
+  destroy() {
+    this._sessionData.destroy();
+    super.destroy();
+  }
+
+  /**
+   * Add new session data items of a given module, category and
+   * contextDescriptor.
+   *
+   * Forwards the call to the SessionData instance owned by this
+   * RootMessageHandler and propagates the information via a command to existing
+   * MessageHandlers.
+   */
+  addSessionData(sessionData = {}) {
+    const { moduleName, category, contextDescriptor, values } = sessionData;
+    const addedValues = this._sessionData.addSessionData(
+      moduleName,
+      category,
+      contextDescriptor,
+      values
+    );
+
+    if (addedValues.length == 0) {
+      // Avoid unnecessary broadcast if no value was added.
+      return [];
+    }
+
+    return this.handleCommand({
+      moduleName,
+      commandName: "_applySessionData",
+      params: {
+        values: addedValues,
+        category,
+      },
+      destination: {
+        type: WindowGlobalMessageHandler.type,
+        contextDescriptor: {
+          type: CONTEXT_DESCRIPTOR_TYPES.ALL,
+        },
+      },
+    });
   }
 
   /**

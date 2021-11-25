@@ -320,6 +320,31 @@
     object: WordSized
   mir_op: TypeOf
 
+- name: TypeOfName
+  result_type: WordSized
+  operands:
+    input: WordSized
+  mir_op: true
+
+- name: TypeOfIsNonPrimitiveV
+  result_type: WordSized
+  operands:
+    input: BoxedValue
+  num_temps: 1
+  mir_op: TypeOfIs
+
+- name: TypeOfIsNonPrimitiveO
+  result_type: WordSized
+  operands:
+    input: WordSized
+  mir_op: TypeOfIs
+
+- name: TypeOfIsPrimitive
+  result_type: WordSized
+  operands:
+    input: BoxedValue
+  mir_op: TypeOfIs
+
 - name: ToAsyncIter
   result_type: WordSized
   operands:
@@ -343,13 +368,6 @@
   call_instruction: true
   mir_op: true
 
-# Allocate an object for |new| on the caller-side.
-# Always performs object initialization with a fast path.
-- name: CreateThisWithTemplate
-  result_type: WordSized
-  num_temps: 1
-  mir_op: true
-
 # Allocate a new arguments object for the frame.
 - name: CreateArgumentsObject
   result_type: WordSized
@@ -363,6 +381,9 @@
   gen_boilerplate: false
 
 - name: GetInlinedArgument
+  gen_boilerplate: false
+
+- name: GetInlinedArgumentHole
   gen_boilerplate: false
 
 # Get argument from arguments object.
@@ -389,11 +410,35 @@
     index: WordSized
   num_temps: 1
 
+# Load an element from an arguments object. Handles out-of-bounds accesses.
+- name: LoadArgumentsObjectArgHole
+  result_type: BoxedValue
+  operands:
+    argsObject: WordSized
+    index: WordSized
+  num_temps: 1
+
+# Return true if the element exists in the arguments object.
+- name: InArgumentsObjectArg
+  result_type: WordSized
+  operands:
+    argsObject: WordSized
+    index: WordSized
+  num_temps: 1
+
 # Return |arguments.length| unless it has been overridden.
 - name: ArgumentsObjectLength
   result_type: WordSized
   operands:
     argsObject: WordSized
+
+# Create an array from an arguments object.
+- name: ArrayFromArgumentsObject
+  result_type: WordSized
+  operands:
+    argsObject: WordSized
+  call_instruction: true
+  mir_op: true
 
 # Guard that the given flags are not set on the arguments object.
 - name: GuardArgumentsObjectFlags
@@ -513,6 +558,9 @@
 - name: ApplyArrayGeneric
   gen_boilerplate: false
 
+- name: ConstructArgsGeneric
+  gen_boilerplate: false
+
 - name: ConstructArrayGeneric
   gen_boilerplate: false
 
@@ -574,6 +622,14 @@
   operands:
     left: WordSized
     right: WordSized
+  mir_op: Compare
+
+- name: CompareSInline
+  result_type: WordSized
+  operands:
+    input: WordSized
+  arguments:
+    constant: JSLinearString*
   mir_op: Compare
 
 - name: CompareBigInt
@@ -1996,6 +2052,13 @@
   call_instruction: true
   mir_op: DeleteElement
 
+- name: ValueToIterator
+  result_type: WordSized
+  operands:
+    value: BoxedValue
+  call_instruction: true
+  mir_op: ValueToIterator
+
 # Patchable jump to stubs generated for a SetProperty cache.
 - name: SetPropertyCache
   operands:
@@ -2015,7 +2078,7 @@
   mir_op: true
 
 - name: OptimizeSpreadCallCache
-  result_type: WordSized
+  result_type: BoxedValue
   operands:
     value: BoxedValue
   num_temps: 1
@@ -2046,6 +2109,16 @@
   result_type: BoxedValue
   operands:
     index: WordSized
+
+# Load a value from the actual arguments.
+# Returns undefined if |index| is larger-or-equals to |length|. Bails out if
+# |index| is negative.
+- name: GetFrameArgumentHole
+  result_type: BoxedValue
+  operands:
+    index: WordSized
+    length: WordSized
+  num_temps: 1
 
 # Create the rest parameter.
 - name: Rest
@@ -2510,6 +2583,12 @@
     base: WordSized
   mir_op: true
 
+- name: WasmAddOffset64
+  result_type: Int64
+  operands:
+    base: Int64
+  mir_op: WasmAddOffset
+
 - name: WasmBoundsCheck
   result_type: WordSized
   operands:
@@ -2537,11 +2616,22 @@
     ptr: WordSized
   mir_op: true
 
+- name: WasmAlignmentCheck64
+  operands:
+    ptr: Int64
+  mir_op: WasmAlignmentCheck
+
 - name: WasmLoadTls
   result_type: WordSized
   operands:
     tlsPtr: WordSized
   mir_op: true
+
+- name: WasmLoadTls64
+  result_type: Int64
+  operands:
+    tlsPtr: WordSized
+  mir_op: WasmLoadTls
 
 - name: WasmHeapBase
   result_type: WordSized
@@ -2723,6 +2813,11 @@
   mir_op: true
 
 - name: GuardNullOrUndefined
+  operands:
+    input: BoxedValue
+  mir_op: true
+
+- name: GuardIsNotObject
   operands:
     input: BoxedValue
   mir_op: true

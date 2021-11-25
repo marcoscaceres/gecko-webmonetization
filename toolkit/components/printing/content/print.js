@@ -195,14 +195,11 @@ var PrintEventHandler = {
     this.topContentTitle = topWindowContext.documentTitle;
     this.topCurrentURI = topWindowContext.documentURI.spec;
 
-    let canPrintSelectionOnly =
-      this.hasSelection && this.printPreviewEl.canPrintSelectionOnly;
-    if (!canPrintSelectionOnly && !this.isArticle) {
+    if (!this.hasSelection && !this.isArticle) {
       document.getElementById("source-version-section").hidden = true;
     } else {
-      document.getElementById(
-        "source-version-selection"
-      ).hidden = !canPrintSelectionOnly;
+      document.getElementById("source-version-selection").hidden = !this
+        .hasSelection;
       document.getElementById("source-version-simplified").hidden = !this
         .isArticle;
     }
@@ -242,7 +239,7 @@ var PrintEventHandler = {
     PrintSettingsViewProxy.fallbackPaperList = fallbackPaperList;
     PrintSettingsViewProxy.defaultSystemPrinter = defaultSystemPrinter;
     PrintSettingsViewProxy._sourceVersion =
-      canPrintSelectionOnly && this.printSelectionOnly ? "selection" : "source";
+      this.hasSelection && this.printSelectionOnly ? "selection" : "source";
 
     logger.debug("availablePrinters: ", Object.keys(printersByName));
     logger.debug("defaultSystemPrinter: ", defaultSystemPrinter);
@@ -821,7 +818,7 @@ var PrintEventHandler = {
         .add(elapsed);
     }
 
-    let totalPageCount, sheetCount, isEmpty;
+    let totalPageCount, sheetCount, isEmpty, orientation;
     try {
       // This resolves with a PrintPreviewSuccessInfo dictionary.
       let { sourceVersion } = this.viewSettings;
@@ -831,6 +828,7 @@ var PrintEventHandler = {
         totalPageCount,
         sheetCount,
         isEmpty,
+        orientation,
       } = await this.printPreviewEl.printPreview(settings, {
         sourceVersion,
         sourceURI,
@@ -839,6 +837,18 @@ var PrintEventHandler = {
       this.reportPrintingError("PRINT_PREVIEW");
       Cu.reportError(e);
       throw e;
+    }
+
+    // If there is a set orientation, update the settings to use it. In this
+    // case, the document will already have used this orientation to create
+    // the print preview.
+    if (orientation != "unspecified") {
+      const kIPrintSettings = Ci.nsIPrintSettings;
+      settings.orientation =
+        orientation == "landscape"
+          ? kIPrintSettings.kLandscapeOrientation
+          : kIPrintSettings.kPortraitOrientation;
+      document.dispatchEvent(new CustomEvent("hide-orientation"));
     }
 
     this.previewIsEmpty = isEmpty;
@@ -1900,6 +1910,11 @@ customElements.define("paper-size-select", PaperSizePicker, {
 });
 
 class OrientationInput extends PrintUIControlMixin(HTMLElement) {
+  initialize() {
+    super.initialize();
+    document.addEventListener("hide-orientation", this);
+  }
+
   get templateId() {
     return "orientation-template";
   }
@@ -1911,6 +1926,10 @@ class OrientationInput extends PrintUIControlMixin(HTMLElement) {
   }
 
   handleEvent(e) {
+    if (e.type == "hide-orientation") {
+      document.getElementById("orientation").hidden = true;
+      return;
+    }
     this.dispatchSettingsChange({
       orientation: e.target.value,
     });
@@ -2032,6 +2051,7 @@ class PageRangeInput extends PrintUIControlMixin(HTMLElement) {
     this._rangeInput = this.querySelector("#custom-range");
     this._rangeInput.title = "";
     this._rangePicker = this.querySelector("#range-picker");
+    this._rangePickerEvenOption = this._rangePicker.namedItem("even");
     this._rangeError = this.querySelector("#error-invalid-range");
     this._startRangeOverflowError = this.querySelector(
       "#error-invalid-start-range-overflow"
@@ -2049,15 +2069,26 @@ class PageRangeInput extends PrintUIControlMixin(HTMLElement) {
   }
 
   updatePageRange() {
-    let isAll = this._rangePicker.value == "all";
-    if (isAll) {
+    let isCustom = this._rangePicker.value == "custom";
+    if (isCustom) {
+      this.validateRangeInput();
+    } else {
       this._pagesSet.clear();
+
+      if (this._rangePicker.value == "odd") {
+        for (let i = 1; i <= this._numPages; i += 2) {
+          this._pagesSet.add(i);
+        }
+      } else if (this._rangePicker.value == "even") {
+        for (let i = 2; i <= this._numPages; i += 2) {
+          this._pagesSet.add(i);
+        }
+      }
+
       if (!this._rangeInput.checkValidity()) {
         this._rangeInput.setCustomValidity("");
         this._rangeInput.value = "";
       }
-    } else {
-      this.validateRangeInput();
     }
 
     this.dispatchEvent(new Event("revalidate", { bubbles: true }));
@@ -2072,7 +2103,7 @@ class PageRangeInput extends PrintUIControlMixin(HTMLElement) {
 
     // If it's valid, update the page range and hide the error messages.
     // Otherwise, set the appropriate error message
-    if (this._rangeInput.validity.valid || isAll) {
+    if (this._rangeInput.validity.valid || !isCustom) {
       window.clearTimeout(this.showErrorTimeoutId);
       this._startRangeOverflowError.hidden = this._rangeError.hidden = true;
     } else {
@@ -2082,7 +2113,10 @@ class PageRangeInput extends PrintUIControlMixin(HTMLElement) {
 
   dispatchPageRange(shouldCancel = true) {
     window.clearTimeout(this.showErrorTimeoutId);
-    if (this._rangeInput.validity.valid || this._rangePicker.value == "all") {
+    if (
+      this._rangeInput.validity.valid ||
+      this._rangePicker.value != "custom"
+    ) {
       this.dispatchSettingsChange({
         pageRanges: this.formatPageRange(),
       });
@@ -2107,7 +2141,7 @@ class PageRangeInput extends PrintUIControlMixin(HTMLElement) {
   formatPageRange() {
     if (
       this._pagesSet.size == 0 ||
-      this._rangeInput.value == "" ||
+      (this._rangePicker.value == "custom" && this._rangeInput.value == "") ||
       this._rangePicker.value == "all"
     ) {
       // Show all pages.
@@ -2228,7 +2262,8 @@ class PageRangeInput extends PrintUIControlMixin(HTMLElement) {
   }
 
   validateRangeInput() {
-    let value = this._rangePicker.value == "all" ? "" : this._rangeInput.value;
+    let value =
+      this._rangePicker.value == "custom" ? this._rangeInput.value : "";
     this._validateRangeInput(value, this._numPages);
   }
 
@@ -2255,6 +2290,7 @@ class PageRangeInput extends PrintUIControlMixin(HTMLElement) {
 
       this._numPages = totalPages;
       this._rangeInput.disabled = false;
+      this._rangePickerEvenOption.disabled = this._numPages < 2;
 
       let prevPages = Array.from(this._pagesSet);
       this.updatePageRange();
@@ -2274,7 +2310,7 @@ class PageRangeInput extends PrintUIControlMixin(HTMLElement) {
     }
 
     if (e.target == this._rangePicker) {
-      this._rangeInput.hidden = e.target.value == "all";
+      this._rangeInput.hidden = e.target.value != "custom";
       this.updatePageRange();
       this.dispatchPageRange();
       if (!this._rangeInput.hidden) {
@@ -2327,18 +2363,39 @@ class MarginsPicker extends PrintUIControlMixin(HTMLElement) {
   updateMaxValues() {
     let maxWidth = this.toCurrentUnitValue(this._maxWidth);
     let maxHeight = this.toCurrentUnitValue(this._maxHeight);
-    this._customTopMargin.max = maxHeight - this._customBottomMargin.value;
-    this._customBottomMargin.max = maxHeight - this._customTopMargin.value;
-    this._customLeftMargin.max = maxWidth - this._customRightMargin.value;
-    this._customRightMargin.max = maxWidth - this._customLeftMargin.value;
+    this._customTopMargin.max = this.formatMaxAttr(
+      maxHeight - this._customBottomMargin.value
+    );
+    this._customBottomMargin.max = this.formatMaxAttr(
+      maxHeight - this._customTopMargin.value
+    );
+    this._customLeftMargin.max = this.formatMaxAttr(
+      maxWidth - this._customRightMargin.value
+    );
+    this._customRightMargin.max = this.formatMaxAttr(
+      maxWidth - this._customLeftMargin.value
+    );
+  }
+
+  truncateTwoDecimals(val) {
+    if (val.split(".")[1].length > 2) {
+      let dotIndex = val.indexOf(".");
+      return val.slice(0, dotIndex + 3);
+    }
+    return val;
+  }
+
+  formatMaxAttr(val) {
+    const strVal = val.toString();
+    if (strVal.includes(".")) {
+      return this.truncateTwoDecimals(strVal);
+    }
+    return val;
   }
 
   formatMargin(target) {
     if (target.value.includes(".")) {
-      if (target.value.split(".")[1].length > 2) {
-        let dotIndex = target.value.indexOf(".");
-        target.value = target.value.slice(0, dotIndex + 3);
-      }
+      target.value = this.truncateTwoDecimals(target.value);
     }
   }
 
@@ -2570,13 +2627,15 @@ class PageCount extends PrintUIControlMixin(HTMLElement) {
       return;
     }
 
-    let sheetCount = this.sheetCount * this.numCopies;
+    let sheetCount = this.sheetCount;
 
     // When printing to a printer (not to a file) update
     // the sheet count to account for duplex printing.
     if (!this.printToFile && this.duplex != Ci.nsIPrintSettings.kDuplexNone) {
       sheetCount = Math.ceil(sheetCount / 2);
     }
+
+    sheetCount *= this.numCopies;
 
     document.l10n.setAttributes(this, "printui-sheets-count", {
       sheetCount,

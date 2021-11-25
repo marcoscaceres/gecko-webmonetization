@@ -408,18 +408,6 @@ def check_prog(*args, **kwargs):
     return check_prog(*args, **kwargs)
 
 
-@depends(target, host)
-def want_wine(target, host):
-    return target.kernel == "WINNT" and host.kernel != "WINNT"
-
-
-wine = check_prog(
-    "WINE",
-    ["wine64", "wine"],
-    allow_missing=True,
-    when=want_wine,
-    bootstrap="wine/bin",
-)
 check_prog("WGET", ("wget",), allow_missing=True)
 
 
@@ -688,6 +676,13 @@ option(
 
 set_config("MOZ_UI_LOCALE", depends("--enable-ui-locale")(lambda x: x))
 
+option(
+    "--enable-icu4x",
+    help="An experiment to use ICU4X instead of ICU4C. See intl/ICU4X.md",
+)
+
+set_config("MOZ_ICU4X", True, when="--enable-icu4x")
+
 # clang-plugin location
 # ==============================================================
 
@@ -887,50 +882,27 @@ check_prog("HFS_TOOL", extra_programs.HFS_TOOL, allow_missing=True)
 check_prog("RPMBUILD", extra_programs.RPMBUILD, allow_missing=True)
 
 
-@depends(target)
-@imports("os")
-def makensis_progs(target):
-    if target.kernel != "WINNT":
-        return
-
-    candidates = [
-        "makensis-3.01",
-        "makensis-3.0b3",
-        "makensis-3.0b1",
-        "makensis",
-        "makensis.exe",
-    ]
-
-    # Look for nsis installed by msys environment. But only the 32-bit version.
-    # We use an absolute path and insert as the first entry so it is preferred
-    # over a 64-bit exe that may be in PATH.
-    if "MSYSTEM_PREFIX" in os.environ:
-        prefix = os.path.dirname(os.environ["MSYSTEM_PREFIX"])
-        candidates.insert(0, os.path.join(prefix, "mingw32", "bin", "makensis.exe"))
-
-    return tuple(candidates)
-
-
-nsis = check_prog("MAKENSISU", makensis_progs, bootstrap="nsis/bin", allow_missing=True)
+nsis = check_prog(
+    "MAKENSISU",
+    ("makensis",),
+    bootstrap="nsis/bin",
+    allow_missing=True,
+    when=target_is_windows,
+)
 
 # Make sure the version of makensis is up to date.
 
 
-@depends(nsis, wine)
+@depends_if(nsis)
 @checking("for NSIS version")
 @imports("re")
-def nsis_version(nsis, wine):
-    if not nsis:
-        return None
+def nsis_version(nsis):
     nsis_min_version = "3.0b1"
 
     def onerror():
         return die("Failed to get nsis version.")
 
-    if wine and nsis.lower().endswith(".exe"):
-        out = check_cmd_output(wine, nsis, "-version", onerror=onerror)
-    else:
-        out = check_cmd_output(nsis, "-version", onerror=onerror)
+    out = check_cmd_output(nsis, "-version", onerror=onerror)
 
     m = re.search(r"(?<=v)[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?", out)
 
@@ -974,32 +946,36 @@ check_prog("7Z", ("7z", "7za"), allow_missing=True, when=target_is_windows)
 check_prog("UPX", ("upx",), allow_missing=True, when=target_is_windows)
 
 
-@depends(host_c_compiler, c_compiler, bindgen_config_paths)
-def llvm_objdump(host_c_compiler, c_compiler, bindgen_config_paths):
-    clang = None
-    for compiler in (host_c_compiler, c_compiler):
-        if compiler and compiler.type == "clang":
-            clang = compiler.compiler
-            break
-        elif compiler and compiler.type == "clang-cl":
-            clang = os.path.join(os.path.dirname(compiler.compiler), "clang")
-            break
+@template
+def llvm_tool(name):
+    @depends(host_c_compiler, c_compiler, bindgen_config_paths)
+    def llvm_tool(host_c_compiler, c_compiler, bindgen_config_paths):
+        clang = None
+        for compiler in (host_c_compiler, c_compiler):
+            if compiler and compiler.type == "clang":
+                clang = compiler.compiler
+                break
+            elif compiler and compiler.type == "clang-cl":
+                clang = os.path.join(os.path.dirname(compiler.compiler), "clang")
+                break
 
-    if not clang and bindgen_config_paths:
-        clang = bindgen_config_paths.clang_path
-    llvm_objdump = "llvm-objdump"
-    if clang:
-        out = check_cmd_output(
-            clang, "--print-prog-name=llvm-objdump", onerror=lambda: None
-        )
-        if out:
-            llvm_objdump = out.rstrip()
-    return (llvm_objdump,)
+        if not clang and bindgen_config_paths:
+            clang = bindgen_config_paths.clang_path
+        tool = name
+        if clang:
+            out = check_cmd_output(
+                clang, "--print-prog-name=%s" % tool, onerror=lambda: None
+            )
+            if out:
+                tool = out.rstrip()
+        return (tool,)
+
+    return llvm_tool
 
 
 llvm_objdump = check_prog(
     "LLVM_OBJDUMP",
-    llvm_objdump,
+    llvm_tool("llvm-objdump"),
     what="llvm-objdump",
     when="--enable-compile-environment",
     paths=clang_search_path,
@@ -1007,6 +983,41 @@ llvm_objdump = check_prog(
 
 add_old_configure_assignment("LLVM_OBJDUMP", llvm_objdump)
 
+
+@depends(llvm_tool("llvm-readelf"), toolchain_prefix)
+def readelf(llvm_readelf, toolchain_prefix):
+    commands = [llvm_readelf[0], "readelf"]
+    for prefix in toolchain_prefix or ():
+        commands.insert(1, "%sreadelf" % prefix)
+    return tuple(commands)
+
+
+def validate_readelf(path):
+    # llvm-readelf from llvm < 8 doesn't support the GNU binutils-compatible `-d`
+    # flag. We could try running `$path -d $some_binary` but we might be cross
+    # compiling and not have a binary at hand to run that against. `$path -d` alone
+    # would fail whether the flag is supported or not. So we resort to look for the
+    # option in the `--help` output, which fortunately, s compatible between
+    # llvm-readelf and readelf.
+    retcode, stdout, stderr = get_cmd_output(path, "--help")
+    return retcode == 0 and any(l.startswith("  -d ") for l in stdout.splitlines())
+
+
+@depends("--enable-compile-environment", target, host)
+def readelf_when(compile_env, target, host):
+    return compile_env and any(
+        x.kernel not in ("Darwin", "WINNT") for x in (target, host)
+    )
+
+
+check_prog(
+    "READELF",
+    readelf,
+    what="readelf",
+    when=readelf_when,
+    paths=clang_search_path,
+    validate=validate_readelf,
+)
 
 option("--enable-dtrace", help="Build with dtrace support")
 
@@ -1166,7 +1177,7 @@ def config_status_deps(build_env, build_project):
             os.path.join(topsrcdir, "build", "build_virtualenv_packages.txt"),
             os.path.join(topsrcdir, "build", "common_virtualenv_packages.txt"),
             os.path.join(topsrcdir, "build", "mach_virtualenv_packages.txt"),
-            os.path.join(topsrcdir, "python", "mozbuild", "mozbuild", "virtualenv.py"),
+            os.path.join(topsrcdir, "python", "mach", "mach", "site.py"),
             os.path.join(topsrcdir, "aclocal.m4"),
             os.path.join(topsrcdir, "old-configure.in"),
             os.path.join(topsrcdir, "js", "src", "aclocal.m4"),

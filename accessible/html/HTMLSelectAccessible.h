@@ -38,6 +38,7 @@ class HTMLSelectListAccessible : public AccessibleWrap {
   virtual a11y::role NativeRole() const override;
   virtual uint64_t NativeState() const override;
   virtual bool IsAcceptableChild(nsIContent* aEl) const override;
+  virtual bool AttributeChangesState(nsAtom* aAttribute) override;
 
   // SelectAccessible
   virtual bool SelectAll() override;
@@ -69,6 +70,8 @@ class HTMLSelectOptionAccessible : public HyperTextAccessibleWrap {
   virtual int32_t GetLevelInternal() override;
   virtual nsRect RelativeBounds(nsIFrame** aBoundingFrame) const override;
   virtual void SetSelected(bool aSelect) override;
+
+  nsresult HandleAccEvent(AccEvent* aEvent) override;
 
   // ActionAccessible
   virtual uint8_t ActionCount() const override;

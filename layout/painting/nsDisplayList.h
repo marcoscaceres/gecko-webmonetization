@@ -86,7 +86,6 @@ namespace layers {
 struct FrameMetrics;
 class RenderRootStateManager;
 class Layer;
-class ImageLayer;
 class ImageContainer;
 class StackingContextHelper;
 class WebRenderScrollData;
@@ -930,6 +929,14 @@ class nsDisplayListBuilder {
       const DisplayItemClipChain* aLeafClip2);
 
   /**
+   * Same as above, except aAncestor is computed as the nearest common
+   * ancestor of the two provided clips.
+   */
+  const DisplayItemClipChain* CreateClipChainIntersection(
+      const DisplayItemClipChain* aLeafClip1,
+      const DisplayItemClipChain* aLeafClip2);
+
+  /**
    * Clone the supplied clip chain's chain items into this builder's arena.
    */
   const DisplayItemClipChain* CopyWholeChain(
@@ -1191,13 +1198,7 @@ class nsDisplayListBuilder {
    */
   class AutoContainerASRTracker {
    public:
-    explicit AutoContainerASRTracker(nsDisplayListBuilder* aBuilder)
-        : mBuilder(aBuilder),
-          mSavedContainerASR(aBuilder->mCurrentContainerASR) {
-      mBuilder->mCurrentContainerASR = ActiveScrolledRoot::PickDescendant(
-          mBuilder->ClipState().GetContentClipASR(),
-          mBuilder->mCurrentActiveScrolledRoot);
-    }
+    explicit AutoContainerASRTracker(nsDisplayListBuilder* aBuilder);
 
     const ActiveScrolledRoot* GetContainerASR() {
       return mBuilder->mCurrentContainerASR;
@@ -3205,9 +3206,6 @@ class nsDisplayList {
    * layer manager has already had BeginTransaction() called on it and
    * we should not call it again.
    *
-   * If PAINT_COMPRESSED is set, the FrameLayerBuilder should be set to
-   * compressed mode to avoid short cut optimizations.
-   *
    * This must only be called on the root display list of the display list
    * tree.
    *
@@ -3218,9 +3216,7 @@ class nsDisplayList {
     PAINT_DEFAULT = 0,
     PAINT_USE_WIDGET_LAYERS = 0x01,
     PAINT_EXISTING_TRANSACTION = 0x04,
-    PAINT_NO_COMPOSITE = 0x08,
-    PAINT_COMPRESSED = 0x10,
-    PAINT_IDENTICAL_DISPLAY_LIST = 0x20
+    PAINT_IDENTICAL_DISPLAY_LIST = 0x08
   };
   void PaintRoot(nsDisplayListBuilder* aBuilder, gfxContext* aCtx,
                  uint32_t aFlags, Maybe<double> aDisplayListBuildTime);
@@ -4842,7 +4838,18 @@ class nsDisplayWrapList : public nsPaintedDisplayItem {
       wr::DisplayListBuilder& aBuilder, wr::IpcResourceUpdateQueue& aResources,
       const StackingContextHelper& aSc,
       layers::RenderRootStateManager* aManager,
-      nsDisplayListBuilder* aDisplayListBuilder) override;
+      nsDisplayListBuilder* aDisplayListBuilder) override {
+    return CreateWebRenderCommandsNewClipListOption(
+        aBuilder, aResources, aSc, aManager, aDisplayListBuilder, true);
+  }
+
+  // Same as the above but with the option to pass the aNewClipList argument to
+  // WebRenderCommandBuilder::CreateWebRenderCommandsFromDisplayList.
+  bool CreateWebRenderCommandsNewClipListOption(
+      wr::DisplayListBuilder& aBuilder, wr::IpcResourceUpdateQueue& aResources,
+      const StackingContextHelper& aSc,
+      layers::RenderRootStateManager* aManager,
+      nsDisplayListBuilder* aDisplayListBuilder, bool aNewClipList);
 
   const ActiveScrolledRoot* GetFrameActiveScrolledRoot() {
     return mFrameActiveScrolledRoot;
@@ -5015,8 +5022,8 @@ class nsDisplayOpacity : public nsDisplayWrapList {
     return mChildOpacityState == ChildOpacityState::Applied;
   }
 
-  static bool NeedsActiveLayer(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame,
-                               bool aEnforceMinimumSize = true);
+  static bool NeedsActiveLayer(nsDisplayListBuilder* aBuilder,
+                               nsIFrame* aFrame);
   void WriteDebugInfo(std::stringstream& aStream) override;
   bool CanUseAsyncAnimations(nsDisplayListBuilder* aBuilder) override;
   bool CreateWebRenderCommands(
@@ -5488,11 +5495,11 @@ class nsDisplayFixedPosition : public nsDisplayOwnLayer {
   nsDisplayFixedPosition(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame,
                          nsDisplayList* aList,
                          const ActiveScrolledRoot* aActiveScrolledRoot,
-                         const ActiveScrolledRoot* aContainerASR);
+                         const ActiveScrolledRoot* aScrollTargetASR);
   nsDisplayFixedPosition(nsDisplayListBuilder* aBuilder,
                          const nsDisplayFixedPosition& aOther)
       : nsDisplayOwnLayer(aBuilder, aOther),
-        mContainerASR(aOther.mContainerASR),
+        mScrollTargetASR(aOther.mScrollTargetASR),
         mIsFixedBackground(aOther.mIsFixedBackground) {
     MOZ_COUNT_CTOR(nsDisplayFixedPosition);
   }
@@ -5500,7 +5507,7 @@ class nsDisplayFixedPosition : public nsDisplayOwnLayer {
   static nsDisplayFixedPosition* CreateForFixedBackground(
       nsDisplayListBuilder* aBuilder, nsIFrame* aFrame,
       nsIFrame* aSecondaryFrame, nsDisplayBackgroundImage* aImage,
-      const uint16_t aIndex);
+      const uint16_t aIndex, const ActiveScrolledRoot* aScrollTargetASR);
 
   MOZ_COUNTED_DTOR_OVERRIDE(nsDisplayFixedPosition)
 
@@ -5527,10 +5534,11 @@ class nsDisplayFixedPosition : public nsDisplayOwnLayer {
  protected:
   // For background-attachment:fixed
   nsDisplayFixedPosition(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame,
-                         nsDisplayList* aList);
+                         nsDisplayList* aList,
+                         const ActiveScrolledRoot* aScrollTargetASR);
   ViewID GetScrollTargetId();
 
-  RefPtr<const ActiveScrolledRoot> mContainerASR;
+  RefPtr<const ActiveScrolledRoot> mScrollTargetASR;
   bool mIsFixedBackground;
 
  private:
@@ -5553,7 +5561,8 @@ class nsDisplayTableFixedPosition : public nsDisplayFixedPosition {
 
  protected:
   nsDisplayTableFixedPosition(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame,
-                              nsDisplayList* aList, nsIFrame* aAncestorFrame);
+                              nsDisplayList* aList, nsIFrame* aAncestorFrame,
+                              const ActiveScrolledRoot* aScrollTargetASR);
 
   nsDisplayTableFixedPosition(nsDisplayListBuilder* aBuilder,
                               const nsDisplayTableFixedPosition& aOther)
@@ -5818,10 +5827,6 @@ class nsDisplayMasksAndClipPaths : public nsDisplayEffectsBase {
 
  private:
   NS_DISPLAY_ALLOW_CLONING()
-
-  // According to mask property and the capability of aManager, determine
-  // whether we can paint the mask onto a dedicate mask layer.
-  bool CanPaintOnMaskLayer(LayerManager* aManager);
 
   nsTArray<nsRect> mDestRects;
 };
@@ -6262,8 +6267,7 @@ class nsDisplayTransform : public nsPaintedDisplayItem {
 
   bool CanUseAsyncAnimations(nsDisplayListBuilder* aBuilder) override;
 
-  bool MayBeAnimated(nsDisplayListBuilder* aBuilder,
-                     bool aEnforceMinimumSize = true) const;
+  bool MayBeAnimated(nsDisplayListBuilder* aBuilder) const;
 
   void WriteDebugInfo(std::stringstream& aStream) override;
 

@@ -137,6 +137,7 @@
 #include "mozilla/dom/LocalStorage.h"
 #include "mozilla/dom/LocalStorageCommon.h"
 #include "mozilla/dom/Location.h"
+#include "mozilla/dom/MediaDevices.h"
 #include "mozilla/dom/MediaKeys.h"
 #include "mozilla/dom/NavigatorBinding.h"
 #include "mozilla/dom/Nullable.h"
@@ -1617,6 +1618,20 @@ bool nsGlobalWindowInner::IsBlackForCC(bool aTracingNeeded) {
 // nsGlobalWindowInner::nsIScriptGlobalObject
 //*****************************************************************************
 
+bool nsGlobalWindowInner::ShouldResistFingerprinting() const {
+  if (mDoc) {
+    return nsContentUtils::ShouldResistFingerprinting(mDoc);
+  }
+  return nsIScriptGlobalObject::ShouldResistFingerprinting();
+}
+
+uint32_t nsGlobalWindowInner::GetPrincipalHashValue() const {
+  if (mDoc) {
+    return mDoc->NodePrincipal()->GetHashValue();
+  }
+  return 0;
+}
+
 nsresult nsGlobalWindowInner::EnsureScriptEnvironment() {
   // NOTE: We can't use FORWARD_TO_OUTER here because we don't want to fail if
   // we're called on an inactive inner window.
@@ -2016,11 +2031,10 @@ void nsGlobalWindowInner::GetEventTargetParent(EventChainPreVisitor& aVisitor) {
   aVisitor.mCanHandle = true;
   aVisitor.mForceContentDispatch = true;  // FIXME! Bug 329119
   if (msg == eResize && aVisitor.mEvent->IsTrusted()) {
-    // QIing to window so that we can keep the old behavior also in case
-    // a child window is handling resize.
-    nsCOMPtr<nsPIDOMWindowInner> window =
-        do_QueryInterface(aVisitor.mEvent->mOriginalTarget);
-    if (window) {
+    // Checking whether the event target is an inner window or not, so we can
+    // keep the old behavior also in case a child window is handling resize.
+    if (aVisitor.mEvent->mOriginalTarget &&
+        aVisitor.mEvent->mOriginalTarget->IsInnerWindow()) {
       mIsHandlingResizeEvent = true;
     }
   } else if (msg == eMouseDown && aVisitor.mEvent->IsTrusted()) {
@@ -2310,6 +2324,10 @@ Navigator* nsPIDOMWindowInner::Navigator() {
   return mNavigator;
 }
 
+MediaDevices* nsPIDOMWindowInner::GetExtantMediaDevices() const {
+  return mNavigator ? mNavigator->GetExtantMediaDevices() : nullptr;
+}
+
 VisualViewport* nsGlobalWindowInner::VisualViewport() {
   if (!mVisualViewport) {
     mVisualViewport = new mozilla::dom::VisualViewport(this);
@@ -2594,33 +2612,32 @@ bool nsGlobalWindowInner::CrossOriginIsolated() const {
 
 void nsPIDOMWindowInner::AddPeerConnection() {
   MOZ_ASSERT(NS_IsMainThread());
-  mTopInnerWindow ? mTopInnerWindow->mTotalActivePeerConnections++
-                  : mTotalActivePeerConnections++;
   ++mActivePeerConnections;
   if (mActivePeerConnections == 1 && mWindowGlobalChild) {
-    mWindowGlobalChild->BlockBFCacheFor(BFCacheStatus::ACTIVE_PEER_CONNECTION);
+    mWindowGlobalChild->SendUpdateActivePeerConnectionStatus(
+        /*aIsAdded*/ true);
   }
 }
 
 void nsPIDOMWindowInner::RemovePeerConnection() {
   MOZ_ASSERT(NS_IsMainThread());
-  MOZ_ASSERT(mTopInnerWindow ? mTopInnerWindow->mTotalActivePeerConnections
-                             : mTotalActivePeerConnections);
   MOZ_ASSERT(mActivePeerConnections > 0);
-
-  mTopInnerWindow ? mTopInnerWindow->mTotalActivePeerConnections--
-                  : mTotalActivePeerConnections--;
   --mActivePeerConnections;
   if (mActivePeerConnections == 0 && mWindowGlobalChild) {
-    mWindowGlobalChild->UnblockBFCacheFor(
-        BFCacheStatus::ACTIVE_PEER_CONNECTION);
+    mWindowGlobalChild->SendUpdateActivePeerConnectionStatus(
+        /*aIsAdded*/ false);
   }
 }
 
 bool nsPIDOMWindowInner::HasActivePeerConnections() {
   MOZ_ASSERT(NS_IsMainThread());
-  return mTopInnerWindow ? mTopInnerWindow->mTotalActivePeerConnections
-                         : mTotalActivePeerConnections;
+  WindowContext* wc = GetWindowContext();
+  if (!wc) {
+    return false;
+  }
+
+  WindowContext* topWindowContext = wc->TopWindowContext();
+  return topWindowContext && topWindowContext->GetHasActivePeerConnections();
 }
 
 void nsPIDOMWindowInner::AddMediaKeysInstance(MediaKeys* aMediaKeys) {
@@ -3906,8 +3923,7 @@ void nsGlobalWindowInner::ScrollBy(const ScrollToOptions& aOptions) {
                                 ? ScrollMode::SmoothMsd
                                 : ScrollMode::Instant;
 
-    sf->ScrollByCSSPixels(scrollDelta, scrollMode,
-                          mozilla::ScrollOrigin::Relative);
+    sf->ScrollByCSSPixels(scrollDelta, scrollMode);
   }
 }
 
@@ -5045,8 +5061,9 @@ nsGlobalWindowInner::ShowSlowScriptDialog(JSContext* aCx,
       // script.
       RefPtr<nsGlobalWindowOuter> outer = GetOuterWindowInternal();
       outer->EnterModalState();
-      SpinEventLoopUntil(
-          [&]() { return monitor->IsDebuggerStartupComplete(); });
+      SpinEventLoopUntil("nsGlobalWindowInner::ShowSlowScriptDialog"_ns, [&]() {
+        return monitor->IsDebuggerStartupComplete();
+      });
       outer->LeaveModalState();
       return ContinueSlowScript;
     }
@@ -5569,6 +5586,10 @@ void nsGlobalWindowInner::Resume(bool aIncludeSubWindows) {
     mAudioContexts[i]->ResumeFromChrome();
   }
 
+  if (RefPtr<MediaDevices> devices = GetExtantMediaDevices()) {
+    devices->WindowResumed();
+  }
+
   mTimeoutManager->Resume();
 
   ResumeIdleRequests();
@@ -5718,6 +5739,13 @@ void nsGlobalWindowInner::SyncStateFromParentWindow() {
   for (uint32_t i = 0; i < (parentSuspendDepth - parentFreezeDepth); ++i) {
     Suspend();
   }
+}
+
+void nsGlobalWindowInner::UpdateBackgroundState() {
+  if (RefPtr<MediaDevices> devices = GetExtantMediaDevices()) {
+    devices->BackgroundStateChanged();
+  }
+  mTimeoutManager->UpdateBackgroundState();
 }
 
 template <typename Method, typename... Args>
@@ -5897,6 +5925,10 @@ nsGlobalWindowInner::GetOrCreateServiceWorkerRegistration(
     ref = ServiceWorkerRegistration::CreateForMainThread(this, aDescriptor);
   }
   return ref;
+}
+
+StorageAccess nsGlobalWindowInner::GetStorageAccess() {
+  return StorageAllowedForWindow(this);
 }
 
 nsresult nsGlobalWindowInner::FireDelayedDOMEvents(bool aIncludeSubWindows) {
@@ -6220,7 +6252,7 @@ bool nsGlobalWindowInner::RunTimeoutHandler(Timeout* aTimeout,
   const char* reason = GetTimeoutReasonString(timeout);
 
   nsCString str;
-  if (profiler_can_accept_markers()) {
+  if (profiler_thread_is_being_profiled_for_markers()) {
     TimeDuration originalInterval = timeout->When() - timeout->SubmitTime();
     str.Append(reason);
     str.Append(" with interval ");
@@ -7430,6 +7462,14 @@ already_AddRefed<Promise> nsGlobalWindowInner::CreateImageBitmap(
     int32_t aSh, const ImageBitmapOptions& aOptions, ErrorResult& aRv) {
   return ImageBitmap::Create(
       this, aImage, Some(gfx::IntRect(aSx, aSy, aSw, aSh)), aOptions, aRv);
+}
+
+// https://html.spec.whatwg.org/#structured-cloning
+void nsGlobalWindowInner::StructuredClone(
+    JSContext* aCx, JS::Handle<JS::Value> aValue,
+    const StructuredSerializeOptions& aOptions,
+    JS::MutableHandle<JS::Value> aRetval, ErrorResult& aError) {
+  nsContentUtils::StructuredClone(aCx, this, aValue, aOptions, aRetval, aError);
 }
 
 nsresult nsGlobalWindowInner::Dispatch(

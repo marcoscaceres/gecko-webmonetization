@@ -189,6 +189,10 @@ class gfxTextRun : public gfxShapedText {
     AutoWithoutManualInSameWord
   };
 
+  static bool IsOptionalHyphenBreak(HyphenType aType) {
+    return aType >= HyphenType::Soft;
+  }
+
   struct HyphenationState {
     uint32_t mostRecentBoundary = 0;
     bool hasManualHyphen = false;
@@ -253,6 +257,7 @@ class gfxTextRun : public gfxShapedText {
     gfxFloat* advanceWidth = nullptr;
     mozilla::SVGContextPaint* contextPaint = nullptr;
     gfxTextRunDrawCallbacks* callbacks = nullptr;
+    bool allowGDI = true;
     explicit DrawParams(gfxContext* aContext) : context(aContext) {}
   };
 

@@ -13,12 +13,60 @@ exclude: true
 
 ⚠️  breaking change and deprecation notices
 
+## v96
+- Added [`onLoginFetch`][96.1] which allows apps to provide all saved logins to
+  GeckoView.
+  ([bug 1733423]({{bugzilla}}1733423)).
+- Added [`GeckoResult.finally_`][96.2] to unconditionally run an action after
+  the GeckoResult has been completed.
+  ([bug 1736433]({{bugzilla}}1736433)).
+- Added [`ERROR_INVALID_DOMAIN`][96.3] to WebExtension.InstallException.ErrorCodes.
+  ([bug 1740634]({{bugzilla}}1740634)).
+- Added [`SelectionActionDelegate.Selection.pasteAsPlainText`][96.4] to paste
+  HTML content as plain text.
+
+[96.1]: {{javadoc_uri}}/Autocomplete.StorageDelegate.html#onLoginFetch--
+[96.2]: {{javadoc_uri}}/GeckoResult.html#finally_-java.lang.Runnable-
+[96.3]: {{javadoc_uri}}/WebExtension.InstallException.ErrorCodes.html#ERROR_INVALID_DOMAIN-
+[96.4]: {{javadoc_uri}}/GeckoSession.SelectionActionDelegate.Selection.html#pasteAsPlainText--
+
+## v95
+- Added [`GeckoSession.ContentDelegate.onPointerIconChange()`][95.1] to notify
+  the application of changing pointer icon. If the application wants to handle
+  pointer icon, it should override this.
+- Deprecated [`ContentBlockingController`][95.2], use
+  [`StorageController`][95.3] instead. A [`PERMISSION_TRACKING`][95.4]
+  permission is now present in [`onLocationChange`][95.5] for every page load,
+  which can be used to set tracking protection exceptions.
+- Added [`setPrivateBrowsingPermanentPermission`][95.6], which allows apps to set
+  permanent permissions in private browsing (e.g. to set permanent tracking
+  protection permissions in private browsing).
+- Deprecated [`GeckoRuntimeSettings.Builder.enterpiseRootsEnabled`][95.7] due to typo.
+- Added [`GeckoRuntimeSettings.Builder.enterpriseRootsEnabled`][95.8] to replace [`GeckoRuntimeSettings.Builder.enterpiseRootsEnabled`][95.7].
+- Added [`GeckoSession.ContentDelegate.onPreviewImage()`][95.9] to notify
+  the application of a preview image URL.
+
+[95.1]: {{javadoc_uri}}/GeckoSession.ContentDelegate.html#onPointerIconChange-org.mozilla.geckoview.GeckoSession-android.view.PointerIcon-
+[95.2]: {{javadoc_uri}/ContentBlockingController.html
+[95.3]: {{javadoc_uri}/StorageController.java
+[95.4]: {{javadoc_uri}/GeckoSession.PermissionDelegate.html#PERMISSION_TRACKING
+[95.5]: {{javadoc_uri}/GeckoSession.NavigationDelegate.html#onLocationChange-org.mozilla.geckoview.GeckoSession-java.lang.String-java.util.List-
+[95.6]: {{javadoc_uri}/StorageController.html#setPrivateBrowsingPermanentPermission-org.mozilla.geckoview.GeckoSession.PermissionDelegate.ContentPermission-int-
+[95.7]: {{javadoc_uri}}/GeckoRuntimeSettings.Builder.html#enterpiseRootsEnabled-boolean-
+[95.8]: {{javadoc_uri}}/GeckoRuntimeSettings.Builder.html#enterpriseRootsEnabled-boolean-
+[95.9]: {{javadoc_uri}}/GeckoSession.ContentDelegate.html#onPreviewImage-org.mozilla.geckoview.GeckoSession-java.lang.String-
+
+## v94
+- Extended [`Autocomplete`][78.7] API to support credit card saving.
+
 ## v93
 - Removed deprecated ['Autocomplete.LoginStorageDelegate'][78.8].
 - Removed deprecated [`GeckoRuntime.getProfileDir`][90.5].
 - Added [`PromptInstanceDelegate`][93.1] to allow GeckoView to dismiss stale prompts.
+- Added [`WebRequestError.ERROR_HTTPS_ONLY`][93.2] error code to allow GeckoView display custom HTTPS-only error pages and bypass them.
 
 [93.1]: {{javadoc_uri}}/GeckoSession.PromptDelegate.PromptInstanceDelegate.html
+[93.2]: {{javadoc_uri}}/WebRequestError.html#ERROR_HTTPS_ONLY
 
 ## v92
 - Added [`GeckoSession.PermissionDelegate.PERMISSION_STORAGE_ACCESS`][92.1] to
@@ -1041,4 +1089,4 @@ to allow adding gecko profiler markers.
 [65.24]: {{javadoc_uri}}/CrashReporter.html#sendCrashReport-android.content.Context-android.os.Bundle-java.lang.String-
 [65.25]: {{javadoc_uri}}/GeckoResult.html
 
-[api-version]: 021709d1ae8a08d4c43997623cf50c004573d3ed
+[api-version]: 59458dfdb55ae869b0e7b55535c9742f0ad0c4bd

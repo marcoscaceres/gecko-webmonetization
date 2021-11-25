@@ -129,7 +129,9 @@ class BaseProtocolPart(ProtocolPart):
 
     @abstractmethod
     def wait(self):
-        """Wait indefinitely for the browser to close"""
+        """Wait indefinitely for the browser to close.
+
+        :returns: True to re-run the test, or False to continue with the next test"""
         pass
 
     @property
@@ -308,6 +310,21 @@ class SendKeysProtocolPart(ProtocolPart):
         :param keys: A protocol-specific handle to a string of input keys."""
         pass
 
+class WindowProtocolPart(ProtocolPart):
+    """Protocol part for manipulating the window"""
+    __metaclass__ = ABCMeta
+
+    name = "window"
+
+    @abstractmethod
+    def set_rect(self, rect):
+        """Restores the window to the given rect."""
+        pass
+
+    @abstractmethod
+    def minimize(self):
+        """Minimizes the window and returns the previous rect."""
+        pass
 
 class GenerateTestReportProtocolPart(ProtocolPart):
     """Protocol part for generating test reports"""

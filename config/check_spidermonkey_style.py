@@ -153,7 +153,7 @@ oddly_ordered_inclnames = set(
         "frontend/ReservedWordsGenerated.h",
         "gc/StatsPhasesGenerated.h",  # Included in the body of gc/Statistics.h
         "gc/StatsPhasesGenerated.inc",  # Included in the body of gc/Statistics.cpp
-        "psapi.h",  # Must be included after "util/Windows.h" on Windows
+        "psapi.h",  # Must be included after "util/WindowsWrapper.h" on Windows
         "machine/endian.h",  # Must be included after <sys/types.h> on BSD
         "winbase.h",  # Must precede other system headers(?)
         "windef.h",  # Must precede other system headers(?)
@@ -529,7 +529,7 @@ class CppBlock(object):
         self.kids[-1].lines.append(line)
 
     def style_relevant_kids(self):
-        """ Return a list of kids in this block that are style-relevant. """
+        """Return a list of kids in this block that are style-relevant."""
         return [kid for kid in self.kids if kid.is_style_relevant()]
 
     def sorted(self, enclosing_inclname):
@@ -623,7 +623,7 @@ class CppBlock(object):
 
 
 class OrdinaryCode(object):
-    """ A list of lines of code that aren't #include/#if/#else/#endif lines. """
+    """A list of lines of code that aren't #include/#if/#else/#endif lines."""
 
     def __init__(self, lines=None):
         self.lines = lines if lines is not None else []

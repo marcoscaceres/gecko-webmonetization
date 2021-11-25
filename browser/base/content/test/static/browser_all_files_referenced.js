@@ -18,7 +18,6 @@ var gExceptionPaths = [
   "resource://app/defaults/settings/blocklists/",
   "resource://app/defaults/settings/security-state/",
   "resource://app/defaults/settings/main/",
-  "resource://app/defaults/settings/pinning/",
   "resource://app/defaults/preferences/",
   "resource://gre/modules/commonjs/",
   "resource://gre/defaults/pref/",
@@ -54,6 +53,13 @@ var gExceptionPaths = [
   // Paths from this folder are constructed in NetErrorParent.jsm based on
   // the type of cert or net error the user is encountering.
   "chrome://browser/content/certerror/supportpages/",
+
+  // Points to theme preview images, which are defined in browser/ but only used
+  // in toolkit/mozapps/extensions/content/aboutaddons.js.
+  "resource://usercontext-content/builtin-themes/",
+
+  // Page data schemas are referenced programmatically.
+  "chrome://browser/content/pagedata/schemas/",
 ];
 
 // These are not part of the omni.ja file, so we find them only when running
@@ -86,9 +92,6 @@ if (AppConstants.NIGHTLY_BUILD) {
 // referencing the whitelisted file in a way that the test can't detect, or a
 // bug number to remove or use the file if it is indeed currently unreferenced.
 var whitelist = [
-  // pocket/content/panels/tmpl/loggedoutvariants/variant_a.handlebars
-  { file: "chrome://pocket/content/panels/img/glyph.svg" },
-
   // toolkit/components/pdfjs/content/PdfStreamConverter.jsm
   { file: "chrome://pdf.js/locale/chrome.properties" },
   { file: "chrome://pdf.js/locale/viewer.properties" },
@@ -206,8 +209,6 @@ var whitelist = [
   { file: "resource://gre/modules/Manifest.jsm" },
   // Bug 1356045
   { file: "chrome://global/content/test-ipc.xhtml" },
-  // Bug 1378173 (warning: still used by devtools)
-  { file: "resource://gre/modules/Promise.jsm" },
   // Bug 1494170
   // (The references to these files are dynamically generated, so the test can't
   // find the references)
@@ -263,8 +264,6 @@ var whitelist = [
     file:
       "chrome://browser/content/screenshots/icon-welcome-face-without-eyes.svg",
   },
-  { file: "chrome://browser/content/screenshots/menu-fullpage.svg" },
-  { file: "chrome://browser/content/screenshots/menu-visible.svg" },
 
   { file: "resource://app/modules/SnapshotSelector.jsm" },
 
@@ -347,7 +346,7 @@ if (!isDevtools) {
     whitelist.add("resource://services-sync/engines/" + module);
   }
   // resource://devtools/shared/worker/loader.js,
-  // resource://devtools/shared/builtin-modules.js
+  // resource://devtools/shared/loader/builtin-modules.js
   if (!AppConstants.ENABLE_WEBDRIVER) {
     whitelist.add("resource://gre/modules/jsdebugger.jsm");
   }
@@ -468,6 +467,12 @@ async function parseJsonManifest(uri) {
     return uri;
   }
 
+  if (data.background?.scripts) {
+    for (let bgscript of data.background.scripts) {
+      gReferencesFromCode.set(uri.resolve(bgscript), null);
+    }
+  }
+
   if (data.icons) {
     for (let icon of Object.values(data.icons)) {
       gReferencesFromCode.set(uri.resolve(icon), null);
@@ -479,6 +484,10 @@ async function parseJsonManifest(uri) {
       if (api.parent && api.parent.script) {
         let script = uri.resolve(api.parent.script);
         gReferencesFromCode.set(script, null);
+      }
+
+      if (api.schema) {
+        gReferencesFromCode.set(uri.resolve(api.schema), null);
       }
     }
   }
@@ -790,9 +799,9 @@ function findChromeUrlsFromArray(array, prefix) {
 add_task(async function checkAllTheFiles() {
   let libxulPath = OS.Constants.Path.libxul;
   if (AppConstants.platform != "macosx") {
-    libxulPath = OS.Constants.Path.libDir + "/" + libxulPath;
+    libxulPath = PathUtils.join(OS.Constants.Path.libDir, libxulPath);
   }
-  let libxul = await OS.File.read(libxulPath);
+  let libxul = await IOUtils.read(libxulPath);
   findChromeUrlsFromArray(libxul, "chrome://");
   findChromeUrlsFromArray(libxul, "resource://");
   // Handle NS_LITERAL_STRING.

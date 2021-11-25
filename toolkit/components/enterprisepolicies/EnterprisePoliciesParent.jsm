@@ -249,6 +249,7 @@ EnterprisePoliciesManager.prototype = {
     Services.ppmm.sharedData.delete("EnterprisePolicies:DisallowedFeatures");
 
     this._status = Ci.nsIEnterprisePolicies.UNINITIALIZED;
+    this._parsedPolicies = undefined;
     for (let timing of Object.keys(this._callbacks)) {
       this._callbacks[timing] = [];
     }
@@ -575,10 +576,10 @@ class JSONPoliciesProvider {
       ) {
         // Do nothing, _policies will remain null
       } else if (ex instanceof SyntaxError) {
-        log.error("Error parsing JSON file");
+        log.error(`Error parsing JSON file: ${ex}`);
         this._failed = true;
       } else {
-        log.error("Error reading file");
+        log.error(`Error reading JSON file: ${ex}`);
         this._failed = true;
       }
     }

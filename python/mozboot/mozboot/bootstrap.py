@@ -91,14 +91,23 @@ mozilla-unified).
 Would you like to run a few configuration steps to ensure Git is
 optimally configured?"""
 
-DEBIAN_DISTROS = ("debian", "ubuntu", "linuxmint", "elementary", "neon", "pop", "kali")
+DEBIAN_DISTROS = (
+    "debian",
+    "ubuntu",
+    "linuxmint",
+    "elementary",
+    "neon",
+    "pop",
+    "kali",
+    "devuan",
+)
 
 ADD_GIT_CINNABAR_PATH = """
 To add git-cinnabar to the PATH, edit your shell initialization script, which
-may be called ~/.bashrc or ~/.bash_profile or ~/.profile, and add the following
+may be called {prefix}/.bash_profile or {prefix}/.profile, and add the following
 lines:
 
-    export PATH="{}:$PATH"
+    export PATH="{cinnabar_dir}:$PATH"
 
 Then restart your shell.
 """
@@ -256,11 +265,11 @@ class Bootstrapper(object):
                 applications = {
                     key: value
                     for key, value in applications.items()
-                    if "artifact_mode" not in value and "mobile_android" not in value
+                    if "mobile_android" not in value
                 }
                 print(
-                    'Note: M1 Macs don\'t support "Artifact Mode", so '
-                    "it has been removed from the list of options below"
+                    "Note: M1 Macs don't support Android builds, so "
+                    "they have been removed from the list of options below"
                 )
             else:
                 print(ARTIFACT_MODE_NOTE)
@@ -485,25 +494,7 @@ def update_mercurial_repo(hg, url, dest, revision):
     """Perform a clone/pull + update of a Mercurial repository."""
     # Disable common extensions whose older versions may cause `hg`
     # invocations to abort.
-    disable_exts = [
-        "bzexport",
-        "bzpost",
-        "firefoxtree",
-        "hgwatchman",
-        "mozext",
-        "mqext",
-        "qimportbz",
-        "push-to-try",
-        "reviewboard",
-    ]
-
-    def disable_extensions(args):
-        for ext in disable_exts:
-            args.extend(["--config", "extensions.%s=!" % ext])
-
     pull_args = [hg]
-    disable_extensions(pull_args)
-
     if os.path.exists(dest):
         pull_args.extend(["pull", url])
         cwd = dest
@@ -511,16 +502,17 @@ def update_mercurial_repo(hg, url, dest, revision):
         pull_args.extend(["clone", "--noupdate", url, dest])
         cwd = "/"
 
-    update_args = [hg]
-    disable_extensions(update_args)
-    update_args.extend(["update", "-r", revision])
+    update_args = [hg, "update", "-r", revision]
 
     print("=" * 80)
     print("Ensuring %s is up to date at %s" % (url, dest))
 
+    env = os.environ.copy()
+    env.update({"HGPLAIN": "1"})
+
     try:
-        subprocess.check_call(pull_args, cwd=cwd)
-        subprocess.check_call(update_args, cwd=dest)
+        subprocess.check_call(pull_args, cwd=cwd, env=env)
+        subprocess.check_call(update_args, cwd=dest, env=env)
     finally:
         print("=" * 80)
 
@@ -646,7 +638,19 @@ def configure_git(git, cinnabar, root_state_dir, top_src_dir):
     cinnabar_dir = update_git_tools(git, root_state_dir)
 
     if not cinnabar:
-        print(ADD_GIT_CINNABAR_PATH.format(cinnabar_dir))
+        if "MOZILLABUILD" in os.environ:
+            # Slightly modify the path on Windows to be correct
+            # for the copy/paste into the .bash_profile
+            cinnabar_dir = "/" + cinnabar_dir
+            cinnabar_dir = cinnabar_dir.replace(":", "")
+
+            print(
+                ADD_GIT_CINNABAR_PATH.format(
+                    prefix="%USERPROFILE%", cinnabar_dir=cinnabar_dir
+                )
+            )
+        else:
+            print(ADD_GIT_CINNABAR_PATH.format(prefix="~", cinnabar_dir=cinnabar_dir))
 
 
 def _warn_if_risky_revision(path):

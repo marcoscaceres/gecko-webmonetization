@@ -763,3 +763,73 @@ edit-popup-settings =
 picture-in-picture-hide-toggle =
     .label = Hide Picture-in-Picture Toggle
     .accesskey = H
+
+## Since the default position for PiP controls does not change for RTL layout,
+## right-to-left languages should use "Left" and "Right" as in the English strings,
+
+picture-in-picture-move-toggle-right =
+    .label = Move Picture-in-Picture Toggle to Right Side
+    .accesskey = R
+
+picture-in-picture-move-toggle-left =
+    .label = Move Picture-in-Picture Toggle to Left Side
+    .accesskey = L
+
+##
+
+# Navigator Toolbox
+
+# This string is a spoken label that should not include
+# the word "toolbar" or such, because screen readers already know that
+# this container is a toolbar. This avoids double-speaking.
+navbar-accessible =
+    .aria-label = Navigation
+
+navbar-downloads =
+    .label = Downloads
+
+navbar-overflow =
+    .tooltiptext = More tools…
+
+# Variables:
+#   $shortcut (String): keyboard shortcut to print the page
+navbar-print =
+    .label = Print
+    .tooltiptext = Print this page… ({ $shortcut })
+
+navbar-print-tab-modal-disabled =
+    .label = Print
+    .tooltiptext = Print this page
+
+navbar-home =
+    .label = Home
+    .tooltiptext = { -brand-short-name } Home Page
+
+navbar-library =
+    .label = Library
+    .tooltiptext = View history, saved bookmarks, and more
+
+navbar-search =
+    .title = Search
+
+navbar-accessibility-indicator =
+    .tooltiptext = Accessibility Features Enabled
+
+# Name for the tabs toolbar as spoken by screen readers. The word
+# "toolbar" is appended automatically and should not be included in
+# in the string
+tabs-toolbar =
+    .aria-label = Browser tabs
+
+tabs-toolbar-new-tab =
+    .label = New Tab
+
+tabs-toolbar-list-all-tabs =
+    .label = List all tabs
+    .tooltiptext = List all tabs
+
+## Infobar shown at startup to suggest session-restore
+
+# <img data-l10n-name="icon"/> will be replaced by the application menu icon
+restore-session-startup-suggestion-message = <strong>Open previous tabs?</strong> You can restore your previous session from the { -brand-short-name } application menu <img data-l10n-name="icon"/>, under History.
+restore-session-startup-suggestion-button = Show me how

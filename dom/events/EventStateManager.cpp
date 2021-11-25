@@ -1524,6 +1524,10 @@ void EventStateManager::DispatchCrossProcessEvent(WidgetEvent* aEvent,
       return;
     }
     case eWheelEventClass: {
+      if (BrowserParent* pointerLockedRemote =
+              PointerLockManager::GetLockedRemoteTarget()) {
+        remote = pointerLockedRemote;
+      }
       remote->SendMouseWheelEvent(*aEvent->AsWheelEvent());
       return;
     }
@@ -3367,7 +3371,6 @@ nsresult EventStateManager::PostHandleEvent(nsPresContext* aPresContext,
         bool suppressBlur = false;
         if (mCurrentTarget) {
           mCurrentTarget->GetContentForEvent(aEvent, getter_AddRefs(newFocus));
-          const nsStyleUI* ui = mCurrentTarget->StyleUI();
           activeContent = mCurrentTarget->GetContent();
 
           // In some cases, we do not want to even blur the current focused
@@ -3381,16 +3384,18 @@ nsresult EventStateManager::PostHandleEvent(nsPresContext* aPresContext,
           // we click on a non-focusable element like a <div>.
           // We have to use |aEvent->mTarget| to not make sure we do not check
           // an anonymous node of the targeted element.
-          suppressBlur = (ui->mUserFocus == StyleUserFocus::Ignore);
+          suppressBlur =
+              mCurrentTarget->StyleUI()->UserFocus() == StyleUserFocus::Ignore;
 
-          nsCOMPtr<Element> element = do_QueryInterface(aEvent->mTarget);
-          if (!suppressBlur && element) {
-            nsCOMPtr<nsIDOMXULControlElement> xulControl =
-                element->AsXULControl();
-            if (xulControl) {
-              bool disabled = false;
-              xulControl->GetDisabled(&disabled);
-              suppressBlur = disabled;
+          if (!suppressBlur) {
+            if (Element* element =
+                    Element::FromEventTargetOrNull(aEvent->mTarget)) {
+              if (nsCOMPtr<nsIDOMXULControlElement> xulControl =
+                      element->AsXULControl()) {
+                bool disabled = false;
+                xulControl->GetDisabled(&disabled);
+                suppressBlur = disabled;
+              }
             }
           }
         }
@@ -4023,6 +4028,10 @@ static bool ShouldBlockCustomCursor(nsPresContext* aPresContext,
   // The cursor size won't be affected by our full zoom in the parent process,
   // so undo that before checking the rect.
   float zoom = topLevel->GetFullZoom();
+
+  // Also adjust for accessibility cursor scaling factor.
+  zoom /= LookAndFeel::GetFloat(LookAndFeel::FloatID::CursorScale, 1.0f);
+
   nsSize size(CSSPixel::ToAppUnits(width / zoom),
               CSSPixel::ToAppUnits(height / zoom));
   nsPoint hotspot(CSSPixel::ToAppUnits(aCursor.mHotspot.x / zoom),
@@ -4067,7 +4076,7 @@ static CursorImage ComputeCustomCursor(nsPresContext* aPresContext,
   // If we are falling back because any cursor before us is loading, let the
   // consumer know.
   bool loading = false;
-  for (const auto& image : style.StyleUI()->mCursor.images.AsSpan()) {
+  for (const auto& image : style.StyleUI()->Cursor().images.AsSpan()) {
     MOZ_ASSERT(image.image.IsImageRequestType(),
                "Cursor image should only parse url() types");
     uint32_t status;
@@ -5249,7 +5258,7 @@ nsresult EventStateManager::PostHandleMouseUp(
   }
 
   nsCOMPtr<nsIContent> clickTarget =
-      do_QueryInterface(aMouseUpEvent->mClickTarget);
+      nsIContent::FromEventTargetOrNull(aMouseUpEvent->mClickTarget);
   NS_ENSURE_STATE(clickTarget);
 
   // Fire click events if the event target is still available.
@@ -5602,11 +5611,9 @@ bool EventStateManager::SetContentState(nsIContent* aContent,
 
     // check to see that this state is allowed by style. Check dragover too?
     // XXX Is this even what we want?
-    if (mCurrentTarget) {
-      const nsStyleUI* ui = mCurrentTarget->StyleUI();
-      if (ui->mUserInput == StyleUserInput::None) {
-        return false;
-      }
+    if (mCurrentTarget &&
+        mCurrentTarget->StyleUI()->UserInput() == StyleUserInput::None) {
+      return false;
     }
 
     if (aState == NS_EVENT_STATE_ACTIVE) {

@@ -9,6 +9,8 @@
 #include "mozilla/Assertions.h"
 #include "mozilla/intl/ICU4CGlue.h"
 #include "mozilla/intl/ICUError.h"
+
+#include "mozilla/intl/DateTimePart.h"
 #include "mozilla/intl/DateTimePatternGenerator.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/Result.h"
@@ -314,20 +316,20 @@ class DateTimeFormat final {
   template <typename B>
   ICUResult TryFormat(double aUnixEpoch, B& aBuffer) const {
     static_assert(
-        std::is_same<typename B::CharType, unsigned char>::value ||
-            std::is_same<typename B::CharType, char>::value ||
-            std::is_same<typename B::CharType, char16_t>::value,
+        std::is_same_v<typename B::CharType, unsigned char> ||
+            std::is_same_v<typename B::CharType, char> ||
+            std::is_same_v<typename B::CharType, char16_t>,
         "The only buffer CharTypes supported by DateTimeFormat are char "
         "(for UTF-8 support) and char16_t (for UTF-16 support).");
 
-    if constexpr (std::is_same<typename B::CharType, char>::value ||
-                  std::is_same<typename B::CharType, unsigned char>::value) {
+    if constexpr (std::is_same_v<typename B::CharType, char> ||
+                  std::is_same_v<typename B::CharType, unsigned char>) {
       // The output buffer is UTF-8, but ICU uses UTF-16 internally.
 
       // Write the formatted date into the u16Buffer.
       PatternVector u16Vec;
 
-      auto result = FillVectorWithICUCall(
+      auto result = FillBufferWithICUCall(
           u16Vec, [this, &aUnixEpoch](UChar* target, int32_t length,
                                       UErrorCode* status) {
             return udat_format(mDateFormat, aUnixEpoch, target, length,
@@ -342,7 +344,7 @@ class DateTimeFormat final {
       }
       return Ok{};
     } else {
-      static_assert(std::is_same<typename B::CharType, char16_t>::value);
+      static_assert(std::is_same_v<typename B::CharType, char16_t>);
 
       // The output buffer is UTF-16. ICU can output directly into this buffer.
       return FillBufferWithICUCall(
@@ -352,6 +354,44 @@ class DateTimeFormat final {
           });
     }
   };
+
+  /**
+   * Format the Unix epoch time into a DateTimePartVector.
+   *
+   * The caller has to create the buffer and the vector and pass to this method.
+   * The formatted string will be stored in the buffer and formatted parts in
+   * the vector.
+   *
+   * aUnixEpoch is the number of milliseconds since 1 January 1970, UTC.
+   *
+   * See:
+   * https://tc39.es/ecma402/#sec-formatdatetimetoparts
+   */
+  template <typename B>
+  ICUResult TryFormatToParts(double aUnixEpoch, B& aBuffer,
+                             DateTimePartVector& aParts) const {
+    static_assert(std::is_same_v<typename B::CharType, char16_t>,
+                  "Only char16_t is supported (for UTF-16 support) now.");
+
+    UErrorCode status = U_ZERO_ERROR;
+    UFieldPositionIterator* fpositer = ufieldpositer_open(&status);
+    if (U_FAILURE(status)) {
+      return Err(ToICUError(status));
+    }
+
+    auto result = FillBufferWithICUCall(
+        aBuffer, [this, aUnixEpoch, fpositer](UChar* chars, int32_t size,
+                                              UErrorCode* status) {
+          return udat_formatForFields(mDateFormat, aUnixEpoch, chars, size,
+                                      fpositer, status);
+        });
+    if (result.isErr()) {
+      ufieldpositer_close(fpositer);
+      return result.propagateErr();
+    }
+
+    return TryFormatToParts(fpositer, aBuffer.length(), aParts);
+  }
 
   /**
    * Copies the pattern for the current DateTimeFormat to a buffer.
@@ -424,13 +464,6 @@ class DateTimeFormat final {
   ~DateTimeFormat();
 
   /**
-   * TODO(Bug 1686965) - Temporarily get the underlying ICU object while
-   * migrating to the unified API. This should be removed when completing the
-   * migration.
-   */
-  UDateFormat* UnsafeGetUDateFormat() const { return mDateFormat; }
-
-  /**
    * Clones the Calendar from a DateTimeFormat, and sets its time with the
    * relative milliseconds since 1 January 1970, UTC.
    */
@@ -443,11 +476,40 @@ class DateTimeFormat final {
   static Maybe<DateTimeFormat::HourCycle> HourCycleFromPattern(
       Span<const char16_t> aPattern);
 
+  using HourCyclesVector = Vector<HourCycle, 4>;
+
+  /**
+   * Returns the allowed hour cycles for the input locale.
+   *
+   * NOTE: This function currently takes a language subtag and an optional
+   * region subtag. This is a restriction until bug 1719746 has migrated
+   * language tag processing into the unified Intl component. After bug 1719746,
+   * this function should be changed to accept a single locale tag.
+   */
+  static Result<HourCyclesVector, ICUError> GetAllowedHourCycles(
+      Span<const char> aLanguage, Maybe<Span<const char>> aRegion);
+
+  /**
+   * Returns an iterator over all supported date-time formatter locales.
+   *
+   * The returned strings are ICU locale identifiers and NOT BCP 47 language
+   * tags.
+   *
+   * Also see <https://unicode-org.github.io/icu/userguide/locale>.
+   */
+  static auto GetAvailableLocales() {
+    return AvailableLocalesEnumeration<udat_countAvailable,
+                                       udat_getAvailable>();
+  }
+
  private:
   explicit DateTimeFormat(UDateFormat* aDateFormat);
 
   ICUResult CacheSkeleton(Span<const char16_t> aSkeleton);
 
+  ICUResult TryFormatToParts(UFieldPositionIterator* aFieldPositionIterator,
+                             size_t aSpanSize,
+                             DateTimePartVector& aParts) const;
   /**
    * Replaces all hour pattern characters in |patternOrSkeleton| to use the
    * matching hour representation for |hourCycle|.

@@ -7,27 +7,24 @@
 #include "frontend/BytecodeCompiler.h"
 
 #include "mozilla/Attributes.h"
-#include "mozilla/IntegerPrintfMacros.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/Utf8.h"     // mozilla::Utf8Unit
 #include "mozilla/Variant.h"  // mozilla::Variant
 
-#include "builtin/ModuleObject.h"
+#include "debugger/DebugAPI.h"
 #include "frontend/BytecodeCompilation.h"
 #include "frontend/BytecodeEmitter.h"
 #include "frontend/EitherParser.h"
 #include "frontend/ErrorReporter.h"
-#include "frontend/FoldConstants.h"
 #ifdef JS_ENABLE_SMOOSH
 #  include "frontend/Frontend2.h"  // Smoosh
 #endif
 #include "frontend/ModuleSharedContext.h"
-#include "frontend/Parser.h"
 #include "js/SourceText.h"
 #include "vm/FunctionFlags.h"          // FunctionFlags
 #include "vm/GeneratorAndAsyncKind.h"  // js::GeneratorKind, js::FunctionAsyncKind
 #include "vm/GlobalObject.h"
-#include "vm/HelperThreadState.h"  // ParseTask
+#include "vm/HelperThreadState.h"  // OffThreadFrontendErrors
 #include "vm/JSContext.h"
 #include "vm/JSScript.h"       // ScriptSource, UncompressedSourceCache
 #include "vm/ModuleBuilder.h"  // js::ModuleBuilder
@@ -35,10 +32,7 @@
 #include "vm/TraceLogging.h"
 #include "wasm/AsmJS.h"
 
-#include "debugger/DebugAPI-inl.h"  // DebugAPI
-#include "vm/EnvironmentObject-inl.h"
 #include "vm/GeckoProfiler-inl.h"
-#include "vm/JSContext-inl.h"
 
 using namespace js;
 using namespace js::frontend;
@@ -70,9 +64,9 @@ class MOZ_RAII AutoAssertReportedException {
       return;
     }
 
-    ParseTask* task = cx_->parseTask();
-    MOZ_ASSERT(task->outOfMemory || task->overRecursed ||
-               !task->errors.empty());
+    OffThreadFrontendErrors* errors = cx_->offThreadFrontendErrors();
+    MOZ_ASSERT(errors->outOfMemory || errors->overRecursed ||
+               !errors->errors.empty());
   }
 #else
  public:
@@ -396,9 +390,8 @@ bool frontend::InstantiateStencils(JSContext* cx, CompilationInput& input,
     }
 
     Rooted<JSScript*> script(cx, gcOutput.script);
-    if (!input.options.hideFromNewScriptInitial()) {
-      DebugAPI::onNewScript(cx, script);
-    }
+    const JS::InstantiateOptions instantiateOptions(input.options);
+    FireOnNewScript(cx, instantiateOptions, script);
   }
 
   return true;
@@ -410,7 +403,7 @@ bool frontend::PrepareForInstantiate(JSContext* cx, CompilationInput& input,
   AutoGeckoProfilerEntry pseudoFrame(cx, "stencil instantiate",
                                      JS::ProfilingCategoryPair::JS_Parsing);
 
-  return CompilationStencil::prepareForInstantiate(cx, input, stencil,
+  return CompilationStencil::prepareForInstantiate(cx, input.atomCache, stencil,
                                                    gcOutput);
 }
 
@@ -1004,15 +997,15 @@ ModuleObject* frontend::CompileModule(JSContext* cx,
 }
 
 template <typename Unit>
-static bool CompileLazyFunction(JSContext* cx, CompilationInput& input,
-                                const Unit* units, size_t length) {
+static bool CompileLazyFunctionToStencilMaybeInstantiate(
+    JSContext* cx, CompilationInput& input, const Unit* units, size_t length,
+    BytecodeCompilerOutput& output) {
   MOZ_ASSERT(input.source);
 
   AutoAssertReportedException assertException(cx);
 
-  Rooted<JSFunction*> fun(cx, input.function());
-
-  InheritThis inheritThis = fun->isArrow() ? InheritThis::Yes : InheritThis::No;
+  InheritThis inheritThis =
+      input.functionFlags().isArrow() ? InheritThis::Yes : InheritThis::No;
 
   LifoAllocScope parserAllocScope(&cx->tempLifoAlloc());
   CompilationState compilationState(cx, parserAllocScope, input);
@@ -1031,8 +1024,8 @@ static bool CompileLazyFunction(JSContext* cx, CompilationInput& input,
   }
 
   FunctionNode* pn = parser.standaloneLazyFunction(
-      fun, input.extent().toStringStart, input.strict(), input.generatorKind(),
-      input.asyncKind());
+      input, input.extent().toStringStart, input.strict(),
+      input.generatorKind(), input.asyncKind());
   if (!pn) {
     return false;
   }
@@ -1056,30 +1049,62 @@ static bool CompileLazyFunction(JSContext* cx, CompilationInput& input,
         .setAllowRelazify();
   }
 
-  mozilla::DebugOnly<uint32_t> lazyFlags =
-      static_cast<uint32_t>(input.immutableFlags());
+  if (output.is<UniquePtr<ExtensibleCompilationStencil>>()) {
+    auto stencil = cx->make_unique<ExtensibleCompilationStencil>(
+        std::move(compilationState));
+    if (!stencil) {
+      return false;
+    }
+    output.as<UniquePtr<ExtensibleCompilationStencil>>() = std::move(stencil);
+  } else if (output.is<UniquePtr<CompilationStencil>>()) {
+    AutoGeckoProfilerEntry pseudoFrame(cx, "script emit",
+                                       JS::ProfilingCategoryPair::JS_Parsing);
 
-  Rooted<CompilationGCOutput> gcOutput(cx);
-  {
+    auto stencil = cx->make_unique<CompilationStencil>(input.source);
+    if (!stencil) {
+      return false;
+    }
+
+    if (!stencil->steal(cx, std::move(compilationState))) {
+      return false;
+    }
+
+    output.as<UniquePtr<CompilationStencil>>() = std::move(stencil);
+  } else {
+    // We do check the type, but do not write anything to it as this is not
+    // necessary for lazy function, as the script is patched inside the
+    // JSFunction when instantiating.
+    MOZ_ASSERT(output.is<CompilationGCOutput*>());
+    MOZ_ASSERT(!output.as<CompilationGCOutput*>());
+
+    mozilla::DebugOnly<uint32_t> lazyFlags =
+        static_cast<uint32_t>(input.immutableFlags());
+
+    Rooted<CompilationGCOutput> gcOutput(cx);
     BorrowingCompilationStencil borrowingStencil(compilationState);
+
+    if (input.source->hasEncoder()) {
+      if (!input.source->addDelazificationToIncrementalEncoding(
+              cx, borrowingStencil)) {
+        return false;
+      }
+    }
+
     if (!CompilationStencil::instantiateStencils(cx, input, borrowingStencil,
                                                  gcOutput.get())) {
       return false;
     }
+
+    // NOTE: After instantiation succeeds and bytecode is attached, the rest of
+    //       this operation should be infallible. Any failure during
+    //       delazification should restore the function back to a consistent
+    //       lazy state.
 
     MOZ_ASSERT(lazyFlags == gcOutput.get().script->immutableFlags());
     MOZ_ASSERT(gcOutput.get().script->outermostScope()->hasOnChain(
                    ScopeKind::NonSyntactic) ==
                gcOutput.get().script->immutableFlags().hasFlag(
                    JSScript::ImmutableFlags::HasNonSyntacticScope));
-
-    if (input.source->hasEncoder()) {
-      MOZ_ASSERT(!js::UseOffThreadParseGlobal());
-      if (!input.source->addDelazificationToIncrementalEncoding(
-              cx, borrowingStencil)) {
-        return false;
-      }
-    }
   }
 
   assertException.reset();
@@ -1125,7 +1150,10 @@ static bool DelazifyCanonicalScriptedFunctionImpl(JSContext* cx,
   Rooted<CompilationInput> input(cx, CompilationInput(options));
   input.get().initFromLazy(cx, lazy, ss);
 
-  return CompileLazyFunction(cx, input.get(), units.get(), sourceLength);
+  CompilationGCOutput* unusedGcOutput = nullptr;
+  BytecodeCompilerOutput output(unusedGcOutput);
+  return CompileLazyFunctionToStencilMaybeInstantiate(
+      cx, input.get(), units.get(), sourceLength, output);
 }
 
 bool frontend::DelazifyCanonicalScriptedFunction(JSContext* cx,
@@ -1145,6 +1173,75 @@ bool frontend::DelazifyCanonicalScriptedFunction(JSContext* cx,
 
   // UTF-16 source text.
   return DelazifyCanonicalScriptedFunctionImpl<char16_t>(cx, fun, lazy, ss);
+}
+
+template <typename Unit>
+static UniquePtr<CompilationStencil> DelazifyCanonicalScriptedFunctionImpl(
+    JSContext* cx, CompilationStencil& context, ScriptIndex scriptIndex) {
+  ScriptStencilRef script{context, scriptIndex};
+  const ScriptStencilExtra& extra = script.scriptExtra();
+
+#if defined(NIGHTLY_BUILD) || defined(MOZ_DEV_EDITION) || defined(DEBUG)
+  const ScriptStencil& data = script.scriptData();
+  MOZ_ASSERT(!data.hasSharedData(), "Script is already compiled!");
+  MOZ_DIAGNOSTIC_ASSERT(!data.isGhost());
+#endif
+
+  AutoIncrementalTimer timer(cx->realm()->timers.delazificationTime);
+
+  size_t sourceStart = extra.extent.sourceStart;
+  size_t sourceLength = extra.extent.sourceEnd - sourceStart;
+
+  ScriptSource* ss = context.source;
+  MOZ_ASSERT(ss->hasSourceText());
+
+  // Parse and compile the script from source.
+  UncompressedSourceCache::AutoHoldEntry holder;
+
+  MOZ_ASSERT(ss->hasSourceType<Unit>());
+
+  ScriptSource::PinnedUnits<Unit> units(cx, ss, holder, sourceStart,
+                                        sourceLength);
+  if (!units.get()) {
+    return nullptr;
+  }
+
+  JS::CompileOptions options(cx);
+  options.setMutedErrors(ss->mutedErrors())
+      .setFileAndLine(ss->filename(), extra.extent.lineno)
+      .setColumn(extra.extent.column)
+      .setScriptSourceOffset(sourceStart)
+      .setNoScriptRval(false)
+      .setSelfHostingMode(false);
+
+  Rooted<CompilationInput> input(cx, CompilationInput(options));
+  input.get().initFromStencil(context, scriptIndex, ss);
+
+  using OutputType = UniquePtr<CompilationStencil>;
+  BytecodeCompilerOutput output((OutputType()));
+  if (!CompileLazyFunctionToStencilMaybeInstantiate(
+          cx, input.get(), units.get(), sourceLength, output)) {
+    return nullptr;
+  }
+  return std::move(output.as<OutputType>());
+}
+
+UniquePtr<CompilationStencil> frontend::DelazifyCanonicalScriptedFunction(
+    JSContext* cx, CompilationStencil& context, ScriptIndex scriptIndex) {
+  AutoGeckoProfilerEntry pseudoFrame(cx, "stencil script delazify",
+                                     JS::ProfilingCategoryPair::JS_Parsing);
+
+  ScriptSource* ss = context.source;
+  if (ss->hasSourceType<Utf8Unit>()) {
+    // UTF-8 source text.
+    return DelazifyCanonicalScriptedFunctionImpl<Utf8Unit>(cx, context,
+                                                           scriptIndex);
+  }
+
+  // UTF-16 source text.
+  MOZ_ASSERT(ss->hasSourceType<char16_t>());
+  return DelazifyCanonicalScriptedFunctionImpl<char16_t>(cx, context,
+                                                         scriptIndex);
 }
 
 static JSFunction* CompileStandaloneFunction(
@@ -1215,10 +1312,9 @@ static JSFunction* CompileStandaloneFunction(
 
     MOZ_ASSERT(!cx->isHelperThreadContext());
 
+    const JS::InstantiateOptions instantiateOptions(options);
     Rooted<JSScript*> script(cx, gcOutput.get().script);
-    if (!options.hideFromNewScriptInitial()) {
-      DebugAPI::onNewScript(cx, script);
-    }
+    FireOnNewScript(cx, instantiateOptions, script);
   }
 
   assertException.reset();
@@ -1271,4 +1367,12 @@ JSFunction* frontend::CompileStandaloneFunctionInNonSyntacticScope(
                                    syntaxKind, GeneratorKind::NotGenerator,
                                    FunctionAsyncKind::SyncFunction,
                                    enclosingScope);
+}
+
+void frontend::FireOnNewScript(JSContext* cx,
+                               const JS::InstantiateOptions& options,
+                               JS::Handle<JSScript*> script) {
+  if (!options.hideFromNewScriptInitial()) {
+    DebugAPI::onNewScript(cx, script);
+  }
 }

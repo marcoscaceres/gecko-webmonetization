@@ -27,7 +27,7 @@ try {
       customLoader = false;
     if (content.document.nodePrincipal.isSystemPrincipal) {
       const { DevToolsLoader } = ChromeUtils.import(
-        "resource://devtools/shared/Loader.jsm"
+        "resource://devtools/shared/loader/Loader.jsm"
       );
       loader = new DevToolsLoader({
         invisibleToDebugger: true,
@@ -35,7 +35,9 @@ try {
       customLoader = true;
     } else {
       // Otherwise, use the shared loader.
-      loader = ChromeUtils.import("resource://devtools/shared/Loader.jsm");
+      loader = ChromeUtils.import(
+        "resource://devtools/shared/loader/Loader.jsm"
+      );
     }
     const { require } = loader;
 
@@ -44,7 +46,7 @@ try {
 
     DevToolsServer.init();
     // We want a special server without any root actor and only target-scoped actors.
-    // We are going to spawn a FrameTargetActor instance in the next few lines,
+    // We are going to spawn a WindowGlobalTargetActor instance in the next few lines,
     // it is going to act like a root actor without being one.
     DevToolsServer.registerActors({ target: true });
 
@@ -84,15 +86,15 @@ try {
         });
       } else {
         const {
-          FrameTargetActor,
-        } = require("devtools/server/actors/targets/frame");
+          WindowGlobalTargetActor,
+        } = require("devtools/server/actors/targets/window-global");
         const { docShell } = chromeGlobal;
         // For a script loaded via loadFrameScript, the global is the content
         // message manager.
-        // All FrameTarget actors created via the framescript are top-level
-        // targets. Non top-level FrameTarget actors are all created by the
+        // All WindowGlobalTarget actors created via the framescript are top-level
+        // targets. Non top-level WindowGlobalTarget actors are all created by the
         // DevToolsFrameChild actor.
-        actor = new FrameTargetActor(conn, {
+        actor = new WindowGlobalTargetActor(conn, {
           docShell,
           isTopLevelTarget: true,
         });

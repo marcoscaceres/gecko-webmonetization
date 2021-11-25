@@ -76,9 +76,6 @@ struct ZoneGCStats {
   /* Number of zones collected in this GC. */
   int collectedZoneCount = 0;
 
-  /* Number of zones that could have been collected in this GC. */
-  int collectableZoneCount = 0;
-
   /* Total number of zones in the Runtime at the start of this GC. */
   int zoneCount = 0;
 
@@ -94,9 +91,7 @@ struct ZoneGCStats {
   /* Total number of compartments swept by this GC. */
   int sweptCompartmentCount = 0;
 
-  bool isFullCollection() const {
-    return collectedZoneCount == collectableZoneCount;
-  }
+  bool isFullCollection() const { return collectedZoneCount == zoneCount; }
 
   ZoneGCStats() = default;
 };
@@ -177,7 +172,8 @@ struct Statistics {
   void resumePhases();
 
   void beginSlice(const ZoneGCStats& zoneStats, JS::GCOptions options,
-                  const SliceBudget& budget, JS::GCReason reason);
+                  const SliceBudget& budget, JS::GCReason reason,
+                  bool budgetWasIncreased);
   void endSlice();
 
   [[nodiscard]] bool startTimingMutator();
@@ -481,9 +477,9 @@ struct Statistics {
 struct MOZ_RAII AutoGCSlice {
   AutoGCSlice(Statistics& stats, const ZoneGCStats& zoneStats,
               JS::GCOptions options, const SliceBudget& budget,
-              JS::GCReason reason)
+              JS::GCReason reason, bool budgetWasIncreased)
       : stats(stats) {
-    stats.beginSlice(zoneStats, options, budget, reason);
+    stats.beginSlice(zoneStats, options, budget, reason, budgetWasIncreased);
   }
   ~AutoGCSlice() { stats.endSlice(); }
 

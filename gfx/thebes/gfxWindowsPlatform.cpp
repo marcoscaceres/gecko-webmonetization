@@ -513,10 +513,6 @@ mozilla::gfx::BackendType gfxWindowsPlatform::GetContentBackendFor(
     mozilla::layers::LayersBackend aLayers) {
   mozilla::gfx::BackendType defaultBackend =
       gfxPlatform::GetDefaultContentBackend();
-  if (aLayers == LayersBackend::LAYERS_D3D11) {
-    return defaultBackend;
-  }
-
   if (aLayers == LayersBackend::LAYERS_WR &&
       gfx::gfxVars::UseWebRenderANGLE()) {
     return defaultBackend;
@@ -1227,6 +1223,8 @@ void gfxWindowsPlatform::RecordStartupTelemetry() {
 // Supports lazy device initialization on Windows, so that WebRender can avoid
 // initializing GPU state and allocating swap chains for most non-GPU processes.
 void gfxWindowsPlatform::EnsureDevicesInitialized() {
+  MOZ_DIAGNOSTIC_ASSERT(!IsWin32kLockedDown());
+
   if (!mInitializedDevices) {
     mInitializedDevices = true;
     InitializeDevices();

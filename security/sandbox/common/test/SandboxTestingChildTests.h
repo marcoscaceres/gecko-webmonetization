@@ -29,6 +29,10 @@
 #  include <unistd.h>
 #endif
 
+#ifdef XP_MACOSX
+#  include <CoreGraphics/CoreGraphics.h>
+#endif
+
 namespace mozilla {
 
 void RunTestsContent(SandboxTestingChild* child) {
@@ -107,7 +111,42 @@ void RunTestsContent(SandboxTestingChild* child) {
                          sizeof(sa_family_t) + str_size);
     return con_st;
   });
+
+  // Testing FIPS-relevant files, which need to be accessible
+  std::vector<std::pair<const char*, bool>> open_tests = {
+      {"/dev/random", true}};
+  // Not all systems have that file, so we only test access, if it exists
+  // in the first place
+  if (stat("/proc/sys/crypto/fips_enabled", &st) == 0) {
+    open_tests.push_back({"/proc/sys/crypto/fips_enabled", true});
+  }
+
+  for (const std::pair<const char*, bool>& to_open : open_tests) {
+    child->ErrnoTest("open("_ns + nsCString(to_open.first) + ")"_ns,
+                     to_open.second, [&] {
+                       int fd = open(to_open.first, O_RDONLY);
+                       if (to_open.second && fd > 0) {
+                         close(fd);
+                       }
+                       return fd;
+                     });
+  }
 #  endif  // XP_LINUX
+
+#  ifdef XP_MACOSX
+  // Test that content processes can not connect to the macOS window server.
+  // CGSessionCopyCurrentDictionary() returns NULL when a connection to the
+  // window server is not available.
+  CFDictionaryRef windowServerDict = CGSessionCopyCurrentDictionary();
+  bool gotWindowServerDetails = (windowServerDict != nullptr);
+  child->SendReportTestResults(
+      "CGSessionCopyCurrentDictionary"_ns, false, gotWindowServerDetails,
+      gotWindowServerDetails ? "Failed: dictionary unexpectedly returned"_ns
+                             : "Succeeded: no dictionary returned"_ns);
+  if (windowServerDict != nullptr) {
+    CFRelease(windowServerDict);
+  }
+#  endif
 
 #else   // XP_UNIX
   child->ReportNoTests();
@@ -137,6 +176,27 @@ void RunTestsSocket(SandboxTestingChild* child) {
     int rv = prctl(PR_GET_SECCOMP, 0, 0, 0, 0);
     return rv;
   });
+
+  // Testing FIPS-relevant files, which need to be accessible
+  std::vector<std::pair<const char*, bool>> open_tests = {
+      {"/dev/random", true}};
+  // Not all systems have that file, so we only test access, if it exists
+  // in the first place
+  struct stat st;
+  if (stat("/proc/sys/crypto/fips_enabled", &st) == 0) {
+    open_tests.push_back({"/proc/sys/crypto/fips_enabled", true});
+  }
+
+  for (const std::pair<const char*, bool>& to_open : open_tests) {
+    child->ErrnoTest("open("_ns + nsCString(to_open.first) + ")"_ns,
+                     to_open.second, [&] {
+                       int fd = open(to_open.first, O_RDONLY);
+                       if (to_open.second && fd > 0) {
+                         close(fd);
+                       }
+                       return fd;
+                     });
+  }
 #  endif  // XP_LINUX
 
 #else   // XP_UNIX

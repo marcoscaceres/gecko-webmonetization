@@ -23,6 +23,8 @@
 #include "mozilla/dom/ContentChild.h"
 #include "mozilla/dom/HTMLCanvasElement.h"
 #include "mozilla/dom/ScriptSettings.h"
+#include "mozilla/PresShell.h"
+#include "mozilla/PresShellInlines.h"
 #include "mozilla/StaticPrefs_print.h"
 #include "mozilla/Telemetry.h"
 #include "nsIBrowserChild.h"
@@ -647,27 +649,15 @@ nsresult nsPrintJob::DoCommonPrint(bool aIsPrintPreview,
   // The dialog is not shown, but this means we don't need to access the printer
   // driver from the child, which causes sandboxing issues.
   if (!mIsCreatingPrintPreview || printingViaParent) {
-    // The new print UI does not need to enter ShowPrintDialog below to spin
-    // the event loop and fetch real printer settings from the parent process,
-    // since it always passes complete print settings. (In fact, trying to
-    // fetch them from the parent can cause crashes.) Here we check for that
-    // case so that we can avoid calling ShowPrintDialog below. To err on the
-    // safe side, we exclude the old UI.
-    //
-    // TODO: We should MOZ_DIAGNOSTIC_ASSERT that GetIsInitializedFromPrinter
-    // returns true.
-    bool settingsAreComplete = false;
-    if (StaticPrefs::print_tab_modal_enabled()) {
-      printData->mPrintSettings->GetIsInitializedFromPrinter(
-          &settingsAreComplete);
-    }
-
     // Ask dialog to be Print Shown via the Plugable Printing Dialog Service
     // This service is for the Print Dialog and the Print Progress Dialog
     // If printing silently or you can't get the service continue on
     // If printing via the parent then we need to confirm that the pref is set
     // and get a remote print job, but the parent won't display a prompt.
-    if (!settingsAreComplete && (!printSilently || printingViaParent)) {
+    // Note: The new print UI does not need to enter ShowPrintDialog below to
+    // spin the event loop and fetch real printer settings from the parent.
+    if (!StaticPrefs::print_tab_modal_enabled() &&
+        (!printSilently || printingViaParent)) {
       nsCOMPtr<nsIPrintingPromptService> printPromptService(
           do_GetService(kPrintingPromptService));
       if (printPromptService) {
@@ -741,7 +731,6 @@ nsresult nsPrintJob::DoCommonPrint(bool aIsPrintPreview,
               if (remotePrintJob) {
                 printData->mPrintProgressListeners.AppendElement(
                     remotePrintJob);
-                remotePrintJobListening = true;
               }
             }
           }
@@ -872,8 +861,9 @@ nsresult nsPrintJob::PrintPreview(Document* aSourceDoc,
       CommonPrint(true, aPrintSettings, aWebProgressListener, aSourceDoc);
   if (NS_FAILED(rv)) {
     if (mPrintPreviewCallback) {
+      // signal error
       mPrintPreviewCallback(
-          PrintPreviewResultInfo(0, 0, false, false, false));  // signal error
+          PrintPreviewResultInfo(0, 0, false, false, false, {}));
       mPrintPreviewCallback = nullptr;
     }
   }
@@ -1088,8 +1078,9 @@ nsresult nsPrintJob::CleanupOnFailure(nsresult aResult, bool aIsPrinting) {
 //---------------------------------------------------------------------
 void nsPrintJob::FirePrintingErrorEvent(nsresult aPrintError) {
   if (mPrintPreviewCallback) {
+    // signal error
     mPrintPreviewCallback(
-        PrintPreviewResultInfo(0, 0, false, false, false));  // signal error
+        PrintPreviewResultInfo(0, 0, false, false, false, {}));
     mPrintPreviewCallback = nullptr;
   }
 
@@ -1846,6 +1837,25 @@ nsresult nsPrintJob::ReflowPrintObject(const UniquePtr<nsPrintObject>& aPO) {
     std::swap(pageSize.width, pageSize.height);
   }
 
+  // If the document has a specified CSS page-size, we rotate the page to
+  // reflect this. Changing the orientation is reflected by the result of
+  // FinishPrintPreview, so that the frontend can reflect this.
+  // The new document has not yet been reflowed, so we have to query the
+  // original document for any CSS page-size.
+  if (const Maybe<StyleOrientation> maybeOrientation =
+          aPO->mDocument->GetPresShell()
+              ->StyleSet()
+              ->GetDefaultPageOrientation()) {
+    if (maybeOrientation.value() == StyleOrientation::Landscape &&
+        pageSize.width < pageSize.height) {
+      // Paper is in portrait, CSS page size is landscape.
+      std::swap(pageSize.width, pageSize.height);
+    } else if (maybeOrientation.value() == StyleOrientation::Portrait &&
+               pageSize.width > pageSize.height) {
+      // Paper is in landscape, CSS page size is portrait.
+      std::swap(pageSize.width, pageSize.height);
+    }
+  }
   aPO->mPresContext->SetPageSize(pageSize);
 
   int32_t p2a = aPO->mPresContext->DeviceContext()->AppUnitsPerDevPixel();
@@ -2629,9 +2639,18 @@ nsresult nsPrintJob::FinishPrintPreview() {
   if (mPrintPreviewCallback) {
     const bool hasSelection =
         !mDisallowSelectionPrint && printData->mSelectionRoot;
+    // Determine if there is a specified page size, and if we should set the
+    // paper orientation to match it.
+    const Maybe<bool> maybeLandscape =
+        printData->mPrintObject->mPresShell->StyleSet()
+            ->GetDefaultPageOrientation()
+            .map([](StyleOrientation o) -> bool {
+              return o == StyleOrientation::Landscape;
+            });
     mPrintPreviewCallback(PrintPreviewResultInfo(
         GetPrintPreviewNumSheets(), GetRawNumPages(), GetIsEmpty(),
-        hasSelection, hasSelection && printData->mPrintObject->HasSelection()));
+        hasSelection, hasSelection && printData->mPrintObject->HasSelection(),
+        maybeLandscape));
     mPrintPreviewCallback = nullptr;
   }
 

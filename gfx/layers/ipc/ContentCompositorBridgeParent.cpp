@@ -14,7 +14,6 @@
 #  include "mozilla/gfx/DeviceManagerDx.h"  // for DeviceManagerDx
 #  include "mozilla/layers/ImageDataSerializer.h"
 #endif
-#include "mozilla/dom/WebGLParent.h"
 #include "mozilla/ipc/Transport.h"           // for Transport
 #include "mozilla/layers/AnimationHelper.h"  // for CompositorAnimationStorage
 #include "mozilla/layers/APZCTreeManagerParent.h"  // for APZCTreeManagerParent
@@ -45,8 +44,6 @@ namespace layers {
 typedef std::map<LayersId, CompositorBridgeParent::LayerTreeState> LayerTreeMap;
 extern LayerTreeMap sIndirectLayerTrees;
 extern StaticAutoPtr<mozilla::Monitor> sIndirectLayerTreesLock;
-void UpdateIndirectTree(LayersId aId, Layer* aRoot,
-                        const TargetConfig& aTargetConfig);
 void EraseLayerState(LayersId aId);
 
 void ContentCompositorBridgeParent::ActorDestroy(ActorDestroyReason aWhy) {
@@ -82,8 +79,7 @@ ContentCompositorBridgeParent::AllocPAPZCTreeManagerParent(
     // retain a reference to itself, through the checkerboard observer.
     LayersId dummyId{0};
     const bool useWebRender = false;
-    RefPtr<APZCTreeManager> temp =
-        new APZCTreeManager(dummyId, APZCTreeManager::HitTestKind::Internal);
+    RefPtr<APZCTreeManager> temp = new APZCTreeManager(dummyId);
     RefPtr<APZUpdater> tempUpdater = new APZUpdater(temp, useWebRender);
     tempUpdater->ClearTree(dummyId);
     return new APZCTreeManagerParent(aLayersId, temp, tempUpdater);
@@ -385,7 +381,7 @@ ContentCompositorBridgeParent::~ContentCompositorBridgeParent() {
 }
 
 PTextureParent* ContentCompositorBridgeParent::AllocPTextureParent(
-    const SurfaceDescriptor& aSharedData, const ReadLockDescriptor& aReadLock,
+    const SurfaceDescriptor& aSharedData, ReadLockDescriptor& aReadLock,
     const LayersBackend& aLayersBackend, const TextureFlags& aFlags,
     const LayersId& aId, const uint64_t& aSerial,
     const wr::MaybeExternalImageId& aExternalImageId) {
@@ -412,7 +408,7 @@ PTextureParent* ContentCompositorBridgeParent::AllocPTextureParent(
         << "Texture backend is wrong";
   }
 
-  return TextureHost::CreateIPDLActor(this, aSharedData, aReadLock,
+  return TextureHost::CreateIPDLActor(this, aSharedData, std::move(aReadLock),
                                       aLayersBackend, aFlags, aSerial,
                                       aExternalImageId);
 }
@@ -461,12 +457,6 @@ void ContentCompositorBridgeParent::ObserveLayersUpdate(
   }
 
   Unused << state->mParent->SendObserveLayersUpdate(aLayersId, aEpoch, aActive);
-}
-
-already_AddRefed<dom::PWebGLParent>
-ContentCompositorBridgeParent::AllocPWebGLParent() {
-  RefPtr<dom::PWebGLParent> parent = new dom::WebGLParent();
-  return parent.forget();
 }
 
 }  // namespace layers

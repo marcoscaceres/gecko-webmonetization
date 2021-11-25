@@ -103,15 +103,21 @@ http://prefixexample.com:80
 # The first HTTPS location is used to generate the Common Name (CN) value of the
 # certificate's Issued To field.
 https://example.com:443                privileged
+https://www.example.com:443            privileged
 https://test1.example.com:443          privileged
 https://test2.example.com:443          privileged
 https://example.org:443                privileged
 https://test1.example.org:443          privileged
 https://test2.example.org:443          privileged
+https://sub1.test1.example.org:443     privileged
+https://sub1.test2.example.org:443     privileged
+https://sub2.test1.example.org:443     privileged
+https://sub2.test2.example.org:443     privileged
 https://sub1.test1.example.com:443     privileged
 https://sub1.test2.example.com:443     privileged
 https://sub2.test1.example.com:443     privileged
 https://sub2.test2.example.com:443     privileged
+https://example.net:443                privileged
 https://nocert.example.com:443         privileged,nocert
 https://self-signed.example.com:443    privileged,cert=selfsigned
 https://untrusted.example.com:443      privileged,cert=untrusted
@@ -333,6 +339,9 @@ https://localhost:443
 
 # Bug 1402530
 http://localhost:80                 privileged
+
+http://localhost:9898
+http://localhost:9899
 
 # Host for testing APIs whitelisted for mozilla.org
 https://www.mozilla.org:443

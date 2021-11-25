@@ -100,14 +100,8 @@ class ShmemTextureData : public BufferTextureData {
 };
 
 bool ComputeHasIntermediateBuffer(gfx::SurfaceFormat aFormat,
-                                  LayersBackend aLayersBackend,
-                                  bool aSupportsTextureDirectMapping) {
-  if (aSupportsTextureDirectMapping) {
-    return false;
-  }
-
-  return aLayersBackend != LayersBackend::LAYERS_BASIC ||
-         aFormat == gfx::SurfaceFormat::UNKNOWN;
+                                  LayersBackend aLayersBackend) {
+  return aFormat == gfx::SurfaceFormat::UNKNOWN;
 }
 
 BufferTextureData* BufferTextureData::Create(
@@ -168,18 +162,10 @@ BufferTextureData* BufferTextureData::CreateForYCbCr(
                                            aCbCrSize.height, yOffset, cbOffset,
                                            crOffset);
 
-  bool supportsTextureDirectMapping =
-      aAllocator->SupportsTextureDirectMapping() &&
-      aAllocator->GetMaxTextureSize() >
-          std::max(aYSize.width,
-                   std::max(aYSize.height,
-                            std::max(aCbCrSize.width, aCbCrSize.height)));
-
   bool hasIntermediateBuffer =
       aAllocator
           ? ComputeHasIntermediateBuffer(gfx::SurfaceFormat::YUV,
-                                         aAllocator->GetCompositorBackendType(),
-                                         supportsTextureDirectMapping)
+                                         aAllocator->GetCompositorBackendType())
           : true;
 
   YCbCrDescriptor descriptor =
@@ -464,8 +450,8 @@ MemoryTextureData* MemoryTextureData::Create(gfx::IntSize aSize,
     return nullptr;
   }
 
-  bool hasIntermediateBuffer = ComputeHasIntermediateBuffer(
-      aFormat, aLayersBackend, aAllocFlags & ALLOC_ALLOW_DIRECT_MAPPING);
+  bool hasIntermediateBuffer =
+      ComputeHasIntermediateBuffer(aFormat, aLayersBackend);
 
   GfxMemoryImageReporter::DidAlloc(buf);
 
@@ -538,8 +524,8 @@ ShmemTextureData* ShmemTextureData::Create(gfx::IntSize aSize,
     return nullptr;
   }
 
-  bool hasIntermediateBuffer = ComputeHasIntermediateBuffer(
-      aFormat, aLayersBackend, aAllocFlags & ALLOC_ALLOW_DIRECT_MAPPING);
+  bool hasIntermediateBuffer =
+      ComputeHasIntermediateBuffer(aFormat, aLayersBackend);
 
   BufferDescriptor descriptor =
       RGBDescriptor(aSize, aFormat, hasIntermediateBuffer);

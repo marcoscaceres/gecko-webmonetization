@@ -25,7 +25,6 @@
 
 #include "jstypes.h"  // JS_BIT
 
-#include "ds/Nestable.h"                         // Nestable
 #include "frontend/AbstractScopePtr.h"           // ScopeIndex
 #include "frontend/BytecodeControlStructures.h"  // NestableControl, BreakableControl, LabelControl, LoopControl, TryFinallyControl
 #include "frontend/CallOrNewEmitter.h"           // CallOrNewEmitter
@@ -50,7 +49,7 @@
 #include "frontend/OptionalEmitter.h"  // OptionalEmitter
 #include "frontend/ParseNode.h"   // ParseNodeKind, ParseNode and subclasses
 #include "frontend/Parser.h"      // Parser
-#include "frontend/ParserAtom.h"  // ParserAtomsTable
+#include "frontend/ParserAtom.h"  // ParserAtomsTable, ParserAtom
 #include "frontend/PrivateOpEmitter.h"  // PrivateOpEmitter
 #include "frontend/PropOpEmitter.h"     // PropOpEmitter
 #include "frontend/SourceNotes.h"       // SrcNote, SrcNoteType, SrcNoteWriter
@@ -59,28 +58,20 @@
 #include "frontend/TDZCheckCache.h"                // TDZCheckCache
 #include "frontend/TryEmitter.h"                   // TryEmitter
 #include "frontend/WhileEmitter.h"                 // WhileEmitter
-#include "js/CompileOptions.h"  // TransitiveCompileOptions, CompileOptions
-#include "js/friend/ErrorMessages.h"      // JSMSG_*
-#include "js/friend/StackLimits.h"        // AutoCheckRecursionLimit
-#include "util/StringBuffer.h"            // StringBuffer
-#include "vm/AsyncFunctionResolveKind.h"  // AsyncFunctionResolveKind
+#include "js/friend/ErrorMessages.h"               // JSMSG_*
+#include "js/friend/StackLimits.h"                 // AutoCheckRecursionLimit
+#include "util/StringBuffer.h"                     // StringBuffer
+#include "vm/AsyncFunctionResolveKind.h"           // AsyncFunctionResolveKind
 #include "vm/BytecodeUtil.h"  // JOF_*, IsArgOp, IsLocalOp, SET_UINT24, SET_ICINDEX, BytecodeFallsThrough, BytecodeIsJumpTarget
 #include "vm/CompletionKind.h"      // CompletionKind
 #include "vm/FunctionPrefixKind.h"  // FunctionPrefixKind
 #include "vm/GeneratorObject.h"     // AbstractGeneratorObject
-#include "vm/JSAtom.h"              // JSAtom
-#include "vm/JSContext.h"           // JSContext
-#include "vm/JSFunction.h"          // JSFunction,
-#include "vm/JSScript.h"  // JSScript, ScriptSourceObject, MemberInitializers, BaseScript
-#include "vm/Opcodes.h"        // JSOp, JSOpLength_*
-#include "vm/PropMap.h"        // SharedPropMap::MaxPropsForNonDictionary
-#include "vm/Scope.h"          // GetScopeDataTrailingNames
-#include "vm/SharedStencil.h"  // ScopeNote
-#include "vm/ThrowMsgKind.h"   // ThrowMsgKind
-#include "vm/WellKnownAtom.h"  // js_*_str
-#include "wasm/AsmJS.h"        // IsAsmJSModule
-
-#include "vm/JSObject-inl.h"  // JSObject
+#include "vm/Opcodes.h"             // JSOp, JSOpLength_*
+#include "vm/PropMap.h"             // SharedPropMap::MaxPropsForNonDictionary
+#include "vm/Scope.h"               // GetScopeDataTrailingNames
+#include "vm/SharedStencil.h"       // ScopeNote
+#include "vm/ThrowMsgKind.h"        // ThrowMsgKind
+#include "vm/WellKnownAtom.h"       // js_*_str
 
 using namespace js;
 using namespace js::frontend;
@@ -937,7 +928,7 @@ bool BytecodeEmitter::emitAtomOp(JSOp op, TaggedParserAtomIndex atom) {
                 atom != TaggedParserAtomIndex::WellKnown::dotGenerator());
 
   GCThingIndex index;
-  if (!makeAtomIndex(atom, &index)) {
+  if (!makeAtomIndex(atom, ParserAtom::Atomize::Yes, &index)) {
     return false;
   }
 
@@ -946,6 +937,25 @@ bool BytecodeEmitter::emitAtomOp(JSOp op, TaggedParserAtomIndex atom) {
 
 bool BytecodeEmitter::emitAtomOp(JSOp op, GCThingIndex atomIndex) {
   MOZ_ASSERT(JOF_OPTYPE(op) == JOF_ATOM);
+#ifdef DEBUG
+  auto atom = perScriptData().gcThingList().getAtom(atomIndex);
+  MOZ_ASSERT(compilationState.parserAtoms.isInstantiatedAsJSAtom(atom));
+#endif
+  return emitGCIndexOp(op, atomIndex);
+}
+
+bool BytecodeEmitter::emitStringOp(JSOp op, TaggedParserAtomIndex atom) {
+  MOZ_ASSERT(atom);
+  GCThingIndex index;
+  if (!makeAtomIndex(atom, ParserAtom::Atomize::No, &index)) {
+    return false;
+  }
+
+  return emitStringOp(op, index);
+}
+
+bool BytecodeEmitter::emitStringOp(JSOp op, GCThingIndex atomIndex) {
+  MOZ_ASSERT(JOF_OPTYPE(op) == JOF_STRING);
   return emitGCIndexOp(op, atomIndex);
 }
 
@@ -4146,7 +4156,8 @@ bool BytecodeEmitter::emitTemplateString(ListNode* templateString) {
   if (!pushedString) {
     // All strings were empty, this can happen for something like `${""}`.
     // Just push an empty string.
-    if (!emitAtomOp(JSOp::String, TaggedParserAtomIndex::WellKnown::empty())) {
+    if (!emitStringOp(JSOp::String,
+                      TaggedParserAtomIndex::WellKnown::empty())) {
       return false;
     }
   }
@@ -5508,7 +5519,7 @@ bool BytecodeEmitter::emitSpread(bool allowSelfHosted) {
     // and enclosing "update" offsets, as we do with for-loops.
 
     if (!emitDupAt(3, 2)) {
-      //            [stack] NEXT ITER ARR I NEXT
+      //            [stack] NEXT ITER ARR I NEXT ITER
       return false;
     }
     if (!emitIteratorNext(Nothing(), IteratorKind::Sync, allowSelfHosted)) {
@@ -6167,6 +6178,14 @@ bool BytecodeEmitter::emitThisLiteral(ThisLiteral* pn) {
   }
 
   MOZ_ASSERT(sc->thisBinding() == ThisBinding::Global);
+
+  MOZ_ASSERT(outermostScope().hasNonSyntacticScopeOnChain() ==
+             sc->hasNonSyntacticScope());
+  if (sc->hasNonSyntacticScope()) {
+    return emit1(JSOp::NonSyntacticGlobalThis);
+    //                [stack] THIS
+  }
+
   return emit1(JSOp::GlobalThis);
   //                [stack] THIS
 }
@@ -7722,7 +7741,9 @@ bool BytecodeEmitter::emitSelfHostedSetCanonicalName(BinaryNode* callNode) {
   ParseNode* nameNode = argsList->last();
   MOZ_ASSERT(nameNode->isKind(ParseNodeKind::StringExpr));
   TaggedParserAtomIndex specName = nameNode->as<NameNode>().atom();
-  compilationState.parserAtoms.markUsedByStencil(specName);
+  // Canonical name must be atomized.
+  compilationState.parserAtoms.markUsedByStencil(specName,
+                                                 ParserAtom::Atomize::Yes);
 
   // Store the canonical name for instantiation.
   prevSelfHostedTopLevelFunction->functionStencil().setSelfHostedCanonicalName(
@@ -7778,16 +7799,6 @@ bool BytecodeEmitter::checkSelfHostedUnsafeSetReservedSlot(
   return true;
 }
 #endif
-
-bool BytecodeEmitter::isOptimizableSpreadArgument(ParseNode* expr) {
-  if (expr->isKind(ParseNodeKind::Name)) {
-    return true;
-  }
-
-  return allowSelfHostedIter(expr) &&
-         isOptimizableSpreadArgument(
-             expr->as<BinaryNode>().right()->as<ListNode>().head());
-}
 
 /* A version of emitCalleeAndThis for the optional cases:
  *   * a?.()
@@ -8099,23 +8110,32 @@ bool BytecodeEmitter::emitArguments(ListNode* argsList, bool isCall,
         return false;
       }
     }
-  } else {
-    if (cone.wantSpreadOperand()) {
-      UnaryNode* spreadNode = &argsList->head()->as<UnaryNode>();
-      if (!emitTree(spreadNode->kid())) {
-        //          [stack] CALLEE THIS ARG0
-        return false;
-      }
-    }
-    if (!cone.emitSpreadArgumentsTest()) {
-      //            [stack] CALLEE THIS
+  } else if (cone.wantSpreadOperand()) {
+    auto* spreadNode = &argsList->head()->as<UnaryNode>();
+    if (!emitTree(spreadNode->kid())) {
+      //            [stack] CALLEE THIS ARG0
       return false;
     }
+
+    if (!cone.emitSpreadArgumentsTest()) {
+      //            [stack] CALLEE THIS ARG0
+      return false;
+    }
+
     if (cone.wantSpreadIteration()) {
-      if (!emitArray(argsList->head(), argc)) {
+      if (!emitSpreadIntoArray(spreadNode)) {
         //          [stack] CALLEE THIS ARR
         return false;
       }
+    }
+  } else {
+    if (!cone.prepareForSpreadArguments()) {
+      //            [stack] CALLEE THIS
+      return false;
+    }
+    if (!emitArray(argsList->head(), argc)) {
+      //            [stack] CALLEE THIS ARR
+      return false;
     }
   }
 
@@ -8140,9 +8160,7 @@ bool BytecodeEmitter::emitOptionalCall(CallNode* callNode, OptionalEmitter& oe,
   bool isSpread = IsSpreadOp(callNode->callOp());
   JSOp op = callNode->callOp();
   uint32_t argc = argsList->count();
-  bool isOptimizableSpread =
-      isSpread && argc == 1 &&
-      isOptimizableSpreadArgument(argsList->head()->as<UnaryNode>().kid());
+  bool isOptimizableSpread = isSpread && argc == 1;
 
   CallOrNewEmitter cone(this, op,
                         isOptimizableSpread
@@ -8279,9 +8297,7 @@ bool BytecodeEmitter::emitCallOrNew(
 
   JSOp op = callNode->callOp();
   uint32_t argc = argsList->count();
-  bool isOptimizableSpread =
-      isSpread && argc == 1 &&
-      isOptimizableSpreadArgument(argsList->head()->as<UnaryNode>().kid());
+  bool isOptimizableSpread = isSpread && argc == 1;
   bool isDefaultDerivedClassConstructor =
       sc->isFunctionBox() && sc->asFunctionBox()->isDerivedClassConstructor() &&
       sc->asFunctionBox()->isSyntheticFunction();
@@ -10412,6 +10428,42 @@ bool BytecodeEmitter::emitArray(ParseNode* arrayHead, uint32_t count) {
   return true;
 }
 
+bool BytecodeEmitter::emitSpreadIntoArray(UnaryNode* elem) {
+  MOZ_ASSERT(elem->isKind(ParseNodeKind::Spread));
+
+  if (!updateSourceCoordNotes(elem->pn_pos.begin)) {
+    //              [stack] VALUE
+    return false;
+  }
+
+  if (!emitIterator()) {
+    //              [stack] NEXT ITER
+    return false;
+  }
+
+  if (!emitUint32Operand(JSOp::NewArray, 0)) {
+    //              [stack] NEXT ITER ARRAY
+    return false;
+  }
+
+  if (!emitNumberOp(0)) {
+    //              [stack] NEXT ITER ARRAY INDEX
+    return false;
+  }
+
+  bool allowSelfHostedIterFlag = allowSelfHostedIter(elem->kid());
+  if (!emitSpread(allowSelfHostedIterFlag)) {
+    //              [stack] ARRAY INDEX
+    return false;
+  }
+
+  if (!emit1(JSOp::Pop)) {
+    //              [stack] ARRAY
+    return false;
+  }
+  return true;
+}
+
 static inline JSOp UnaryOpParseNodeKindToJSOp(ParseNodeKind pnk) {
   switch (pnk) {
     case ParseNodeKind::ThrowStmt:
@@ -11497,7 +11549,7 @@ bool BytecodeEmitter::emitTree(
 
     case ParseNodeKind::TemplateStringExpr:
     case ParseNodeKind::StringExpr:
-      if (!emitAtomOp(JSOp::String, pn->as<NameNode>().atom())) {
+      if (!emitStringOp(JSOp::String, pn->as<NameNode>().atom())) {
         return false;
       }
       break;

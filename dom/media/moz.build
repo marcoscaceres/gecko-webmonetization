@@ -181,7 +181,6 @@ EXPORTS += [
     "SeekTarget.h",
     "SelfRef.h",
     "SharedBuffer.h",
-    "ThreadPoolCOMListener.h",
     "TimeUnits.h",
     "Tracing.h",
     "VideoFrameContainer.h",
@@ -304,11 +303,6 @@ if CONFIG["OS_TARGET"] == "Linux":
 else:
     UNIFIED_SOURCES += ["UnderrunHandlerNoop.cpp"]
 
-if CONFIG["OS_TARGET"] == "WINNT":
-    SOURCES += [
-        "ThreadPoolCOMListener.cpp",
-    ]
-
 # CubebUtils.cpp needs to be built separately due to what appears to be some kind
 # of compiler bug on Android 4.2 x86 opt. See bug 1408459.
 # DecoderTraits.cpp needs to be built separately because of Mac OS X headers.
@@ -339,6 +333,7 @@ LOCAL_INCLUDES += [
     "/caps",
     "/docshell/base",
     "/dom/base",
+    "/dom/media/webrtc",
     "/layout/generic",
     "/layout/xul",
     "/media/libyuv/libyuv/include",
@@ -350,7 +345,7 @@ if CONFIG["MOZ_WEBRTC"]:
     LOCAL_INCLUDES += [
         "/dom/media/webrtc/common",
         "/third_party/libwebrtc",
-        "/third_party/libwebrtc/webrtc",
+        "/third_party/libwebrtc/third_party/abseil-cpp",
     ]
 
 DEFINES["MOZILLA_INTERNAL_API"] = True

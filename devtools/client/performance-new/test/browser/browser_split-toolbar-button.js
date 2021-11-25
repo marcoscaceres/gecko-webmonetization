@@ -44,7 +44,8 @@ add_task(async function setup() {
     "Add the profiler button to the toolbar and ensure capturing a profile loads a local url."
   );
   await setProfilerFrontendUrl(
-    "http://example.com/browser/devtools/client/performance-new/test/browser/fake-frontend.html"
+    "http://example.com",
+    "/browser/devtools/client/performance-new/test/browser/fake-frontend.html"
   );
   await makeSureProfilerPopupIsEnabled();
   button = document.getElementById("profiler-button-button");
@@ -58,10 +59,16 @@ add_task(async function click_icon() {
   ok(!isActive(), "should start with the profiler inactive");
 
   button.click();
+  await getElementByTooltip(document, "The profiler is recording a profile");
   ok(isActive(), "should have started the profiler");
 
   button.click();
+  // We're not testing for the tooltip "capturing a profile" because this might
+  // be racy.
   await waitForProfileAndCloseTab();
+
+  // Back to the inactive state.
+  await getElementByTooltip(document, "Record a performance profile");
 });
 
 add_task(async function click_dropmarker() {

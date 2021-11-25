@@ -23,7 +23,7 @@ if (DEBUG_ALLOCATIONS) {
   // as it instantiates custom Debugger API instances and has to be running in a distinct
   // compartments from DevTools and system scopes (JSMs, XPCOM,...)
   const { DevToolsLoader } = ChromeUtils.import(
-    "resource://devtools/shared/Loader.jsm"
+    "resource://devtools/shared/loader/Loader.jsm"
   );
   const loader = new DevToolsLoader({
     invisibleToDebugger: true,
@@ -44,7 +44,7 @@ if (DEBUG_ALLOCATIONS) {
 }
 
 const { loader, require } = ChromeUtils.import(
-  "resource://devtools/shared/Loader.jsm"
+  "resource://devtools/shared/loader/Loader.jsm"
 );
 
 const { gDevTools } = require("devtools/client/framework/devtools");
@@ -93,6 +93,10 @@ const URL_ROOT_ORG_SSL = CHROME_URL_ROOT.replace(
 const URL_ROOT_NET = CHROME_URL_ROOT.replace(
   "chrome://mochitests/content/",
   "http://example.net/"
+);
+const URL_ROOT_NET_SSL = CHROME_URL_ROOT.replace(
+  "chrome://mochitests/content/",
+  "https://example.net/"
 );
 // mochi.test:8888 is the actual primary location where files are served.
 const URL_ROOT_MOCHI_8888 = CHROME_URL_ROOT.replace(
@@ -144,7 +148,7 @@ function highlighterTestActorBootstrap() {
     "chrome://mochitests/content/browser/devtools/client/shared/test/highlighter-test-actor.js";
 
   const { require: _require } = ChromeUtils.import(
-    "resource://devtools/shared/Loader.jsm"
+    "resource://devtools/shared/loader/Loader.jsm"
   );
   _require(HIGHLIGHTER_TEST_ACTOR_URL);
 
@@ -196,19 +200,27 @@ registerCleanupFunction(() => {
  * Spawn an instance of the highlighter test actor for the given toolbox
  *
  * @param {Toolbox} toolbox
+ * @param {Object} options
+ * @param {Function} options.target: Optional target to get the highlighterTestFront for.
+ *        If not provided, the top level target will be used.
  * @returns {HighlighterTestFront}
  */
-async function getHighlighterTestFront(toolbox) {
+async function getHighlighterTestFront(toolbox, { target } = {}) {
   // Loading the Inspector panel in order to overwrite the TestActor getter for the
   // highlighter instance with a method that points to the currently visible
   // Box Model Highlighter managed by the Inspector panel.
   const inspector = await toolbox.loadTool("inspector");
-  const highlighterTestFront = await toolbox.target.getFront("highlighterTest");
+
+  const highlighterTestFront = await (target || toolbox.target).getFront(
+    "highlighterTest"
+  );
   // Override the highligher getter with a method to return the active box model
   // highlighter. Adaptation for multi-process scenarios where there can be multiple
   // highlighters, one per process.
   highlighterTestFront.highlighter = () => {
-    return inspector.highlighters.getActiveHighlighter("BoxModelHighlighter");
+    return inspector.highlighters.getActiveHighlighter(
+      inspector.highlighters.TYPES.BOXMODEL
+    );
   };
   return highlighterTestFront;
 }
@@ -449,8 +461,13 @@ var removeTab = async function(tab) {
 async function reloadBrowser({
   browser = gBrowser.selectedBrowser,
   isErrorPage = false,
+  waitForLoad = true,
 } = {}) {
-  return navigateTo(browser.currentURI.spec, { browser, isErrorPage });
+  return navigateTo(browser.currentURI.spec, {
+    browser,
+    isErrorPage,
+    waitForLoad,
+  });
 }
 
 /**
@@ -464,18 +481,26 @@ async function reloadBrowser({
  *          The browser element which should navigate. Defaults to the selected
  *          browser.
  *        - {Boolean} isErrorPage
- *          You may pass `true` is the URL is an error page. Otherwise
+ *          You may pass `true` if the URL is an error page. Otherwise
  *          BrowserTestUtils.browserLoaded will wait for 'load' event, which
  *          never fires for error pages.
+ *        - {Boolean} waitForLoad
+ *          You may pass `false` if the page load is expected to be blocked by
+ *          a script or a breakpoint.
  *
  * @return a promise that resolves when the page has fully loaded.
  */
 async function navigateTo(
   uri,
-  { browser = gBrowser.selectedBrowser, isErrorPage = false } = {}
+  {
+    browser = gBrowser.selectedBrowser,
+    isErrorPage = false,
+    waitForLoad = true,
+  } = {}
 ) {
   const waitForDevToolsReload = await watchForDevToolsReload(browser, {
     isErrorPage,
+    waitForLoad,
   });
 
   uri = uri.replaceAll("\n", "");
@@ -501,9 +526,11 @@ async function navigateTo(
     BrowserTestUtils.loadURI(browser, uri);
   }
 
-  info(`Waiting for page to be loaded…`);
-  await onBrowserLoaded;
-  info(`→ page loaded`);
+  if (waitForLoad) {
+    info(`Waiting for page to be loaded…`);
+    await onBrowserLoaded;
+    info(`→ page loaded`);
+  }
 
   await waitForDevToolsReload();
 }
@@ -539,12 +566,17 @@ async function navigateTo(
  *   }
  * ```
  */
-async function watchForDevToolsReload(browser, { isErrorPage = false } = {}) {
-  const waitForToolboxReload = await watchForToolboxReload(browser, {
+async function watchForDevToolsReload(
+  browser,
+  { isErrorPage = false, waitForLoad = true } = {}
+) {
+  const waitForToolboxReload = await _watchForToolboxReload(browser, {
     isErrorPage,
+    waitForLoad,
   });
-  const waitForResponsiveReload = await watchForResponsiveReload(browser, {
+  const waitForResponsiveReload = await _watchForResponsiveReload(browser, {
     isErrorPage,
+    waitForLoad,
   });
 
   return async function() {
@@ -561,20 +593,23 @@ async function watchForDevToolsReload(browser, { isErrorPage = false } = {}) {
  * - watch for the toolbox's commands to be fully reloaded
  * - watch for the toolbox's current panel to be reloaded
  */
-async function watchForToolboxReload(browser, { isErrorPage } = {}) {
+async function _watchForToolboxReload(
+  browser,
+  { isErrorPage, waitForLoad } = {}
+) {
   const tab = gBrowser.getTabForBrowser(browser);
+
   const toolbox = await gDevTools.getToolboxForTab(tab);
+
   if (!toolbox) {
     // No toolbox to wait for
     return function() {};
   }
-  const currentToolId = toolbox.currentToolId;
-  const panel = toolbox.getCurrentPanel();
 
-  const waitForCurrentPanelReload = watchForPanelReload(currentToolId, panel);
+  const waitForCurrentPanelReload = watchForCurrentPanelReload(toolbox);
   const waitForToolboxCommandsReload = await watchForCommandsReload(
     toolbox.commands,
-    { isErrorPage }
+    { isErrorPage, waitForLoad }
   );
   const checkTargetSwitching = await watchForTargetSwitching(
     toolbox.commands,
@@ -602,7 +637,10 @@ async function watchForToolboxReload(browser, { isErrorPage } = {}) {
  * - watch for the Responsive UI's commands to be fully reloaded
  * - watch for the Responsive UI's target switch to be done
  */
-async function watchForResponsiveReload(browser, { isErrorPage } = {}) {
+async function _watchForResponsiveReload(
+  browser,
+  { isErrorPage, waitForLoad } = {}
+) {
   const tab = gBrowser.getTabForBrowser(browser);
   const ui = ResponsiveUIManager.getResponsiveUIForTab(tab);
 
@@ -614,7 +652,7 @@ async function watchForResponsiveReload(browser, { isErrorPage } = {}) {
   const onResponsiveTargetSwitch = ui.once("responsive-ui-target-switch-done");
   const waitForResponsiveCommandsReload = await watchForCommandsReload(
     ui.commands,
-    { isErrorPage }
+    { isErrorPage, waitForLoad }
   );
   const checkTargetSwitching = await watchForTargetSwitching(
     ui.commands,
@@ -633,7 +671,60 @@ async function watchForResponsiveReload(browser, { isErrorPage } = {}) {
   };
 }
 
-function watchForPanelReload(toolId, panel) {
+/**
+ * Watch for the current panel selected in the provided toolbox to be reloaded.
+ * Some panels implement custom events that should be expected for every reload.
+ *
+ * Note about returning a method instead of a promise:
+ * In general this pattern is useful so that we can check if a target switch
+ * occurred or not, and decide which events to listen for. So far no panel is
+ * behaving differently whether there was a target switch or not. But to remain
+ * consistent with other watch* methods we still return a function here.
+ *
+ * @param {Toolbox}
+ *        The Toolbox instance which is going to experience a reload
+ * @return {function} An async method to be called and awaited after the reload
+ *         started. Will return `null` for panels which don't implement any
+ *         specific reload event.
+ */
+function watchForCurrentPanelReload(toolbox) {
+  return _watchForPanelReload(toolbox, toolbox.currentToolId);
+}
+
+/**
+ * Watch for all the panels loaded in the provided toolbox to be reloaded.
+ * Some panels implement custom events that should be expected for every reload.
+ *
+ * Note about returning a method instead of a promise:
+ * See comment for watchForCurrentPanelReload
+ *
+ * @param {Toolbox}
+ *        The Toolbox instance which is going to experience a reload
+ * @return {function} An async method to be called and awaited after the reload
+ *         started.
+ */
+function watchForLoadedPanelsReload(toolbox) {
+  const waitForPanels = [];
+  for (const [id] of toolbox.getToolPanels()) {
+    // Store a watcher method for each panel already loaded.
+    waitForPanels.push(_watchForPanelReload(toolbox, id));
+  }
+
+  return function() {
+    return Promise.all(
+      waitForPanels.map(async watchPanel => {
+        // Wait for all panels to be reloaded.
+        if (watchPanel) {
+          await watchPanel();
+        }
+      })
+    );
+  };
+}
+
+function _watchForPanelReload(toolbox, toolId) {
+  const panel = toolbox.getPanel(toolId);
+
   if (toolId == "inspector") {
     const markuploaded = panel.once("markuploaded");
     const onNewRoot = panel.once("new-root");
@@ -679,7 +770,10 @@ function watchForPanelReload(toolId, panel) {
  * !!! The wait function expects a `isTargetSwitching` argument to be provided,
  * which needs to be monitored using watchForTargetSwitching !!!
  */
-async function watchForCommandsReload(commands, { isErrorPage = false } = {}) {
+async function watchForCommandsReload(
+  commands,
+  { isErrorPage = false, waitForLoad = true } = {}
+) {
   // If we're switching origins, we need to wait for the 'switched-target'
   // event to make sure everything is ready.
   // Navigating from/to pages loaded in the parent process, like about:robots,
@@ -687,10 +781,18 @@ async function watchForCommandsReload(commands, { isErrorPage = false } = {}) {
   // (If target switching is disabled, the toolbox will reboot)
   const onTargetSwitched = commands.targetCommand.once("switched-target");
 
-  // Otherwise, if we don't switch target, it is safe to wait for the dom-complete
-  // DOCUMENT_EVENT resource (or dom-loading if we're navigating to an error page, where
-  // dom-complete won't be emitted).
-  const documentEventName = isErrorPage ? "dom-loading" : "dom-complete";
+  // Wait until we received a page load resource:
+  // - dom-complete if we can wait for a full page load
+  // - dom-loading otherwise
+  // This allows to wait for page load for consumers calling directly
+  // waitForDevTools instead of navigateTo/reloadBrowser.
+  // This is also useful as an alternative to target switching, when no target
+  // switch is supposed to happen.
+  const waitForCompleteLoad = waitForLoad && !isErrorPage;
+  const documentEventName = waitForCompleteLoad
+    ? "dom-complete"
+    : "dom-loading";
+
   const {
     onResource: onTopLevelDomEvent,
   } = await commands.resourceCommand.waitForNextResource(
@@ -711,11 +813,11 @@ async function watchForCommandsReload(commands, { isErrorPage = false } = {}) {
       info(`Waiting for target switch…`);
       await onTargetSwitched;
       info(`→ switched-target emitted`);
-    } else {
-      info(`Waiting for '${documentEventName}' resource…`);
-      await onTopLevelDomEvent;
-      info(`→ 'dom-complete' resource emitted`);
     }
+
+    info(`Waiting for '${documentEventName}' resource…`);
+    await onTopLevelDomEvent;
+    info(`→ '${documentEventName}' resource emitted`);
 
     return isTargetSwitching;
   };
@@ -761,7 +863,7 @@ async function watchForTargetSwitching(commands, browser) {
  *
  * @param {XULTab} tab
  *        The tab for which a target should be created.
- * @return {BrowsingContextTargetFront} The attached target front.
+ * @return {WindowGlobalTargetFront} The attached target front.
  */
 async function createAndAttachTargetForTab(tab) {
   info("Creating and attaching to a local tab target");
@@ -773,7 +875,6 @@ async function createAndAttachTargetForTab(tab) {
   await commands.targetCommand.startListening();
 
   const target = commands.targetCommand.targetFront;
-  await target.attach();
   return target;
 }
 
@@ -783,6 +884,13 @@ function isFissionEnabled() {
 
 function isServerTargetSwitchingEnabled() {
   return Services.prefs.getBoolPref(TARGET_SWITCHING_PREF);
+}
+
+function isEveryFrameTargetEnabled() {
+  return Services.prefs.getBoolPref(
+    "devtools.every-frame-target.enabled",
+    false
+  );
 }
 
 /**
@@ -1344,7 +1452,7 @@ async function registerActorInContentProcess(url, options) {
     args => {
       // eslint-disable-next-line no-shadow
       const { require } = ChromeUtils.import(
-        "resource://devtools/shared/Loader.jsm"
+        "resource://devtools/shared/loader/Loader.jsm"
       );
       const {
         ActorRegistry,
@@ -1636,8 +1744,9 @@ async function getBrowsingContextInFrames(browsingContext, selectors) {
     );
   }
 
-  while (selectors.length) {
-    const selector = selectors.shift();
+  const clonedSelectors = [...selectors];
+  while (clonedSelectors.length) {
+    const selector = clonedSelectors.shift();
     context = await SpecialPowers.spawn(context, [selector], _selector => {
       return content.document.querySelector(_selector).browsingContext;
     });

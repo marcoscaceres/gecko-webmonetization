@@ -97,10 +97,6 @@ enum TextureAllocationFlags {
   // The texture is going to be updated using UpdateFromSurface and needs to
   // support that call.
   ALLOC_UPDATE_FROM_SURFACE = 1 << 7,
-
-  // In practice, this means we support the APPLE_client_storage extension,
-  // meaning the buffer will not be internally copied by the graphics driver.
-  ALLOC_ALLOW_DIRECT_MAPPING = 1 << 8,
 };
 
 /**
@@ -195,7 +191,7 @@ class TextureReadLock {
   virtual bool IsValid() const = 0;
 
   static already_AddRefed<TextureReadLock> Deserialize(
-      const ReadLockDescriptor& aDescriptor, ISurfaceAllocator* aAllocator);
+      ReadLockDescriptor&& aDescriptor, ISurfaceAllocator* aAllocator);
 
   virtual bool Serialize(ReadLockDescriptor& aOutput,
                          base::ProcessId aOther) = 0;

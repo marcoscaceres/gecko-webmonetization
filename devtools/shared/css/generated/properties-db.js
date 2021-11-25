@@ -26,7 +26,8 @@ exports.CSS_PROPERTIES = {
       "animation-iteration-count",
       "animation-direction",
       "animation-fill-mode",
-      "animation-play-state"
+      "animation-play-state",
+      "animation-timeline"
     ],
     "supports": [
       "timing-function"
@@ -34,6 +35,7 @@ exports.CSS_PROPERTIES = {
     "values": [
       "alternate",
       "alternate-reverse",
+      "auto",
       "backwards",
       "both",
       "cubic-bezier",
@@ -1235,7 +1237,8 @@ exports.CSS_PROPERTIES = {
       "animation-iteration-count",
       "animation-direction",
       "animation-fill-mode",
-      "animation-play-state"
+      "animation-play-state",
+      "animation-timeline"
     ],
     "supports": [
       "timing-function"
@@ -1243,6 +1246,7 @@ exports.CSS_PROPERTIES = {
     "values": [
       "alternate",
       "alternate-reverse",
+      "auto",
       "backwards",
       "both",
       "cubic-bezier",
@@ -1863,7 +1867,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
       "auto",
       "content",
       "fit-content",
@@ -1883,7 +1886,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
       "auto",
       "content",
       "fit-content",
@@ -2830,6 +2832,7 @@ exports.CSS_PROPERTIES = {
       "animation-play-state",
       "animation-fill-mode",
       "animation-delay",
+      "animation-timeline",
       "transform",
       "rotate",
       "scale",
@@ -2863,6 +2866,7 @@ exports.CSS_PROPERTIES = {
       "shape-outside",
       "touch-action",
       "-webkit-line-clamp",
+      "scrollbar-gutter",
       "column-width",
       "column-count",
       "column-fill",
@@ -3103,7 +3107,8 @@ exports.CSS_PROPERTIES = {
       "animation-iteration-count",
       "animation-direction",
       "animation-fill-mode",
-      "animation-play-state"
+      "animation-play-state",
+      "animation-timeline"
     ],
     "supports": [
       "timing-function"
@@ -3111,6 +3116,7 @@ exports.CSS_PROPERTIES = {
     "values": [
       "alternate",
       "alternate-reverse",
+      "auto",
       "backwards",
       "both",
       "cubic-bezier",
@@ -3717,7 +3723,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
       "auto",
       "fit-content",
       "inherit",
@@ -5437,6 +5442,23 @@ exports.CSS_PROPERTIES = {
       "unset"
     ]
   },
+  "color-scheme": {
+    "isInherited": true,
+    "subproperties": [
+      "color-scheme"
+    ],
+    "supports": [],
+    "values": [
+      "dark",
+      "inherit",
+      "initial",
+      "light",
+      "normal",
+      "only",
+      "revert",
+      "unset"
+    ]
+  },
   "column-count": {
     "isInherited": false,
     "subproperties": [
@@ -5992,7 +6014,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
       "auto",
       "content",
       "fit-content",
@@ -6012,7 +6033,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
       "auto",
       "content",
       "fit-content",
@@ -6939,7 +6959,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
       "auto",
       "fit-content",
       "inherit",
@@ -7027,7 +7046,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
       "auto",
       "fit-content",
       "inherit",
@@ -8108,9 +8126,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
-      "-moz-max-content",
-      "-moz-min-content",
       "fit-content",
       "inherit",
       "initial",
@@ -8129,9 +8144,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
-      "-moz-max-content",
-      "-moz-min-content",
       "fit-content",
       "inherit",
       "initial",
@@ -8150,9 +8162,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
-      "-moz-max-content",
-      "-moz-min-content",
       "fit-content",
       "inherit",
       "initial",
@@ -8171,9 +8180,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
-      "-moz-max-content",
-      "-moz-min-content",
       "fit-content",
       "inherit",
       "initial",
@@ -8192,7 +8198,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
       "auto",
       "fit-content",
       "inherit",
@@ -8211,7 +8216,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
       "auto",
       "fit-content",
       "inherit",
@@ -8230,7 +8234,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
       "auto",
       "fit-content",
       "inherit",
@@ -8249,7 +8252,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
       "auto",
       "fit-content",
       "inherit",
@@ -9791,6 +9793,32 @@ exports.CSS_PROPERTIES = {
       "unset"
     ]
   },
+  "size": {
+    "isInherited": false,
+    "subproperties": [
+      "size"
+    ],
+    "supports": [],
+    "values": [
+      "a3",
+      "a4",
+      "a5",
+      "auto",
+      "b4",
+      "b5",
+      "inherit",
+      "initial",
+      "jis-b4",
+      "jis-b5",
+      "landscape",
+      "ledger",
+      "legal",
+      "letter",
+      "portrait",
+      "revert",
+      "unset"
+    ]
+  },
   "stop-color": {
     "isInherited": false,
     "subproperties": [
@@ -10775,7 +10803,6 @@ exports.CSS_PROPERTIES = {
     "supports": [],
     "values": [
       "-moz-available",
-      "-moz-fit-content",
       "auto",
       "fit-content",
       "inherit",
@@ -10982,6 +11009,10 @@ exports.PREFERENCES = [
     "layout.css.scroll-anchoring.enabled"
   ],
   [
+    "scrollbar-gutter",
+    "layout.css.scrollbar-gutter.enabled"
+  ],
+  [
     "touch-action",
     "layout.css.touch_action.enabled"
   ],
@@ -11028,6 +11059,10 @@ exports.PREFERENCES = [
   [
     "align-tracks",
     "layout.css.grid-template-masonry-value.enabled"
+  ],
+  [
+    "animation-timeline",
+    "layout.css.scroll-linked-animations.enabled"
   ],
   [
     "backdrop-filter",

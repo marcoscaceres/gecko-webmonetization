@@ -840,8 +840,7 @@ int32_t MathMLElement::TabIndexDefault() {
 
 // XXX Bug 1586011: Share logic with other element classes.
 bool MathMLElement::IsFocusableInternal(int32_t* aTabIndex, bool aWithMouse) {
-  Document* doc = GetComposedDoc();
-  if (!doc || doc->HasFlag(NODE_IS_EDITABLE)) {
+  if (!IsInComposedDoc() || IsInDesignMode()) {
     // In designMode documents we only allow focusing the document.
     if (aTabIndex) {
       *aTabIndex = -1;
@@ -978,28 +977,6 @@ void MathMLElement::GetLinkTarget(nsAString& aTarget) {
 already_AddRefed<nsIURI> MathMLElement::GetHrefURI() const {
   nsCOMPtr<nsIURI> hrefURI;
   return IsLink(getter_AddRefs(hrefURI)) ? hrefURI.forget() : nullptr;
-}
-
-// XXX Bug 1586014: Share logic with other element classes.
-void MathMLElement::RecompileScriptEventListeners() {
-  int32_t i, count = mAttrs.AttrCount();
-  for (i = 0; i < count; ++i) {
-    const nsAttrName* name = mAttrs.AttrNameAt(i);
-
-    // Eventlistenener-attributes are always in the null namespace
-    if (!name->IsAtom()) {
-      continue;
-    }
-
-    nsAtom* attr = name->Atom();
-    if (!IsEventAttributeName(attr)) {
-      continue;
-    }
-
-    nsAutoString value;
-    GetAttr(kNameSpaceID_None, attr, value);
-    SetEventHandler(GetEventNameForAttr(attr), value, true);
-  }
 }
 
 bool MathMLElement::IsEventAttributeNameInternal(nsAtom* aName) {

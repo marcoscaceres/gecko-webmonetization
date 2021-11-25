@@ -1080,6 +1080,12 @@ already_AddRefed<SourceSurface> VectorImage::CreateSurface(
       aParams.context ? aParams.context->GetDrawTarget()->GetBackendType()
                       : gfxPlatform::GetPlatform()->GetDefaultContentBackend();
 
+  if (backend == BackendType::DIRECT2D1_1) {
+    // We don't want to draw arbitrary content with D2D anymore
+    // because it doesn't support PushLayerWithBlend so switch to skia
+    backend = BackendType::SKIA;
+  }
+
   // Try to create an imgFrame, initializing the surface it contains by drawing
   // our gfxDrawable into it. (We use FILTER_NEAREST since we never scale here.)
   auto frame = MakeNotNull<RefPtr<imgFrame>>();
@@ -1141,7 +1147,7 @@ void VectorImage::SendFrameComplete(bool aDidCache, uint32_t aFlags) {
                                          GetMaxSizedIntRect());
   } else {
     NotNull<RefPtr<VectorImage>> image = WrapNotNull(this);
-    NS_DispatchToMainThread(CreateMediumHighRunnable(NS_NewRunnableFunction(
+    NS_DispatchToMainThread(CreateRenderBlockingRunnable(NS_NewRunnableFunction(
         "ProgressTracker::SyncNotifyProgress", [=]() -> void {
           RefPtr<ProgressTracker> tracker = image->GetProgressTracker();
           if (tracker) {
@@ -1504,7 +1510,7 @@ void VectorImage::InvalidateObserversOnNextRefreshDriverTick() {
   nsCOMPtr<nsIRunnable> ev(NS_NewRunnableFunction(
       "VectorImage::SendInvalidationNotifications",
       [=]() -> void { self->SendInvalidationNotifications(); }));
-  eventTarget->Dispatch(CreateMediumHighRunnable(ev.forget()),
+  eventTarget->Dispatch(CreateRenderBlockingRunnable(ev.forget()),
                         NS_DISPATCH_NORMAL);
 }
 

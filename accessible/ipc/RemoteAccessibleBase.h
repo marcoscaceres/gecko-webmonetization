@@ -9,6 +9,7 @@
 
 #include "mozilla/a11y/Accessible.h"
 #include "mozilla/a11y/CacheConstants.h"
+#include "mozilla/a11y/HyperTextAccessibleBase.h"
 #include "mozilla/a11y/Role.h"
 #include "AccAttributes.h"
 #include "nsIAccessibleText.h"
@@ -26,7 +27,7 @@ class RemoteAccessible;
 enum class RelationType;
 
 template <class Derived>
-class RemoteAccessibleBase : public Accessible {
+class RemoteAccessibleBase : public Accessible, public HyperTextAccessibleBase {
  public:
   virtual ~RemoteAccessibleBase() { MOZ_ASSERT(!mWrapper); }
 
@@ -109,7 +110,7 @@ class RemoteAccessibleBase : public Accessible {
   }
   uint32_t EmbeddedChildCount() const;
   int32_t IndexOfEmbeddedChild(const Derived* aChild);
-  Derived* EmbeddedChildAt(size_t aChildIdx);
+  virtual Accessible* EmbeddedChildAt(uint32_t aChildIdx) override;
 
   void Shutdown();
 
@@ -175,6 +176,14 @@ class RemoteAccessibleBase : public Accessible {
   virtual double MaxValue() const override;
   virtual double Step() const override;
 
+  virtual nsIntRect Bounds() const override;
+
+  virtual uint64_t State() override;
+
+  // Methods that interact with content.
+
+  virtual void TakeFocus() const override;
+
   /**
    * Allow the platform to store a pointers worth of data on us.
    */
@@ -209,6 +218,51 @@ class RemoteAccessibleBase : public Accessible {
     }
   }
 
+  void UpdateStateCache(uint64_t aState, bool aEnabled) {
+    if (aState & kRemoteCalculatedStates) {
+      return;
+    }
+    uint64_t state = 0;
+    if (mCachedFields) {
+      if (auto oldState =
+              mCachedFields->GetAttribute<uint64_t>(nsGkAtoms::state)) {
+        state = *oldState;
+      }
+    } else {
+      mCachedFields = new AccAttributes();
+    }
+    if (aEnabled) {
+      state |= aState;
+    } else {
+      state &= ~aState;
+    }
+    mCachedFields->SetAttribute(nsGkAtoms::state, state);
+  }
+
+  virtual void AppendTextTo(nsAString& aText, uint32_t aStartOffset = 0,
+                            uint32_t aLength = UINT32_MAX) override;
+
+  uint32_t GetCachedTextLength();
+  Maybe<const nsTArray<int32_t>&> GetCachedTextLines();
+  RefPtr<const AccAttributes> GetCachedTextAttributes();
+
+  virtual HyperTextAccessibleBase* AsHyperTextBase() override {
+    return IsHyperText() ? static_cast<HyperTextAccessibleBase*>(this)
+                         : nullptr;
+  }
+
+  /**
+   * Return the id of the dom node this accessible represents.  Note this
+   * should probably only be used for testing.
+   */
+  virtual void DOMNodeID(nsString& aID) const;
+
+  // HyperTextAccessibleBase
+  // XXX Implement this once it's cached.
+  virtual int32_t CaretOffset() const override { return -1; }
+
+  virtual already_AddRefed<AccAttributes> DefaultTextAttributes() override;
+
  protected:
   RemoteAccessibleBase(uint64_t aID, Derived* aParent,
                        DocAccessibleParent* aDoc, role aRole, AccType aType,
@@ -234,6 +288,7 @@ class RemoteAccessibleBase : public Accessible {
 
  protected:
   void SetParent(Derived* aParent);
+  Maybe<nsRect> RetrieveCachedBounds() const;
 
  private:
   uintptr_t mParent;
@@ -247,6 +302,8 @@ class RemoteAccessibleBase : public Accessible {
   uint64_t mID;
 
  protected:
+  virtual const Accessible* Acc() const override { return this; }
+
   RefPtr<AccAttributes> mCachedFields;
 
   // XXX DocAccessibleParent gets to change this to change the role of

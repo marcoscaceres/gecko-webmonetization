@@ -21,6 +21,7 @@
 #include "wasm/WasmMemory.h"
 #include "wasm/WasmSignalHandlers.h"
 
+#include "vm/ArrayBufferObject-inl.h"
 #include "vm/JSObject-inl.h"
 #include "vm/NativeObject-inl.h"
 
@@ -74,7 +75,8 @@ SharedArrayRawBuffer* SharedArrayRawBuffer::AllocateInternal(
   uint64_t mappedSizeWithHeader = computedMappedSize + gc::SystemPageSize();
   uint64_t accessibleSizeWithHeader = accessibleSize + gc::SystemPageSize();
 
-  void* p = MapBufferMemory(mappedSizeWithHeader, accessibleSizeWithHeader);
+  void* p = MapBufferMemory(wasmIndexType, mappedSizeWithHeader,
+                            accessibleSizeWithHeader);
   if (!p) {
     return nullptr;
   }
@@ -99,7 +101,7 @@ SharedArrayRawBuffer* SharedArrayRawBuffer::AllocateWasm(
     const mozilla::Maybe<wasm::Pages>& sourceMaxPages,
     const mozilla::Maybe<size_t>& mappedSize) {
   // Prior code has asserted that initial pages is within our implementation
-  // limits (wasm::MaxMemory32Pages) and we can assume it is a valid size_t.
+  // limits (wasm::MaxMemoryPages()) and we can assume it is a valid size_t.
   MOZ_ASSERT(initialPages.hasByteLength());
   size_t length = initialPages.byteLength();
   return SharedArrayRawBuffer::AllocateInternal(
@@ -129,6 +131,7 @@ void SharedArrayRawBuffer::tryGrowMaxPagesInPlace(Pages deltaMaxPages) {
 }
 
 bool SharedArrayRawBuffer::wasmGrowToPagesInPlace(const Lock&,
+                                                  wasm::IndexType t,
                                                   wasm::Pages newPages) {
   // Check that the new pages is within our allowable range. This will
   // simultaneously check against the maximum specified in source and our
@@ -136,8 +139,8 @@ bool SharedArrayRawBuffer::wasmGrowToPagesInPlace(const Lock&,
   if (newPages > wasmClampedMaxPages_) {
     return false;
   }
-  MOZ_ASSERT(newPages <= wasm::MaxMemoryPages() &&
-             newPages.byteLength() < ArrayBufferObject::maxBufferByteLength());
+  MOZ_ASSERT(newPages <= wasm::MaxMemoryPages(t) &&
+             newPages.byteLength() <= ArrayBufferObject::maxBufferByteLength());
 
   // We have checked against the clamped maximum and so we know we can convert
   // to byte lengths now.
@@ -198,7 +201,7 @@ void SharedArrayRawBuffer::dropReference() {
   size_t mappedSizeWithHeader = mappedSize_ + gc::SystemPageSize();
 
   // This was the final reference, so release the buffer.
-  UnmapBufferMemory(basePointer(), mappedSizeWithHeader);
+  UnmapBufferMemory(wasmIndexType(), basePointer(), mappedSizeWithHeader);
 }
 
 static bool IsSharedArrayBuffer(HandleValue v) {
@@ -371,8 +374,8 @@ void SharedArrayBufferObject::addSizeOfExcludingThis(
 
 /* static */
 void SharedArrayBufferObject::copyData(
-    Handle<SharedArrayBufferObject*> toBuffer, size_t toIndex,
-    Handle<SharedArrayBufferObject*> fromBuffer, size_t fromIndex,
+    Handle<ArrayBufferObjectMaybeShared*> toBuffer, size_t toIndex,
+    Handle<ArrayBufferObjectMaybeShared*> fromBuffer, size_t fromIndex,
     size_t count) {
   MOZ_ASSERT(toBuffer->byteLength() >= count);
   MOZ_ASSERT(toBuffer->byteLength() >= toIndex + count);
@@ -380,8 +383,8 @@ void SharedArrayBufferObject::copyData(
   MOZ_ASSERT(fromBuffer->byteLength() >= fromIndex + count);
 
   jit::AtomicOperations::memcpySafeWhenRacy(
-      toBuffer->dataPointerShared() + toIndex,
-      fromBuffer->dataPointerShared() + fromIndex, count);
+      toBuffer->dataPointerEither() + toIndex,
+      fromBuffer->dataPointerEither() + fromIndex, count);
 }
 
 SharedArrayBufferObject* SharedArrayBufferObject::createFromNewRawBuffer(

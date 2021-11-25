@@ -24,7 +24,9 @@
 [ChromeOnly, Exposed=(Window, Worker)]
 namespace IOUtils {
  /**
-   * Reads up to |maxBytes| of the file at |path| according to |opts|.
+   * Reads up to |opts.maxBytes| of the file at |path| according to |opts|.
+   *
+   * NB: The maximum file size that can be read is UINT32_MAX.
    *
    * @param path An absolute file path.
    *
@@ -36,6 +38,8 @@ namespace IOUtils {
    * Reads the UTF-8 text file located at |path| and returns the decoded
    * contents as a |DOMString|.
    *
+   * NB: The maximum file size that can be read is UINT32_MAX.
+   *
    * @param path An absolute file path.
    *
    * @return Resolves with the file contents encoded as a string, otherwise
@@ -45,6 +49,8 @@ namespace IOUtils {
   /**
    * Read the UTF-8 text file located at |path| and return the contents
    * parsed as JSON into a JS value.
+   *
+   * NB: The maximum file size that can be read is UINT32_MAX.
    *
    * @param path An absolute path.
    *
@@ -212,6 +218,49 @@ namespace IOUtils {
 partial namespace IOUtils {
   [Throws]
   readonly attribute any profileBeforeChange;
+};
+
+[Exposed=Worker]
+partial namespace IOUtils {
+  /**
+   * Synchronously opens the file at |path|. This API is only available in workers.
+   *
+   * @param path An absolute file path.
+   *
+   * @return A |SyncReadFile| object for the file.
+   */
+  [Throws]
+  SyncReadFile openFileForSyncReading(DOMString path);
+};
+
+/**
+ * An object representing an open file, allowing parts of the file contents to be
+ * read synchronously. Only available in workers.
+ */
+[ChromeOnly, Exposed=Worker]
+interface SyncReadFile {
+  /**
+   * The file size, in bytes.
+   */
+  readonly attribute long long size;
+
+  /**
+   * Synchronously read |dest.length| bytes at offset |offset| into |dest|.
+   * Throws if the file has been closed already or if the read would be out-of-bounds.
+   *
+   * @param dest   A Uint8Array whose entire contents will be overwritten with
+   *               bytes read from the file.
+   * @param offset The file offset at which the read range begins. (The length of the
+   *               range is given by |dest.length|.)
+   */
+  [Throws]
+  void readBytesInto(Uint8Array dest, long long offset);
+
+  /**
+   * Close the file. Subsequent calls to readBytesInto will throw.
+   * If the file is not closed manually, it will be closed once this object is GC'ed.
+   */
+  void close();
 };
 
 /**

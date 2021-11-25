@@ -9,11 +9,12 @@
 
 #include "mozilla/Utf8.h"  // mozilla::Utf8Unit
 
-#include "js/CompileOptions.h"  // JS::ReadOnlyCompileOptions
-#include "js/SourceText.h"      // JS::SourceText
-#include "js/TypeDecls.h"       // JS::Handle (fwd)
-#include "js/UniquePtr.h"       // js::UniquePtr
-#include "vm/ScopeKind.h"       // js::ScopeKind
+#include "frontend/ScriptIndex.h"  // ScriptIndex
+#include "js/CompileOptions.h"  // JS::ReadOnlyCompileOptions, JS::InstantiateOptions
+#include "js/SourceText.h"  // JS::SourceText
+#include "js/TypeDecls.h"   // JS::Handle (fwd)
+#include "js/UniquePtr.h"   // js::UniquePtr
+#include "vm/ScopeKind.h"   // js::ScopeKind
 
 namespace js {
 
@@ -77,11 +78,17 @@ extern JSScript* CompileEvalScript(JSContext* cx,
 extern bool DelazifyCanonicalScriptedFunction(JSContext* cx,
                                               JS::Handle<JSFunction*> fun);
 
+extern UniquePtr<CompilationStencil> DelazifyCanonicalScriptedFunction(
+    JSContext* cx, CompilationStencil& context, ScriptIndex scriptIndex);
+
 // Certain compile options will disable the syntax parser entirely.
 inline bool CanLazilyParse(const JS::ReadOnlyCompileOptions& options) {
   return !options.discardSource && !options.sourceIsLazy &&
          !options.forceFullParse();
 }
+
+void FireOnNewScript(JSContext* cx, const JS::InstantiateOptions& options,
+                     JS::Handle<JSScript*> script);
 
 }  // namespace frontend
 

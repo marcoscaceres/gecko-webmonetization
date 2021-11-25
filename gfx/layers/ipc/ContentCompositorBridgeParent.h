@@ -61,11 +61,17 @@ class ContentCompositorBridgeParent final : public CompositorBridgeParentBase {
   mozilla::ipc::IPCResult RecvAdoptChild(const LayersId& child) override {
     return IPC_FAIL_NO_REASON(this);
   }
-  mozilla::ipc::IPCResult RecvFlushRendering() override { return IPC_OK(); }
-  mozilla::ipc::IPCResult RecvFlushRenderingAsync() override {
+  mozilla::ipc::IPCResult RecvFlushRendering(
+      const wr::RenderReasons&) override {
     return IPC_OK();
   }
-  mozilla::ipc::IPCResult RecvForcePresent() override { return IPC_OK(); }
+  mozilla::ipc::IPCResult RecvFlushRenderingAsync(
+      const wr::RenderReasons&) override {
+    return IPC_OK();
+  }
+  mozilla::ipc::IPCResult RecvForcePresent(const wr::RenderReasons&) override {
+    return IPC_OK();
+  }
   mozilla::ipc::IPCResult RecvWaitOnTransactionProcessed() override {
     return IPC_OK();
   }
@@ -117,8 +123,6 @@ class ContentCompositorBridgeParent final : public CompositorBridgeParentBase {
       const LayersId& aLayersId, const uint64_t& aInputBlockId,
       nsTArray<ScrollableLayerGuid>&& aTargets) override;
 
-  already_AddRefed<dom::PWebGLParent> AllocPWebGLParent() override;
-
   // Use DidCompositeLocked if you already hold a lock on
   // sIndirectLayerTreesLock; Otherwise use DidComposite, which would request
   // the lock automatically.
@@ -126,7 +130,7 @@ class ContentCompositorBridgeParent final : public CompositorBridgeParentBase {
                           TimeStamp& aCompositeStart, TimeStamp& aCompositeEnd);
 
   PTextureParent* AllocPTextureParent(
-      const SurfaceDescriptor& aSharedData, const ReadLockDescriptor& aReadLock,
+      const SurfaceDescriptor& aSharedData, ReadLockDescriptor& aReadLock,
       const LayersBackend& aLayersBackend, const TextureFlags& aFlags,
       const LayersId& aId, const uint64_t& aSerial,
       const wr::MaybeExternalImageId& aExternalImageId) override;

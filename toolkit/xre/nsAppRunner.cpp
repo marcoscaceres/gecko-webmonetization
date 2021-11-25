@@ -23,11 +23,13 @@
 #include "mozilla/Printf.h"
 #include "mozilla/ResultExtensions.h"
 #include "mozilla/ScopeExit.h"
+#include "mozilla/StaticPrefs_browser.h"
 #include "mozilla/StaticPrefs_fission.h"
 #include "mozilla/Telemetry.h"
 #include "mozilla/Utf8.h"
 #include "mozilla/intl/LocaleService.h"
 #include "mozilla/JSONWriter.h"
+#include "mozilla/glean/GleanMetrics.h"
 #include "BaseProfiler.h"
 
 #include "nsAppRunner.h"
@@ -276,7 +278,6 @@ static const char kPrefThemeId[] = "extensions.activeThemeID";
 static const char kPrefBrowserStartupBlankWindow[] =
     "browser.startup.blankWindow";
 static const char kPrefPreXulSkeletonUI[] = "browser.startup.preXulSkeletonUI";
-static const char kPrefDrawTabsInTitlebar[] = "browser.tabs.drawInTitlebar";
 #endif  // defined(XP_WIN)
 
 int gArgc;
@@ -972,22 +973,15 @@ nsXULAppInfo::GetWidgetToolkit(nsACString& aResult) {
 // Ensure that the GeckoProcessType enum, defined in xpcom/build/nsXULAppAPI.h,
 // is synchronized with the const unsigned longs defined in
 // xpcom/system/nsIXULRuntime.idl.
-#define SYNC_ENUMS(a, b)                                                   \
-  static_assert(nsIXULRuntime::PROCESS_TYPE_##a ==                         \
-                    static_cast<int>(GeckoProcessType_##b),                \
-                "GeckoProcessType in nsXULAppAPI.h not synchronized with " \
+#define GECKO_PROCESS_TYPE(enum_value, enum_name, string_name, proc_typename, \
+                           process_bin_type, procinfo_typename,               \
+                           webidl_typename, allcaps_name)                     \
+  static_assert(nsIXULRuntime::PROCESS_TYPE_##allcaps_name ==                 \
+                    static_cast<int>(GeckoProcessType_##enum_name),           \
+                "GeckoProcessType in nsXULAppAPI.h not synchronized with "    \
                 "nsIXULRuntime.idl");
-
-SYNC_ENUMS(DEFAULT, Default)
-SYNC_ENUMS(CONTENT, Content)
-SYNC_ENUMS(IPDLUNITTEST, IPDLUnitTest)
-SYNC_ENUMS(GMPLUGIN, GMPlugin)
-SYNC_ENUMS(GPU, GPU)
-SYNC_ENUMS(VR, VR)
-SYNC_ENUMS(RDD, RDD)
-SYNC_ENUMS(SOCKET, Socket)
-SYNC_ENUMS(SANDBOX_BROKER, RemoteSandboxBroker)
-SYNC_ENUMS(FORKSERVER, ForkServer)
+#include "mozilla/GeckoProcessTypes.h"
+#undef GECKO_PROCESS_TYPE
 
 // .. and ensure that that is all of them:
 static_assert(GeckoProcessType_ForkServer + 1 == GeckoProcessType_End,
@@ -1322,6 +1316,18 @@ nsXULAppInfo::GetWindowsDLLBlocklistStatus(bool* aResult) {
 NS_IMETHODIMP
 nsXULAppInfo::GetRestartedByOS(bool* aResult) {
   *aResult = gRestartedByOS;
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+nsXULAppInfo::GetChromeColorSchemeIsDark(bool* aResult) {
+  *aResult = LookAndFeel::ColorSchemeForChrome() == ColorScheme::Dark;
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+nsXULAppInfo::GetDrawInTitlebar(bool* aResult) {
+  *aResult = LookAndFeel::DrawInTitlebar();
   return NS_OK;
 }
 
@@ -1990,7 +1996,7 @@ static void ReflectSkeletonUIPrefToRegistry(const char* aPref, void* aData) {
   bool shouldBeEnabled =
       Preferences::GetBool(kPrefPreXulSkeletonUI, false) &&
       Preferences::GetBool(kPrefBrowserStartupBlankWindow, false) &&
-      Preferences::GetBool(kPrefDrawTabsInTitlebar, false);
+      LookAndFeel::DrawInTitlebar();
   if (shouldBeEnabled && Preferences::HasUserValue(kPrefThemeId)) {
     nsCString themeId;
     Preferences::GetCString(kPrefThemeId, themeId);
@@ -2019,8 +2025,9 @@ static void SetupSkeletonUIPrefs() {
   Preferences::RegisterCallback(&ReflectSkeletonUIPrefToRegistry,
                                 kPrefBrowserStartupBlankWindow);
   Preferences::RegisterCallback(&ReflectSkeletonUIPrefToRegistry, kPrefThemeId);
-  Preferences::RegisterCallback(&ReflectSkeletonUIPrefToRegistry,
-                                kPrefDrawTabsInTitlebar);
+  Preferences::RegisterCallback(
+      &ReflectSkeletonUIPrefToRegistry,
+      nsDependentCString(StaticPrefs::GetPrefName_browser_tabs_inTitlebar()));
 }
 
 #  if defined(MOZ_LAUNCHER_PROCESS)
@@ -2611,7 +2618,6 @@ static ReturnAbortOnError ShowProfileManager(
 
 static bool gDoMigration = false;
 static bool gDoProfileReset = false;
-static bool gResetDeleteOldProfile = true;
 static nsCOMPtr<nsIToolkitProfile> gResetOldProfile;
 
 static nsresult LockProfile(nsINativeAppSupport* aNative, nsIFile* aRootDir,
@@ -2713,19 +2719,6 @@ static nsresult SelectProfile(nsToolkitProfileService* aProfileSvc,
   }
 
   NS_ENSURE_SUCCESS(rv, rv);
-
-  if (rv == NS_MIGRATE_INTO_PACKAGE) {
-    if (!*aProfile) {
-      NS_WARNING(
-          "Attempted package profile migration without existing profile.");
-      return NS_ERROR_ABORT;
-    }
-
-    gDoProfileReset = true;
-    gResetDeleteOldProfile = false;
-    gDoMigration = true;
-    return NS_OK;
-  }
 
   if (didCreate) {
     // For a fresh install, we would like to let users decide
@@ -3810,7 +3803,30 @@ int XREMain::XRE_mainInit(bool* aExitFlag) {
       CrashReporter::AnnotateCrashReport(CrashReporter::Annotation::AppInitDLLs,
                                          NS_ConvertUTF16toUTF8(appInitDLLs));
     }
+
+    nsString packageFamilyName = widget::WinUtils::GetPackageFamilyName();
+    if (StringBeginsWith(packageFamilyName, u"Mozilla."_ns) ||
+        StringBeginsWith(packageFamilyName, u"MozillaCorporation."_ns)) {
+      CrashReporter::AnnotateCrashReport(
+          CrashReporter::Annotation::WindowsPackageFamilyName,
+          NS_ConvertUTF16toUTF8(packageFamilyName));
+    }
 #endif
+
+    bool isBackgroundTaskMode = false;
+#ifdef MOZ_BACKGROUNDTASKS
+    Maybe<nsCString> backgroundTasks = BackgroundTasks::GetBackgroundTasks();
+    if (backgroundTasks.isSome()) {
+      isBackgroundTaskMode = true;
+      CrashReporter::AnnotateCrashReport(
+          CrashReporter::Annotation::BackgroundTaskName, backgroundTasks.ref());
+    }
+#endif
+    CrashReporter::AnnotateCrashReport(
+        CrashReporter::Annotation::BackgroundTaskMode, isBackgroundTaskMode);
+
+    CrashReporter::AnnotateCrashReport(CrashReporter::Annotation::HeadlessMode,
+                                       gfxPlatform::IsHeadless());
 
     CrashReporter::SetRestartArgs(gArgc, gArgv);
 
@@ -4983,8 +4999,9 @@ nsresult XREMain::XRE_mainRun() {
           initializedJSContext = true;
         }
 
-        if (NS_FAILED(ProfileResetCleanup(mProfileSvc, gResetOldProfile,
-                                          gResetDeleteOldProfile))) {
+        nsresult backupCreated =
+            ProfileResetCleanup(mProfileSvc, gResetOldProfile);
+        if (NS_FAILED(backupCreated)) {
           NS_WARNING("Could not cleanup the profile that was reset");
         }
       }
@@ -5167,13 +5184,14 @@ nsresult XREMain::XRE_mainRun() {
       free(tempArgv);
       NS_ENSURE_SUCCESS(rv, NS_ERROR_FAILURE);
 
+#  ifdef MOZILLA_OFFICIAL
       // Check if we're running from a DMG and allow the user to install to the
       // Applications directory.
-      if (mProfileSvc->GetIsFirstRun() &&
-          MacRunFromDmgUtils::MaybeInstallFromDmgAndRelaunch()) {
+      if (MacRunFromDmgUtils::MaybeInstallFromDmgAndRelaunch()) {
         bool userAllowedQuit = true;
         appStartup->Quit(nsIAppStartup::eForceQuit, 0, &userAllowedQuit);
       }
+#  endif
 #endif
 
       nsCOMPtr<nsIObserverService> obsService =
@@ -5218,10 +5236,10 @@ nsresult XREMain::XRE_mainRun() {
 #endif /* MOZ_INSTRUMENT_EVENT_LOOP */
 
     // Send Telemetry about Gecko version and buildid
-    Telemetry::ScalarSet(Telemetry::ScalarID::GECKO_VERSION,
-                         NS_ConvertASCIItoUTF16(gAppData->version));
-    Telemetry::ScalarSet(Telemetry::ScalarID::GECKO_BUILD_ID,
-                         NS_ConvertASCIItoUTF16(gAppData->buildID));
+    nsAutoCString version(gAppData->version);
+    nsAutoCString buildID(gAppData->buildID);
+    mozilla::glean::geckoview_validation::version.Set(version);
+    mozilla::glean::geckoview_validation::build_id.Set(buildID);
 
 #if defined(MOZ_SANDBOX) && defined(XP_LINUX)
     // If we're on Linux, we now have information about the OS capabilities
@@ -5299,11 +5317,11 @@ nsresult XREMain::XRE_mainRun() {
 }
 
 #if defined(MOZ_WIDGET_ANDROID)
-static already_AddRefed<nsIFile> GreOmniPath() {
+static already_AddRefed<nsIFile> GreOmniPath(int argc, char** argv) {
   nsresult rv;
 
   const char* path = nullptr;
-  ArgResult ar = CheckArg("greomni", &path);
+  ArgResult ar = CheckArg(argc, argv, "greomni", &path, CheckArgFlag::None);
   if (ar == ARG_BAD) {
     PR_fprintf(PR_STDERR,
                "Error: argument --greomni requires a path argument\n");
@@ -5395,7 +5413,7 @@ int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
     nsCOMPtr<nsIFile> greDir;
 
 #if defined(MOZ_WIDGET_ANDROID)
-    greDir = GreOmniPath();
+    greDir = GreOmniPath(argc, argv);
     if (!greDir) {
       return 2;
     }
@@ -5577,7 +5595,8 @@ nsresult XRE_InitCommandLine(int aArgc, char* aArgv[]) {
 #endif
 
 #if defined(MOZ_WIDGET_ANDROID)
-  nsCOMPtr<nsIFile> greOmni = gAppData ? gAppData->xreDirectory : GreOmniPath();
+  nsCOMPtr<nsIFile> greOmni =
+      gAppData ? gAppData->xreDirectory : GreOmniPath(aArgc, aArgv);
   if (!greOmni) {
     return NS_ERROR_FAILURE;
   }
@@ -5612,10 +5631,11 @@ bool XRE_IsE10sParentProcess() {
 #endif
 }
 
-#define GECKO_PROCESS_TYPE(enum_value, enum_name, string_name, xre_name, \
-                           bin_type)                                     \
-  bool XRE_Is##xre_name##Process() {                                     \
-    return XRE_GetProcessType() == GeckoProcessType_##enum_name;         \
+#define GECKO_PROCESS_TYPE(enum_value, enum_name, string_name, proc_typename, \
+                           process_bin_type, procinfo_typename,               \
+                           webidl_typename, allcaps_name)                     \
+  bool XRE_Is##proc_typename##Process() {                                     \
+    return XRE_GetProcessType() == GeckoProcessType_##enum_name;              \
   }
 #include "mozilla/GeckoProcessTypes.h"
 #undef GECKO_PROCESS_TYPE
@@ -5720,10 +5740,11 @@ mozilla::BinPathType XRE_GetChildProcBinPathType(
   }
 
   switch (aProcessType) {
-#define GECKO_PROCESS_TYPE(enum_value, enum_name, string_name, xre_name, \
-                           bin_type)                                     \
-  case GeckoProcessType_##enum_name:                                     \
-    return BinPathType::bin_type;
+#define GECKO_PROCESS_TYPE(enum_value, enum_name, string_name, proc_typename, \
+                           process_bin_type, procinfo_typename,               \
+                           webidl_typename, allcaps_name)                     \
+  case GeckoProcessType_##enum_name:                                          \
+    return BinPathType::process_bin_type;
 #include "mozilla/GeckoProcessTypes.h"
 #undef GECKO_PROCESS_TYPE
     default:

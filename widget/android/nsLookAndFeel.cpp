@@ -16,8 +16,10 @@
 #include "mozilla/java/GeckoAppShellWrappers.h"
 #include "mozilla/java/GeckoRuntimeWrappers.h"
 #include "mozilla/java/GeckoSystemStateListenerWrappers.h"
+#include "ThemeColors.h"
 
 using namespace mozilla;
+using namespace mozilla::widget;
 
 static const char16_t UNICODE_BULLET = 0x2022;
 
@@ -79,10 +81,9 @@ void nsLookAndFeel::NativeInit() {
 }
 
 void nsLookAndFeel::RefreshImpl() {
-  nsXPLookAndFeel::RefreshImpl();
-
   mInitializedSystemColors = false;
   mInitializedShowPassword = false;
+  nsXPLookAndFeel::RefreshImpl();
 }
 
 nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme aColorScheme,
@@ -92,6 +93,34 @@ nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme aColorScheme,
     // Failure to initialize colors is an error condition. Return black.
     aColor = 0;
     return NS_ERROR_FAILURE;
+  }
+
+  // Highlight/Highlighttext have native equivalents that we can map to (on
+  // Android) which should work fine, regardless of the color-scheme.
+  switch (aID) {
+    case ColorID::Highlight: {
+      // Matched to action_accent in java codebase. This works fine with both
+      // light and dark color scheme.
+      nscolor accent =
+          Color(ColorID::MozAccentColor, aColorScheme, UseStandins::No);
+      aColor =
+          NS_RGBA(NS_GET_R(accent), NS_GET_G(accent), NS_GET_B(accent), 153);
+      return NS_OK;
+    }
+    case ColorID::Highlighttext:
+      // Selection background is transparent enough that any foreground color
+      // will do.
+      aColor = NS_SAME_AS_FOREGROUND_COLOR;
+      return NS_OK;
+    default:
+      break;
+  }
+
+  if (aColorScheme == ColorScheme::Dark) {
+    if (auto darkColor = GenericDarkColor(aID)) {
+      aColor = *darkColor;
+      return NS_OK;
+    }
   }
 
   // XXX we'll want to use context.obtainStyledAttributes on the java side to
@@ -104,40 +133,19 @@ nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme aColorScheme,
   switch (aID) {
       // These colors don't seem to be used for anything anymore in Mozilla
       // The CSS2 colors below are used.
-    case ColorID::WindowForeground:
-      aColor = mSystemColors.textColorPrimary;
-      break;
-    case ColorID::WidgetForeground:
     case ColorID::MozMenubartext:
       aColor = mSystemColors.colorForeground;
       break;
-    case ColorID::Widget3DHighlight:
-      aColor = NS_RGB(0xa0, 0xa0, 0xa0);
+
+    case ColorID::ThemedScrollbarThumbInactive:
+    case ColorID::ThemedScrollbarThumb:
+      // We don't need to care about the Active and Hover colors because Android
+      // scrollbars can't be hovered (they always have pointer-events: none).
+      aColor = NS_RGBA(119, 119, 119, 102);
       break;
-    case ColorID::Widget3DShadow:
-      aColor = NS_RGB(0x40, 0x40, 0x40);
-      break;
-    case ColorID::TextForeground:
-      // not used?
-      aColor = mSystemColors.textColorPrimary;
-      break;
-    case ColorID::Highlight: {
-      // Matched to action_accent in java codebase. This works fine with both
-      // light and dark color scheme.
-      nscolor accent =
-          Color(ColorID::MozAccentColor, aColorScheme, UseStandins::No);
-      aColor =
-          NS_RGBA(NS_GET_R(accent), NS_GET_G(accent), NS_GET_B(accent), 153);
-      break;
-    }
-    case ColorID::Highlighttext:
-      // Selection background is transparent enough that any foreground color
-      // does.
-      aColor = NS_SAME_AS_FOREGROUND_COLOR;
-      break;
+
     case ColorID::IMESelectedRawTextBackground:
     case ColorID::IMESelectedConvertedTextBackground:
-    case ColorID::WidgetSelectBackground:
       aColor = mSystemColors.textColorHighlight;
       break;
     case ColorID::IMESelectedRawTextForeground:
@@ -170,8 +178,6 @@ nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme aColorScheme,
     case ColorID::Inactiveborder:   // inactive window border
     case ColorID::Inactivecaption:  // inactive window caption
     case ColorID::Scrollbar:        // scrollbar gray area
-    case ColorID::TextBackground:   // not used?
-    case ColorID::WidgetBackground:
       aColor = mSystemColors.colorBackground;
       break;
     case ColorID::Graytext:  // disabled text in windows, menus, etc.
@@ -187,10 +193,9 @@ nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme aColorScheme,
     case ColorID::MozCellhighlighttext:
     case ColorID::Selecteditemtext:
     case ColorID::MozAccentColorForeground:
-      aColor = UseNativeAccent()
-                   ? nsNativeBasicTheme::ComputeCustomAccentForeground(
-                         mSystemColors.colorAccent)
-                   : widget::sDefaultAccentForeground.ToABGR();
+      aColor = UseNativeAccent() ? ThemeColors::ComputeCustomAccentForeground(
+                                       mSystemColors.colorAccent)
+                                 : widget::sDefaultAccentForeground.ToABGR();
       break;
     case ColorID::Fieldtext:
       aColor = NS_RGB(0x1a, 0x1a, 0x1a);
@@ -211,13 +216,14 @@ nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme aColorScheme,
       aColor = NS_RGB(0xf7, 0xf5, 0xf3);
       break;
 
-    case ColorID::Threedface:
     case ColorID::Buttonface:
+    case ColorID::MozButtondisabledface:
+    case ColorID::Threedface:
     case ColorID::Threedlightshadow:
+    case ColorID::MozDisabledfield:
       aColor = NS_RGB(0xec, 0xe7, 0xe2);
       break;
 
-    case ColorID::WindowBackground:
     case ColorID::Buttonhighlight:
     case ColorID::Field:
     case ColorID::Threedhighlight:
@@ -251,6 +257,7 @@ nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme aColorScheme,
       aColor = mSystemColors.textColorHighlight;
       break;
     case ColorID::MozButtonhoverface:
+    case ColorID::MozButtonactiveface:
       aColor = NS_RGB(0xf3, 0xf0, 0xed);
       break;
     case ColorID::MozMenuhover:
@@ -331,8 +338,11 @@ nsresult nsLookAndFeel::NativeGetInt(IntID aID, int32_t& aResult) {
       aResult = eScrollThumbStyle_Proportional;
       break;
 
+    case IntID::UseOverlayScrollbars:
+      aResult = 1;
+      break;
+
     case IntID::WindowsDefaultTheme:
-    case IntID::WindowsThemeIdentifier:
     case IntID::OperatingSystemVersionIdentifier:
       aResult = 0;
       rv = NS_ERROR_NOT_IMPLEMENTED;
@@ -356,8 +366,16 @@ nsresult nsLookAndFeel::NativeGetInt(IntID aID, int32_t& aResult) {
       break;
 
     case IntID::PrimaryPointerCapabilities:
-      aResult = java::GeckoAppShell::GetPrimaryPointerCapabilities();
+      aResult = java::GeckoAppShell::GetAllPointerCapabilities();
+
+      // We cannot assume what is primary device, so we use Blink's way for web
+      // compatibility (https://crbug.com/136119#c6). If having coarse
+      // capability in any devices, return it.
+      if (aResult & static_cast<int32_t>(PointerCapabilities::Coarse)) {
+        aResult = static_cast<int32_t>(PointerCapabilities::Coarse);
+      }
       break;
+
     case IntID::AllPointerCapabilities:
       aResult = java::GeckoAppShell::GetAllPointerCapabilities();
       break;

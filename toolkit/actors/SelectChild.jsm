@@ -4,7 +4,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 "use strict";
 
-var EXPORTED_SYMBOLS = ["SelectChild"];
+var EXPORTED_SYMBOLS = ["SelectChild", "SelectContentHelper"];
 
 const { XPCOMUtils } = ChromeUtils.import(
   "resource://gre/modules/XPCOMUtils.jsm"
@@ -259,6 +259,7 @@ SelectContentHelper.prototype = {
         if (this.initialSelection !== selectedOption) {
           let inputEvent = new win.Event("input", {
             bubbles: true,
+            composed: true,
           });
 
           let changeEvent = new win.Event("change", {

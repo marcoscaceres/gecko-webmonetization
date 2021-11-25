@@ -62,6 +62,7 @@ class DocGroup;
 class Document;
 class Element;
 class Location;
+class MediaDevices;
 class MediaKeys;
 class Navigator;
 class Performance;
@@ -133,6 +134,9 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
   static nsPIDOMWindowInner* From(mozIDOMWindow* aFrom) {
     return static_cast<nsPIDOMWindowInner*>(aFrom);
   }
+
+  NS_IMPL_FROMEVENTTARGET_HELPER_WITH_GETTER(nsPIDOMWindowInner,
+                                             GetAsWindowInner())
 
   // Returns true if this object is the currently-active inner window for its
   // BrowsingContext.
@@ -577,6 +581,7 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
   uint32_t GetMarkedCCGeneration() { return mMarkedCCGeneration; }
 
   mozilla::dom::Navigator* Navigator();
+  mozilla::dom::MediaDevices* GetExtantMediaDevices() const;
   virtual mozilla::dom::Location* Location() = 0;
 
   virtual nsresult GetControllers(nsIControllers** aControllers) = 0;
@@ -639,10 +644,6 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
   uint32_t mMutationBits;
 
   uint32_t mActivePeerConnections = 0;
-
-  // This is the count for active peer connections for all the windows in the
-  // subtree rooted at this window (only set on the top window).
-  uint32_t mTotalActivePeerConnections = 0;
 
   bool mIsDocumentLoaded;
   bool mIsHandlingResizeEvent;
@@ -733,11 +734,13 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
 
   ~nsPIDOMWindowOuter();
 
-  void RefreshMediaElementsSuspend(SuspendTypes aSuspend);
-  void MaybeNotifyMediaResumedFromBlock(SuspendTypes aSuspend);
+  void NotifyResumingDelayedMedia();
 
  public:
   NS_DECLARE_STATIC_IID_ACCESSOR(NS_PIDOMWINDOWOUTER_IID)
+
+  NS_IMPL_FROMEVENTTARGET_HELPER_WITH_GETTER(nsPIDOMWindowOuter,
+                                             GetAsWindowOuter())
 
   static nsPIDOMWindowOuter* From(mozIDOMWindowProxy* aFrom) {
     return static_cast<nsPIDOMWindowOuter*>(aFrom);
@@ -779,12 +782,11 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
   bool IsBackground() { return mIsBackground; }
 
   // Audio API
-  SuspendTypes GetMediaSuspend() const;
-  void SetMediaSuspend(SuspendTypes aSuspend);
-
   bool GetAudioMuted() const;
 
-  void MaybeActiveMediaComponents();
+  // No longer to delay media from starting for this window.
+  void ActivateMediaComponents();
+  bool ShouldDelayMediaFromStart() const;
 
   void RefreshMediaElementsVolume();
 
@@ -909,6 +911,13 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
    * in its parent, etc.).
    */
   virtual void EnsureSizeAndPositionUpToDate() = 0;
+
+  /**
+   * Suppresses/unsuppresses user initiated event handling in window's document
+   * and all in-process descendant documents.
+   */
+  virtual void SuppressEventHandling() = 0;
+  virtual void UnsuppressEventHandling() = 0;
 
   /**
    * Callback for notifying a window about a modal dialog being
@@ -1124,23 +1133,12 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
 
   uint32_t mModalStateDepth;
 
+  uint32_t mSuppressEventHandlingDepth;
+
   // Tracks whether our docshell is active.  If it is, mIsBackground
   // is false.  Too bad we have so many different concepts of
   // "active".
   bool mIsBackground;
-
-  /**
-   * The suspended types can be "disposable" or "permanent". This varable only
-   * stores the value about permanent suspend.
-   * - disposable
-   * To pause all playing media in that window, but doesn't affect the media
-   * which starts after that.
-   *
-   * - permanent
-   * To pause all media in that window, and also affect the media which starts
-   * after that.
-   */
-  SuspendTypes mMediaSuspend;
 
   // current desktop mode flag.
   bool mDesktopModeViewport;

@@ -7,8 +7,8 @@ const {
   processDescriptorSpec,
 } = require("devtools/shared/specs/descriptors/process");
 const {
-  BrowsingContextTargetFront,
-} = require("devtools/client/fronts/targets/browsing-context");
+  WindowGlobalTargetFront,
+} = require("devtools/client/fronts/targets/window-global");
 const {
   ContentProcessTargetFront,
 } = require("devtools/client/fronts/targets/content-process");
@@ -25,14 +25,15 @@ class ProcessDescriptorFront extends DescriptorMixin(
 ) {
   constructor(client, targetFront, parentFront) {
     super(client, targetFront, parentFront);
-    this.isParent = false;
+    this._isParent = false;
     this._processTargetFront = null;
     this._targetFrontPromise = null;
   }
 
   form(json) {
     this.id = json.id;
-    this.isParent = json.isParent;
+    this._isParent = json.isParent;
+    this._isWindowlessParent = json.isWindowlessParent;
     this.traits = json.traits || {};
   }
 
@@ -45,8 +46,8 @@ class ProcessDescriptorFront extends DescriptorMixin(
     // the right front based on the actor ID.
     if (form.actor.includes("parentProcessTarget")) {
       // ParentProcessTargetActor doesn't have a specific front, instead it uses
-      // BrowsingContextTargetFront on the client side.
-      front = new BrowsingContextTargetFront(this._client, null, this);
+      // WindowGlobalTargetFront on the client side.
+      front = new WindowGlobalTargetFront(this._client, null, this);
     } else {
       front = new ContentProcessTargetFront(this._client, null, this);
     }
@@ -64,8 +65,23 @@ class ProcessDescriptorFront extends DescriptorMixin(
     return front;
   }
 
+  /**
+   * This flag should be true for parent process descriptors of a regular
+   * browser instance, where you can expect the target to be associated with a
+   * window global.
+   *
+   * This will typically be true for the descriptor used by the Browser Toolbox
+   * or the Browser Console opened against a regular Firefox instance.
+   *
+   * On the contrary this will be false for parent process descriptors created
+   * for xpcshell debugging or for background task debugging.
+   */
+  get isBrowserProcessDescriptor() {
+    return this._isParent && !this._isWindowlessParent;
+  }
+
   get isParentProcessDescriptor() {
-    return this.isParent;
+    return this._isParent;
   }
 
   get isProcessDescriptor() {
@@ -91,7 +107,6 @@ class ProcessDescriptorFront extends DescriptorMixin(
       try {
         const targetForm = await super.getTarget();
         targetFront = await this._createProcessTargetFront(targetForm);
-        await targetFront.attach();
       } catch (e) {
         // This is likely to happen if we get a lot of events which drop previous
         // processes.

@@ -1210,6 +1210,13 @@ nsresult Database::InitSchema(bool* aDatabaseMigrated) {
 
       // Firefox 94 uses schema version 59
 
+      if (currentSchemaVersion < 60) {
+        rv = MigrateV60Up();
+        NS_ENSURE_SUCCESS(rv, rv);
+      }
+
+      // Firefox 96 uses schema version 60
+
       // Schema Upgrades must add migration code here.
       // >>> IMPORTANT! <<<
       // NEVER MIX UP SYNC AND ASYNC EXECUTION IN MIGRATORS, YOU MAY LOCK THE
@@ -2310,6 +2317,19 @@ nsresult Database::MigrateV59Up() {
   return NS_OK;
 }
 
+nsresult Database::MigrateV60Up() {
+  // Add the site_name column to moz_places.
+  nsCOMPtr<mozIStorageStatement> stmt;
+  nsresult rv = mMainConn->CreateStatement(
+      "SELECT site_name FROM moz_places"_ns, getter_AddRefs(stmt));
+  if (NS_FAILED(rv)) {
+    rv = mMainConn->ExecuteSimpleSQL(
+        "ALTER TABLE moz_places ADD COLUMN site_name TEXT"_ns);
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
+  return NS_OK;
+}
+
 nsresult Database::ConvertOldStyleQuery(nsCString& aURL) {
   AutoTArray<QueryKeyValuePair, 8> tokens;
   nsresult rv = TokenizeQueryString(aURL, &tokens);
@@ -2604,10 +2624,11 @@ Database::Observe(nsISupports* aSubject, const char* aTopic,
 
     // Spin the events loop until the clients are done.
     // Note, this is just for tests, specifically test_clearHistory_shutdown.js
-    SpinEventLoopUntil([&]() {
-      return mClientsShutdown->State() ==
-             PlacesShutdownBlocker::States::RECEIVED_DONE;
-    });
+    SpinEventLoopUntil("places:Database::Observe(SIMULATE_PLACES_SHUTDOWN)"_ns,
+                       [&]() {
+                         return mClientsShutdown->State() ==
+                                PlacesShutdownBlocker::States::RECEIVED_DONE;
+                       });
 
     {
       nsCOMPtr<nsIAsyncShutdownClient> shutdownPhase =

@@ -119,6 +119,12 @@ partial interface Navigator {
   readonly attribute DOMString doNotTrack;
 };
 
+// https://globalprivacycontrol.github.io/gpc-spec/
+partial interface Navigator {
+  [Pref="privacy.globalprivacycontrol.functionality.enabled"]
+  readonly attribute boolean globalPrivacyControl;
+};
+
 // http://www.w3.org/TR/geolocation-API/#geolocation_interface
 interface mixin NavigatorGeolocation {
   [Throws, Pref="geo.enabled"]
@@ -311,12 +317,17 @@ partial interface Navigator {
 partial interface Navigator {
   [SecureContext, Throws, Func="Navigator::HasShareSupport"]
   Promise<void> share(optional ShareData data = {});
+  [SecureContext, Func="Navigator::HasShareSupport"]
+  boolean canShare(optional ShareData data = {});
 };
 // https://wicg.github.io/web-share/#sharedata-dictionary
 dictionary ShareData {
   USVString title;
   USVString text;
   USVString url;
+  // Note: we don't actually support files yet
+  // we have it here for the .canShare() checks.
+  sequence<File> files;
 };
 
 // https://w3c.github.io/mediasession/#idl-index

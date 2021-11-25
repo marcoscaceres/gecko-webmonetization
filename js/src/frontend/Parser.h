@@ -167,7 +167,6 @@
  * reside in Parser.
  */
 
-#include "mozilla/Array.h"
 #include "mozilla/Maybe.h"
 
 #include <type_traits>
@@ -175,29 +174,21 @@
 
 #include "jspubtd.h"
 
-#include "ds/Nestable.h"
-#include "frontend/BytecodeCompiler.h"
 #include "frontend/CompilationStencil.h"  // CompilationState
 #include "frontend/ErrorReporter.h"
 #include "frontend/FullParseHandler.h"
 #include "frontend/FunctionSyntaxKind.h"  // FunctionSyntaxKind
 #include "frontend/IteratorKind.h"
 #include "frontend/NameAnalysisTypes.h"
-#include "frontend/NameCollections.h"
 #include "frontend/ParseContext.h"
 #include "frontend/ParserAtom.h"  // ParserAtomsTable, TaggedParserAtomIndex
 #include "frontend/SharedContext.h"
 #include "frontend/SyntaxParseHandler.h"
 #include "frontend/TokenStream.h"
 #include "js/friend/ErrorMessages.h"  // JSErrNum, JSMSG_*
-#include "js/Vector.h"
-#include "vm/ErrorReporting.h"
 #include "vm/GeneratorAndAsyncKind.h"  // js::GeneratorKind, js::FunctionAsyncKind
 
 namespace js {
-
-class ModuleObject;
-
 namespace frontend {
 
 template <class ParseHandler, typename Unit>
@@ -1765,7 +1756,7 @@ class MOZ_STACK_CLASS Parser<FullParseHandler, Unit> final
 
   // Parse a function, given only its arguments and body. Used for lazily
   // parsed functions.
-  FunctionNodeType standaloneLazyFunction(HandleFunction fun,
+  FunctionNodeType standaloneLazyFunction(CompilationInput& input,
                                           uint32_t toStringStart, bool strict,
                                           GeneratorKind generatorKind,
                                           FunctionAsyncKind asyncKind);

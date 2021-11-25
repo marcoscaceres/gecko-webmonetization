@@ -502,6 +502,7 @@ def get_tool(config, key):
 #     clang-format
 #     clang-tidy
 #     clangd
+#     run-clang-tidy
 #   include/
 #     * (nothing will be deleted here)
 #   lib/
@@ -540,6 +541,7 @@ def prune_final_dir_for_clang_tidy(final_dir, osx_cross_compile):
         "clang-tidy",
         "clangd",
         "clang-query",
+        "run-clang-tidy",
     ]
     re_clang_tidy = re.compile(r"^(" + "|".join(kept_binaries) + r")(\.exe)?$", re.I)
     for f in glob.glob("%s/bin/*" % final_dir):
@@ -763,6 +765,7 @@ if __name__ == "__main__":
         (compiler_rt_source_dir, compiler_rt_source_link),
         (libcxx_source_dir, llvm_source_dir + "/projects/libcxx"),
         (libcxxabi_source_dir, llvm_source_dir + "/projects/libcxxabi"),
+        (source_dir + "/cmake", llvm_source_dir + "/projects/cmake"),
     ]
     for l in symlinks:
         # On Windows, we have to re-copy the whole directory every time.

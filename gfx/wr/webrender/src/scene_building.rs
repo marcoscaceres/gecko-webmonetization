@@ -41,7 +41,7 @@ use api::{DisplayItem, DisplayItemRef, ExtendMode, ExternalScrollId, FilterData,
 use api::{FilterOp, FilterPrimitive, FontInstanceKey, FontSize, GlyphInstance, GlyphOptions, GradientStop};
 use api::{IframeDisplayItem, ImageKey, ImageRendering, ItemRange, ColorDepth, QualitySettings};
 use api::{LineOrientation, LineStyle, NinePatchBorderSource, PipelineId, MixBlendMode, StackingContextFlags};
-use api::{PropertyBinding, ReferenceFrameKind, ScrollFrameDescriptor, ScrollSensitivity, ReferenceFrameMapper};
+use api::{PropertyBinding, ReferenceFrameKind, ScrollFrameDescriptor, ReferenceFrameMapper};
 use api::{Shadow, SpaceAndClipInfo, SpatialId, StickyFrameDescriptor, ImageMask, ItemTag};
 use api::{ClipMode, PrimitiveKeyKind, TransformStyle, YuvColorSpace, ColorRange, YuvData, TempFilterData};
 use api::{ReferenceTransformBinding, Rotation, FillRule, SpatialTreeItem, ReferenceFrameDescriptor};
@@ -50,12 +50,12 @@ use crate::image_tiling::simplify_repeated_primitive;
 use crate::clip::{ClipChainId, ClipItemKey, ClipStore, ClipItemKeyKind};
 use crate::clip::{ClipInternData, ClipNodeKind, ClipInstance, SceneClipInstance};
 use crate::clip::{PolygonDataHandle};
-use crate::spatial_tree::{SpatialTree, SceneSpatialTree, SpatialNodeIndex, StaticCoordinateSystemId, get_external_scroll_offset};
+use crate::spatial_tree::{SceneSpatialTree, SpatialNodeIndex, get_external_scroll_offset};
 use crate::frame_builder::{ChasePrimitive, FrameBuilderConfig};
 use crate::glyph_rasterizer::FontInstance;
 use crate::hit_test::HitTestingScene;
 use crate::intern::Interner;
-use crate::internal_types::{FastHashMap, LayoutPrimitiveInfo, Filter, PlaneSplitter, PlaneSplitterIndex};
+use crate::internal_types::{FastHashMap, LayoutPrimitiveInfo, Filter, PlaneSplitter, PlaneSplitterIndex, FastHashSet};
 use crate::picture::{Picture3DContext, PictureCompositeMode, PicturePrimitive, PictureOptions};
 use crate::picture::{BlitReason, OrderedPictureChild, PrimitiveList};
 use crate::picture_graph::PictureGraph;
@@ -271,6 +271,7 @@ impl PictureChainBuilder {
         options: PictureOptions,
         interners: &mut Interners,
         prim_store: &mut PrimitiveStore,
+        prim_instances: &mut Vec<PrimitiveInstance>,
     ) -> PictureChainBuilder {
         let prim_list = match self.current {
             PictureSource::PrimitiveList { prim_list } => {
@@ -284,6 +285,7 @@ impl PictureChainBuilder {
                     LayoutRect::zero(),
                     self.spatial_node_index,
                     self.flags,
+                    prim_instances,
                 );
 
                 prim_list
@@ -396,7 +398,7 @@ pub struct SceneBuilder<'a> {
     pending_shadow_items: VecDeque<ShadowItem>,
 
     /// The SpatialTree that we are currently building during building.
-    pub spatial_tree: SceneSpatialTree,
+    pub spatial_tree: &'a mut SceneSpatialTree,
 
     /// The store of primitives.
     pub prim_store: PrimitiveStore,
@@ -452,6 +454,16 @@ pub struct SceneBuilder<'a> {
     /// to be referenced by both the owning 3d rendering context and the child
     /// pictures that contribute to the splitter.
     plane_splitters: Vec<PlaneSplitter>,
+
+    /// A list of all primitive instances in the scene. We store them as a single
+    /// array so that multiple different systems (e.g. tile-cache, visibility, property
+    /// animation bindings) can store index buffers to prim instances.
+    prim_instances: Vec<PrimitiveInstance>,
+
+    /// A map of pipeline ids encountered during scene build - panic early if we
+    /// encounter an iframe that is referenced twice, as that breaks assumptions
+    /// related to unique spatial node keys.
+    seen_pipeline_ids: FastHashSet<PipelineId>,
 }
 
 impl<'a> SceneBuilder<'a> {
@@ -461,6 +473,7 @@ impl<'a> SceneBuilder<'a> {
         view: &SceneView,
         frame_builder_config: &FrameBuilderConfig,
         interners: &mut Interners,
+        spatial_tree: &mut SceneSpatialTree,
         stats: &SceneStats,
     ) -> BuiltScene {
         profile_scope!("build_scene");
@@ -473,7 +486,6 @@ impl<'a> SceneBuilder<'a> {
             .background_color
             .and_then(|color| if color.a > 0.0 { Some(color) } else { None });
 
-        let spatial_tree = SceneSpatialTree::new();
         let root_reference_frame_index = spatial_tree.root_reference_frame_index();
 
         // During scene building, we assume a 1:1 picture -> raster pixel scale
@@ -505,6 +517,8 @@ impl<'a> SceneBuilder<'a> {
             snap_to_device,
             picture_graph: PictureGraph::new(),
             plane_splitters: Vec::new(),
+            prim_instances: Vec::new(),
+            seen_pipeline_ids: FastHashSet::default(),
         };
 
         builder.build_all(&root_pipeline);
@@ -528,7 +542,6 @@ impl<'a> SceneBuilder<'a> {
             output_rect: view.device_rect.size().into(),
             background_color,
             hit_testing_scene: Arc::new(builder.hit_testing_scene),
-            spatial_tree: SpatialTree::new(builder.spatial_tree),
             prim_store: builder.prim_store,
             clip_store: builder.clip_store,
             config: builder.config,
@@ -536,6 +549,7 @@ impl<'a> SceneBuilder<'a> {
             tile_cache_pictures,
             picture_graph: builder.picture_graph,
             plane_splitters: builder.plane_splitters,
+            prim_instances: builder.prim_instances,
         }
     }
 
@@ -555,7 +569,7 @@ impl<'a> SceneBuilder<'a> {
             .external_scroll_mapper
             .external_scroll_offset(
                 spatial_node_index,
-                &self.spatial_tree,
+                self.spatial_tree,
             );
 
         rf_offset + scroll_offset
@@ -617,6 +631,13 @@ impl<'a> SceneBuilder<'a> {
         let root_clip_id = ClipId::root(root_pipeline.pipeline_id);
         self.clip_store.register_clip_template(root_clip_id, root_clip_id, &[]);
         self.clip_store.push_clip_root(Some(root_clip_id), false);
+
+        // Related to bug #1736069 - try to verify that the assert later on is being
+        // caused by a display list where a single iframe pipeline id is being referenced
+        // by >1 iframe display item. If we see any crash reports here, we know this is
+        // the root issue.
+        assert!(self.seen_pipeline_ids.insert(root_pipeline.pipeline_id));
+
         self.push_root(
             root_pipeline.pipeline_id,
             &root_pipeline.viewport_size,
@@ -853,7 +874,7 @@ impl<'a> SceneBuilder<'a> {
             transform,
             info.reference_frame.kind,
             info.origin.to_vector(),
-            SpatialNodeUid::external(info.reference_frame.key),
+            SpatialNodeUid::external(info.reference_frame.key, pipeline_id),
         );
     }
 
@@ -875,10 +896,9 @@ impl<'a> SceneBuilder<'a> {
             pipeline_id,
             &info.frame_rect,
             &content_size,
-            info.scroll_sensitivity,
             ScrollFrameKind::Explicit,
             info.external_scroll_offset,
-            SpatialNodeUid::external(info.key),
+            SpatialNodeUid::external(info.key, pipeline_id),
         );
     }
 
@@ -896,13 +916,10 @@ impl<'a> SceneBuilder<'a> {
             },
         };
 
-        let current_offset = self.current_offset(spatial_node_index);
-        let clip_rect = info.clip_rect.translate(current_offset);
-
         self.add_rect_clip_node(
             ClipId::root(iframe_pipeline_id),
             &info.space_and_clip,
-            &clip_rect,
+            &info.clip_rect,
         );
 
         self.clip_store.push_clip_root(
@@ -911,9 +928,15 @@ impl<'a> SceneBuilder<'a> {
         );
 
         let bounds = self.snap_rect(
-            &info.bounds.translate(current_offset),
+            &info.bounds,
             spatial_node_index,
         );
+
+        // Related to bug #1736069 - try to verify that the assert later on is being
+        // caused by a display list where a single iframe pipeline id is being referenced
+        // by >1 iframe display item. If we see any crash reports here, we know this is
+        // the root issue.
+        assert!(self.seen_pipeline_ids.insert(iframe_pipeline_id));
 
         let spatial_node_index = self.push_reference_frame(
             SpatialId::root_reference_frame(iframe_pipeline_id),
@@ -939,7 +962,6 @@ impl<'a> SceneBuilder<'a> {
             iframe_pipeline_id,
             &iframe_rect,
             &bounds.size(),
-            ScrollSensitivity::ScriptAndInputEvents,
             ScrollFrameKind::PipelineRoot {
                 is_root_pipeline,
             },
@@ -1042,7 +1064,7 @@ impl<'a> SceneBuilder<'a> {
     ) -> LayoutRect {
         self.snap_to_device.set_target_spatial_node(
             target_spatial_node,
-            &self.spatial_tree
+            self.spatial_tree,
         );
         self.snap_to_device.snap_rect(&rect)
     }
@@ -1454,18 +1476,10 @@ impl<'a> SceneBuilder<'a> {
             DisplayItem::ImageMaskClip(ref info) => {
                 profile_scope!("image_clip");
 
-                let parent_space = self.get_space(info.parent_space_and_clip.spatial_id);
-                let current_offset = self.current_offset(parent_space);
-
-                let image_mask = ImageMask {
-                    rect: info.image_mask.rect.translate(current_offset),
-                    ..info.image_mask
-                };
-
                 self.add_image_mask_clip_node(
                     info.id,
                     &info.parent_space_and_clip,
-                    &image_mask,
+                    &info.image_mask,
                     info.fill_rule,
                     item.points(),
                 );
@@ -1473,27 +1487,19 @@ impl<'a> SceneBuilder<'a> {
             DisplayItem::RoundedRectClip(ref info) => {
                 profile_scope!("rounded_clip");
 
-                let parent_space = self.get_space(info.parent_space_and_clip.spatial_id);
-                let current_offset = self.current_offset(parent_space);
-
                 self.add_rounded_rect_clip_node(
                     info.id,
                     &info.parent_space_and_clip,
                     &info.clip,
-                    current_offset,
                 );
             }
             DisplayItem::RectClip(ref info) => {
                 profile_scope!("rect_clip");
 
-                let parent_space = self.get_space(info.parent_space_and_clip.spatial_id);
-                let current_offset = self.current_offset(parent_space);
-                let clip_rect = info.clip_rect.translate(current_offset);
-
                 self.add_rect_clip_node(
                     info.id,
                     &info.parent_space_and_clip,
-                    &clip_rect,
+                    &info.clip_rect,
                 );
             }
             DisplayItem::ClipChain(ref info) => {
@@ -1517,15 +1523,16 @@ impl<'a> SceneBuilder<'a> {
             DisplayItem::BackdropFilter(ref info) => {
                 profile_scope!("backdrop");
 
-                let (layout, _, spatial_node_index, clip_chain_id) = self.process_common_properties(
+                let (_layout, _, _spatial_node_index, _clip_chain_id) = self.process_common_properties(
                     &info.common,
                     None,
                 );
 
-                let filters = filter_ops_for_compositing(item.filters());
-                let filter_datas = filter_datas_for_compositing(item.filter_datas());
-                let filter_primitives = filter_primitives_for_compositing(item.filter_primitives());
+                let _filters = filter_ops_for_compositing(item.filters());
+                let _filter_datas = filter_datas_for_compositing(item.filter_datas());
+                let _filter_primitives = filter_primitives_for_compositing(item.filter_primitives());
 
+                /*
                 self.add_backdrop_filter(
                     spatial_node_index,
                     clip_chain_id,
@@ -1534,6 +1541,7 @@ impl<'a> SceneBuilder<'a> {
                     filter_datas,
                     filter_primitives,
                 );
+                */
             }
 
             // Do nothing; these are dummy items for the display list parser
@@ -1695,6 +1703,7 @@ impl<'a> SceneBuilder<'a> {
                     prim_rect,
                     spatial_node_index,
                     flags,
+                    &mut self.prim_instances,
                 );
             }
             None => {
@@ -1703,12 +1712,13 @@ impl<'a> SceneBuilder<'a> {
                     prim_rect,
                     spatial_node_index,
                     flags,
-                    &self.spatial_tree,
+                    self.spatial_tree,
                     &self.clip_store,
                     self.interners,
                     &self.config,
                     &self.quality_settings,
                     self.root_iframe_clip,
+                    &mut self.prim_instances,
                 );
             }
         }
@@ -1837,8 +1847,14 @@ impl<'a> SceneBuilder<'a> {
     ) -> StackingContextInfo {
         profile_scope!("push_stacking_context");
 
-        // Push current requested raster space on stack for prims to access
-        self.raster_space_stack.push(requested_raster_space);
+        let new_space = match requested_raster_space {
+            RasterSpace::Local(_) => requested_raster_space,
+            RasterSpace::Screen => match self.raster_space_stack.last() {
+                Some(RasterSpace::Local(scale)) => RasterSpace::Local(*scale),
+                Some(RasterSpace::Screen) | None => requested_raster_space,
+            }
+        };
+        self.raster_space_stack.push(new_space);
 
         // Get the transform-style of the parent stacking context,
         // which determines if we *might* need to draw this on
@@ -2063,17 +2079,18 @@ impl<'a> SceneBuilder<'a> {
         if stacking_context.flags.contains(StackingContextFlags::IS_BLEND_CONTAINER) &&
            self.sc_stack.is_empty() &&
            self.tile_cache_builder.can_add_container_tile_cache() &&
-           self.spatial_tree.get_static_coordinate_system_id(stacking_context.spatial_node_index) == StaticCoordinateSystemId::ROOT
+           self.spatial_tree.is_root_coord_system(stacking_context.spatial_node_index)
         {
             self.tile_cache_builder.add_tile_cache(
                 stacking_context.prim_list,
                 stacking_context.clip_chain_id,
-                &self.spatial_tree,
+                self.spatial_tree,
                 &self.clip_store,
                 self.interners,
                 &self.config,
                 self.root_iframe_clip,
                 SliceFlags::IS_BLEND_CONTAINER,
+                &self.prim_instances,
             );
 
             return;
@@ -2192,6 +2209,7 @@ impl<'a> SceneBuilder<'a> {
                     LayoutRect::zero(),
                     ext_prim.spatial_node_index,
                     ext_prim.flags,
+                    &mut self.prim_instances,
                 );
             }
 
@@ -2263,6 +2281,7 @@ impl<'a> SceneBuilder<'a> {
                     PictureOptions::default(),
                     &mut self.interners,
                     &mut self.prim_store,
+                    &mut self.prim_instances,
                 );
             } else {
                 // If we have a mix-blend-mode, the stacking context needs to be isolated
@@ -2294,6 +2313,7 @@ impl<'a> SceneBuilder<'a> {
                     LayoutRect::zero(),
                     stacking_context.spatial_node_index,
                     stacking_context.prim_flags,
+                    &mut self.prim_instances,
                 );
                 None
             }
@@ -2387,7 +2407,6 @@ impl<'a> SceneBuilder<'a> {
             pipeline_id,
             &viewport_rect,
             &viewport_rect.size(),
-            ScrollSensitivity::ScriptAndInputEvents,
             ScrollFrameKind::PipelineRoot {
                 is_root_pipeline: true,
             },
@@ -2487,17 +2506,16 @@ impl<'a> SceneBuilder<'a> {
         );
     }
 
-    pub fn add_rounded_rect_clip_node(
+    fn add_rounded_rect_clip_node(
         &mut self,
         new_node_id: ClipId,
         space_and_clip: &SpaceAndClipInfo,
         clip: &ComplexClipRegion,
-        current_offset: LayoutVector2D,
     ) {
         let spatial_node_index = self.id_to_index_mapper.get_spatial_node_index(space_and_clip.spatial_id);
 
         let snapped_region_rect = self.snap_rect(
-            &clip.rect.translate(current_offset),
+            &clip.rect,
             spatial_node_index,
         );
         let item = ClipItemKey {
@@ -2537,7 +2555,6 @@ impl<'a> SceneBuilder<'a> {
         pipeline_id: PipelineId,
         frame_rect: &LayoutRect,
         content_size: &LayoutSize,
-        scroll_sensitivity: ScrollSensitivity,
         frame_kind: ScrollFrameKind,
         external_scroll_offset: LayoutVector2D,
         uid: SpatialNodeUid,
@@ -2548,7 +2565,6 @@ impl<'a> SceneBuilder<'a> {
             pipeline_id,
             frame_rect,
             content_size,
-            scroll_sensitivity,
             frame_kind,
             external_scroll_offset,
             uid,
@@ -2663,6 +2679,7 @@ impl<'a> SceneBuilder<'a> {
                                 info.rect,
                                 spatial_node_index,
                                 info.flags,
+                                &mut self.prim_instances,
                             );
                         }
                     }
@@ -3359,6 +3376,7 @@ impl<'a> SceneBuilder<'a> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn add_backdrop_filter(
         &mut self,
         spatial_node_index: SpatialNodeIndex,
@@ -3406,6 +3424,7 @@ impl<'a> SceneBuilder<'a> {
                 LayoutRect::zero(),
                 backdrop_spatial_node_index,
                 prim_flags,
+                &mut self.prim_instances,
             );
 
             backdrop_pic_index = PictureIndex(self.prim_store.pictures
@@ -3482,12 +3501,14 @@ impl<'a> SceneBuilder<'a> {
                 LayoutRect::zero(),
                 backdrop_spatial_node_index,
                 info.flags,
+                &mut self.prim_instances,
             );
     }
 
     /// Create pictures for each stacking context rendered into their parents, down to the nearest
     /// backdrop root until we have a picture that represents the contents of all primitives added
     /// since the backdrop root
+    #[allow(dead_code)]
     pub fn cut_backdrop_picture(&mut self) -> Option<PictureIndex> {
         let mut flattened_items = None;
         let mut backdrop_root =  None;
@@ -3501,6 +3522,7 @@ impl<'a> SceneBuilder<'a> {
                     LayoutRect::zero(),
                     spatial_node_index,
                     prim_flags,
+                    &mut self.prim_instances,
                 );
             }
             flattened_items = sc.cut_item_sequence(
@@ -3526,6 +3548,7 @@ impl<'a> SceneBuilder<'a> {
                 LayoutRect::zero(),
                 spatial_node_index,
                 prim_flags,
+                &mut self.prim_instances,
             );
 
         Some(pic_index)
@@ -3593,6 +3616,7 @@ impl<'a> SceneBuilder<'a> {
                 PictureOptions { inflate_if_required },
                 &mut self.interners,
                 &mut self.prim_store,
+                &mut self.prim_instances,
             );
         }
 
@@ -3629,6 +3653,7 @@ impl<'a> SceneBuilder<'a> {
                 PictureOptions { inflate_if_required },
                 &mut self.interners,
                 &mut self.prim_store,
+                &mut self.prim_instances,
             );
         }
 
@@ -3703,6 +3728,7 @@ struct FlattenedStackingContext {
     context_3d: Picture3DContext<ExtendedPrimitiveInstance>,
 
     /// True if this stacking context is a backdrop root.
+    #[allow(dead_code)]
     is_backdrop_root: bool,
 
     /// True if this stacking context is redundant (i.e. doesn't require a surface)

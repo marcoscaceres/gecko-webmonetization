@@ -423,12 +423,18 @@ void CodeGenerator::visitSignExtendInt64(LSignExtendInt64* lir) {
   }
 }
 
-void CodeGenerator::visitWasmExtendU32Index(LWasmExtendU32Index*) {
-  MOZ_CRASH("Unused - no support on MIPS64 for indices > INT_MAX");
+void CodeGenerator::visitWasmExtendU32Index(LWasmExtendU32Index* lir) {
+  Register input = ToRegister(lir->input());
+  Register output = ToRegister(lir->output());
+  MOZ_ASSERT(input == output);
+  masm.move32To64ZeroExtend(input, Register64(output));
 }
 
-void CodeGenerator::visitWasmWrapU32Index(LWasmWrapU32Index*) {
-  MOZ_CRASH("Unused - no support on MIPS64 for indices > INT_MAX");
+void CodeGenerator::visitWasmWrapU32Index(LWasmWrapU32Index* lir) {
+  Register input = ToRegister(lir->input());
+  Register output = ToRegister(lir->output());
+  MOZ_ASSERT(input == output);
+  masm.move64To32(Register64(input), output);
 }
 
 void CodeGenerator::visitClzI64(LClzI64* lir) {
@@ -447,7 +453,7 @@ void CodeGenerator::visitNotI64(LNotI64* lir) {
   Register64 input = ToRegister64(lir->getInt64Operand(0));
   Register output = ToRegister(lir->output());
 
-  masm.cmp64Set(Assembler::Equal, input.reg, Imm32(0), output);
+  masm.ma_cmp_set(output, input.reg, zero, Assembler::Equal);
 }
 
 void CodeGenerator::visitWasmTruncateToInt64(LWasmTruncateToInt64* lir) {

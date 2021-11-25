@@ -137,6 +137,7 @@ enum class ScrollFlags {
   ScrollSmooth = 1 << 3,
   ScrollSmoothAuto = 1 << 4,
   ScrollSnap = 1 << 5,
+  TriggeredByScript = 1 << 6,
   // ScrollOverflowHidden | ScrollNoParentFrames
   AnchorScrollFlags = (1 << 1) | (1 << 2),
   ALL_BITS = (1 << 7) - 1,
@@ -188,16 +189,21 @@ MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(AddCanvasBackgroundColorFlags)
 
 enum class PaintFlags {
   None = 0,
-  /* Composite layers to the window. */
-  PaintComposite = 1 << 1,
   /* Sync-decode images. */
-  PaintSyncDecodeImages = 1 << 2,
+  PaintSyncDecodeImages = 1 << 1,
 };
 
 MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(PaintFlags)
 
-// See comment at declaration of ScheduleViewManagerFlush() for the detail.
-enum class PaintType { Default, DelayedCompress };
+enum class PaintInternalFlags {
+  None = 0,
+  /* Sync-decode images. */
+  PaintSyncDecodeImages = 1 << 1,
+  /* Composite layers to the window. */
+  PaintComposite = 1 << 2,
+};
+
+MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(PaintInternalFlags)
 
 // This is a private enum class of PresShell, but currently,
 // MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS isn't available in class definition.

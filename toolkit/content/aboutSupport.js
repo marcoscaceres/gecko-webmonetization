@@ -237,7 +237,7 @@ var snapshotFormatters = {
     }
 
     let daysRange = Troubleshoot.kMaxCrashAge / (24 * 60 * 60 * 1000);
-    document.l10n.setAttributes($("crashes-title"), "report-crash-for-days", {
+    document.l10n.setAttributes($("crashes"), "report-crash-for-days", {
       days: daysRange,
     });
     let reportURL;
@@ -314,7 +314,7 @@ var snapshotFormatters = {
 
   securitySoftware(data) {
     if (!AppConstants.isPlatformAndVersionAtLeast("win", "6.2")) {
-      $("security-software-title").hidden = true;
+      $("security-software").hidden = true;
       $("security-software-table").hidden = true;
       return;
     }
@@ -638,9 +638,6 @@ var snapshotFormatters = {
     let compositor = "";
     if (data.windowLayerManagerRemote) {
       compositor = data.windowLayerManagerType;
-      if (data.windowUsingAdvancedLayers) {
-        compositor += " (Advanced Layers)";
-      }
     } else {
       let noOMTCString = await document.l10n.formatValue("main-thread-no-omtc");
       compositor = "BasicLayers (" + noOMTCString + ")";
@@ -651,7 +648,6 @@ var snapshotFormatters = {
     delete data.numTotalWindows;
     delete data.numAcceleratedWindows;
     delete data.numAcceleratedWindowsMessage;
-    delete data.windowUsingAdvancedLayers;
 
     addRow(
       "features",
@@ -685,7 +681,6 @@ var snapshotFormatters = {
       ["direct2DEnabled", "#Direct2D"],
       ["windowProtocol", "graphics-window-protocol"],
       ["desktopEnvironment", "graphics-desktop-environment"],
-      "usesTiling",
       "targetFrameRate",
     ];
     for (let feature of featureKeys) {

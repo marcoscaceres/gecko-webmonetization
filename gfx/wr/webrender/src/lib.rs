@@ -57,8 +57,6 @@ macro_rules! matches {
 #[macro_use]
 extern crate bitflags;
 #[macro_use]
-extern crate cstr;
-#[macro_use]
 extern crate lazy_static;
 #[macro_use]
 extern crate log;
@@ -73,6 +71,8 @@ extern crate tracy_rs;
 extern crate derive_more;
 extern crate malloc_size_of;
 extern crate svg_fmt;
+#[cfg(target_os = "macos")]
+extern crate foreign_types;
 
 #[macro_use]
 mod profiler;
@@ -131,6 +131,7 @@ mod api_resources;
 mod image_tiling;
 mod image_source;
 mod rectangle_occlusion;
+mod picture_textures;
 
 ///
 pub mod intern;
@@ -222,8 +223,8 @@ pub use crate::texture_cache::TextureCacheConfig;
 pub use api as webrender_api;
 pub use webrender_build::shader::ProgramSourceDigest;
 pub use crate::picture::{TileDescriptor, TileId, InvalidationReason};
-pub use crate::picture::{PrimitiveCompareResult, PrimitiveCompareResultDetail, CompareHelperResult};
-pub use crate::picture::{TileNode, TileNodeKind, TileSerializer, TileCacheInstanceSerializer, TileOffset, TileCacheLoggerUpdateLists};
+pub use crate::picture::{PrimitiveCompareResult, CompareHelperResult};
+pub use crate::picture::{TileNode, TileNodeKind, TileOffset};
 pub use crate::intern::ItemUid;
 pub use crate::render_api::*;
 pub use crate::tile_cache::{PictureCacheDebugInfo, DirtyTileDebugInfo, TileDebugInfo, SliceDebugInfo};

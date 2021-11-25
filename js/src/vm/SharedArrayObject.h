@@ -153,7 +153,8 @@ class SharedArrayRawBuffer {
 
   void tryGrowMaxPagesInPlace(wasm::Pages deltaMaxPages);
 
-  bool wasmGrowToPagesInPlace(const Lock&, wasm::Pages newPages);
+  bool wasmGrowToPagesInPlace(const Lock&, wasm::IndexType t,
+                              wasm::Pages newPages);
 
   uint32_t refcount() const { return refcount_; }
 
@@ -230,9 +231,9 @@ class SharedArrayBufferObject : public ArrayBufferObjectMaybeShared {
                                      JS::ClassInfo* info,
                                      JS::RuntimeSizes* runtimeSizes);
 
-  static void copyData(Handle<SharedArrayBufferObject*> toBuffer,
+  static void copyData(Handle<ArrayBufferObjectMaybeShared*> toBuffer,
                        size_t toIndex,
-                       Handle<SharedArrayBufferObject*> fromBuffer,
+                       Handle<ArrayBufferObjectMaybeShared*> fromBuffer,
                        size_t fromIndex, size_t count);
 
   SharedArrayRawBuffer* rawBufferObject() const;

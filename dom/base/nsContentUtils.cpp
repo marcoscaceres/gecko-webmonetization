@@ -99,6 +99,7 @@
 #include "mozilla/OriginAttributes.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/PresShell.h"
+#include "mozilla/ProfilerRunnable.h"
 #include "mozilla/RangeBoundary.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/Result.h"
@@ -110,6 +111,7 @@
 #ifdef FUZZING
 #  include "mozilla/StaticPrefs_fuzzing.h"
 #endif
+#include "mozilla/StaticPrefs_nglayout.h"
 #include "mozilla/StaticPrefs_privacy.h"
 #include "mozilla/StaticPrefs_test.h"
 #include "mozilla/StaticPrefs_ui.h"
@@ -171,6 +173,7 @@
 #include "mozilla/dom/IPCBlobUtils.h"
 #include "mozilla/dom/MessageBroadcaster.h"
 #include "mozilla/dom/MessageListenerManager.h"
+#include "mozilla/dom/MessagePort.h"
 #include "mozilla/dom/MouseEventBinding.h"
 #include "mozilla/dom/NameSpaceConstants.h"
 #include "mozilla/dom/NodeBinding.h"
@@ -197,8 +200,6 @@
 #include "mozilla/gfx/Point.h"
 #include "mozilla/gfx/Rect.h"
 #include "mozilla/gfx/Types.h"
-#include "mozilla/intl/LineBreaker.h"
-#include "mozilla/intl/WordBreaker.h"
 #include "mozilla/ipc/ProtocolUtils.h"
 #include "mozilla/ipc/SharedMemory.h"
 #include "mozilla/ipc/Shmem.h"
@@ -413,7 +414,6 @@ nsIXPConnect* nsContentUtils::sXPConnect;
 nsIScriptSecurityManager* nsContentUtils::sSecurityManager;
 nsIPrincipal* nsContentUtils::sSystemPrincipal;
 nsIPrincipal* nsContentUtils::sNullSubjectPrincipal;
-nsNameSpaceManager* nsContentUtils::sNameSpaceManager;
 nsIIOService* nsContentUtils::sIOService;
 nsIUUIDGenerator* nsContentUtils::sUUIDGenerator;
 nsIConsoleService* nsContentUtils::sConsoleService;
@@ -426,8 +426,6 @@ nsIStringBundleService* nsContentUtils::sStringBundleService;
 nsIStringBundle* nsContentUtils::sStringBundles[PropertiesFile_COUNT];
 nsIContentPolicy* nsContentUtils::sContentPolicyService;
 bool nsContentUtils::sTriedToGetContentPolicy = false;
-RefPtr<mozilla::intl::LineBreaker> nsContentUtils::sLineBreaker;
-RefPtr<mozilla::intl::WordBreaker> nsContentUtils::sWordBreaker;
 StaticRefPtr<nsIBidiKeyboard> nsContentUtils::sBidiKeyboard;
 uint32_t nsContentUtils::sScriptBlockerCount = 0;
 uint32_t nsContentUtils::sDOMNodeRemovedSuppressCount = 0;
@@ -673,7 +671,7 @@ class SameOriginCheckerImpl final : public nsIChannelEventSink,
 
 }  // namespace
 
-void AutoSuppressEventHandlingAndSuspend::SuppressDocument(Document* aDoc) {
+void AutoSuppressEventHandling::SuppressDocument(Document* aDoc) {
   // Note: Document::SuppressEventHandling will also automatically suppress
   // event handling for any in-process sub-documents. However, since we need
   // to deal with cases where remote BrowsingContexts may be interleaved
@@ -682,21 +680,28 @@ void AutoSuppressEventHandlingAndSuspend::SuppressDocument(Document* aDoc) {
   // suppressions maintain a count of current blockers, it does not cause
   // any problems.
   aDoc->SuppressEventHandling();
+}
+
+void AutoSuppressEventHandling::UnsuppressDocument(Document* aDoc) {
+  aDoc->UnsuppressEventHandlingAndFireEvents(true);
+}
+
+AutoSuppressEventHandling::~AutoSuppressEventHandling() {
+  UnsuppressDocuments();
+}
+
+void AutoSuppressEventHandlingAndSuspend::SuppressDocument(Document* aDoc) {
+  AutoSuppressEventHandling::SuppressDocument(aDoc);
   if (nsCOMPtr<nsPIDOMWindowInner> win = aDoc->GetInnerWindow()) {
     win->Suspend();
     mWindows.AppendElement(win);
   }
 }
 
-void AutoSuppressEventHandlingAndSuspend::UnsuppressDocument(Document* aDoc) {
-  aDoc->UnsuppressEventHandlingAndFireEvents(true);
-}
-
 AutoSuppressEventHandlingAndSuspend::~AutoSuppressEventHandlingAndSuspend() {
   for (const auto& win : mWindows) {
     win->Resume();
   }
-  UnsuppressDocuments();
 }
 
 /**
@@ -735,10 +740,6 @@ nsresult nsContentUtils::Init() {
 
   nsHTMLTags::AddRefTable();
 
-  sNameSpaceManager = nsNameSpaceManager::GetInstance();
-  NS_ENSURE_TRUE(sNameSpaceManager, NS_ERROR_OUT_OF_MEMORY);
-  NS_ADDREF(sNameSpaceManager);
-
   sXPConnect = nsXPConnect::XPConnect();
   // We hold a strong ref to sXPConnect to ensure that it does not go away until
   // nsLayoutStatics::Shutdown is happening.  Otherwise ~nsXPConnect can be
@@ -769,10 +770,6 @@ nsresult nsContentUtils::Init() {
 
     sIOService = nullptr;
   }
-
-  sLineBreaker = mozilla::intl::LineBreaker::Create();
-
-  sWordBreaker = mozilla::intl::WordBreaker::Create();
 
   if (!InitializeEventTable()) return NS_ERROR_FAILURE;
 
@@ -1874,9 +1871,6 @@ void nsContentUtils::Shutdown() {
   NS_IF_RELEASE(sNullSubjectPrincipal);
   NS_IF_RELEASE(sIOService);
   NS_IF_RELEASE(sUUIDGenerator);
-  NS_IF_RELEASE(sNameSpaceManager);
-  sLineBreaker = nullptr;
-  sWordBreaker = nullptr;
   sBidiKeyboard = nullptr;
 
   delete sAtomEventTable;
@@ -2136,6 +2130,15 @@ bool nsContentUtils::ShouldResistFingerprinting() {
   return StaticPrefs::privacy_resistFingerprinting();
 }
 
+/* static */
+bool nsContentUtils::ShouldResistFingerprinting(
+    nsIGlobalObject* aGlobalObject) {
+  if (!aGlobalObject) {
+    return ShouldResistFingerprinting();
+  }
+  return aGlobalObject->ShouldResistFingerprinting();
+}
+
 bool nsContentUtils::ShouldResistFingerprinting(nsIDocShell* aDocShell) {
   if (!aDocShell) {
     return ShouldResistFingerprinting();
@@ -2165,19 +2168,6 @@ bool nsContentUtils::ShouldResistFingerprinting(nsIPrincipal* aPrincipal) {
   }
   bool isChrome = aPrincipal->IsSystemPrincipal();
   return !isChrome && ShouldResistFingerprinting();
-}
-
-/* static */
-bool nsContentUtils::ShouldResistFingerprinting(WorkerPrivate* aWorkerPrivate) {
-  if (!aWorkerPrivate) {
-    // We may be on a non-worker thread!
-    return ShouldResistFingerprinting();
-  }
-  bool isChrome = aWorkerPrivate->UsesSystemPrincipal();
-  if (isChrome) {
-    return false;
-  }
-  return ShouldResistFingerprinting(aWorkerPrivate->GetDocument());
 }
 
 inline void LogDomainAndPrefList(const char* exemptedDomainsPrefName,
@@ -3072,7 +3062,7 @@ void nsContentUtils::GenerateStateKey(nsIContent* aContent, Document* aDocument,
 
         if (appendedForm) {
           // Append the index of the control in the form
-          int32_t index = formElement->IndexOfControl(control);
+          int32_t index = formElement->IndexOfContent(aContent);
 
           if (index > -1) {
             KeyAppendInt(index, aKey);
@@ -3338,7 +3328,7 @@ nsresult nsContentUtils::SplitQName(const nsIContent* aNamespaceResolver,
         Substring(aQName.get(), colon), nameSpace);
     NS_ENSURE_SUCCESS(rv, rv);
 
-    *aNamespace = NameSpaceManager()->GetNameSpaceID(
+    *aNamespace = nsNameSpaceManager::GetInstance()->GetNameSpaceID(
         nameSpace, nsContentUtils::IsChromeDoc(aNamespaceResolver->OwnerDoc()));
     if (*aNamespace == kNameSpaceID_Unknown) return NS_ERROR_FAILURE;
 
@@ -3362,7 +3352,7 @@ nsresult nsContentUtils::GetNodeInfoFromQName(
   NS_ENSURE_SUCCESS(rv, rv);
 
   int32_t nsID;
-  sNameSpaceManager->RegisterNameSpace(aNamespaceURI, nsID);
+  nsNameSpaceManager::GetInstance()->RegisterNameSpace(aNamespaceURI, nsID);
   if (colon) {
     const char16_t* end;
     qName.EndReading(end);
@@ -3413,12 +3403,8 @@ void nsContentUtils::SplitExpatName(const char16_t* aExpatName,
 
   const char16_t* nameStart;
   if (uriEnd) {
-    if (sNameSpaceManager) {
-      sNameSpaceManager->RegisterNameSpace(
-          nsDependentSubstring(aExpatName, uriEnd), *aNameSpaceID);
-    } else {
-      *aNameSpaceID = kNameSpaceID_Unknown;
-    }
+    nsNameSpaceManager::GetInstance()->RegisterNameSpace(
+        nsDependentSubstring(aExpatName, uriEnd), *aNameSpaceID);
 
     nameStart = (uriEnd + 1);
     if (nameEnd) {
@@ -5898,7 +5884,8 @@ uint32_t nsContentUtils::FilterDropEffect(uint32_t aAction,
 /* static */
 bool nsContentUtils::CheckForSubFrameDrop(nsIDragSession* aDragSession,
                                           WidgetDragEvent* aDropEvent) {
-  nsCOMPtr<nsIContent> target = do_QueryInterface(aDropEvent->mOriginalTarget);
+  nsCOMPtr<nsIContent> target =
+      nsIContent::FromEventTargetOrNull(aDropEvent->mOriginalTarget);
   if (!target) {
     return true;
   }
@@ -7088,7 +7075,7 @@ EditorBase* nsContentUtils::GetActiveEditor(nsPIDOMWindowOuter* aWindow) {
 
   // If it's in designMode, nobody can have focus.  Therefore, the HTMLEditor
   // handles all events.  I.e., it's focused editor in this case.
-  if (aWindow->GetExtantDoc()->HasFlag(NODE_IS_EDITABLE)) {
+  if (aWindow->GetExtantDoc()->IsInDesignMode()) {
     return GetHTMLEditor(nsDocShell::Cast(aWindow->GetDocShell()));
   }
 
@@ -7111,7 +7098,7 @@ EditorBase* nsContentUtils::GetActiveEditor(nsPIDOMWindowOuter* aWindow) {
 
 // static
 TextEditor* nsContentUtils::GetTextEditorFromAnonymousNodeWithoutCreation(
-    nsIContent* aAnonymousContent) {
+    const nsIContent* aAnonymousContent) {
   if (!aAnonymousContent) {
     return nullptr;
   }
@@ -9100,13 +9087,16 @@ void nsContentUtils::SetScrollbarsVisibility(nsIDocShell* aDocShell,
 
 /* static */
 nsIDocShell* nsContentUtils::GetDocShellForEventTarget(EventTarget* aTarget) {
-  nsCOMPtr<nsPIDOMWindowInner> innerWindow;
+  if (!aTarget) {
+    return nullptr;
+  }
 
-  if (nsCOMPtr<nsINode> node = do_QueryInterface(aTarget)) {
+  nsCOMPtr<nsPIDOMWindowInner> innerWindow;
+  if (nsCOMPtr<nsINode> node = nsINode::FromEventTarget(aTarget)) {
     bool ignore;
     innerWindow =
         do_QueryInterface(node->OwnerDoc()->GetScriptHandlingObject(ignore));
-  } else if ((innerWindow = do_QueryInterface(aTarget))) {
+  } else if ((innerWindow = nsPIDOMWindowInner::FromEventTarget(aTarget))) {
     // Nothing else to do
   } else {
     nsCOMPtr<DOMEventTargetHelper> helper = do_QueryInterface(aTarget);
@@ -9577,16 +9567,14 @@ void nsContentUtils::EnqueueUpgradeReaction(
 /* static */
 void nsContentUtils::EnqueueLifecycleCallback(
     ElementCallbackType aType, Element* aCustomElement,
-    LifecycleCallbackArgs* aArgs,
-    LifecycleAdoptedCallbackArgs* aAdoptedCallbackArgs,
-    CustomElementDefinition* aDefinition) {
+    const LifecycleCallbackArgs& aArgs, CustomElementDefinition* aDefinition) {
   // No DocGroup means no custom element reactions stack.
   if (!aCustomElement->OwnerDoc()->GetDocGroup()) {
     return;
   }
 
-  CustomElementRegistry::EnqueueLifecycleCallback(
-      aType, aCustomElement, aArgs, aAdoptedCallbackArgs, aDefinition);
+  CustomElementRegistry::EnqueueLifecycleCallback(aType, aCustomElement, aArgs,
+                                                  aDefinition);
 }
 
 /* static */
@@ -9780,10 +9768,44 @@ nsresult nsContentUtils::CreateJSValueFromSequenceOfObject(
 }
 
 /* static */
+void nsContentUtils::StructuredClone(JSContext* aCx, nsIGlobalObject* aGlobal,
+                                     JS::Handle<JS::Value> aValue,
+                                     const StructuredSerializeOptions& aOptions,
+                                     JS::MutableHandle<JS::Value> aRetval,
+                                     ErrorResult& aError) {
+  JS::Rooted<JS::Value> transferArray(aCx, JS::UndefinedValue());
+  aError = nsContentUtils::CreateJSValueFromSequenceOfObject(
+      aCx, aOptions.mTransfer, &transferArray);
+  if (NS_WARN_IF(aError.Failed())) {
+    return;
+  }
+
+  JS::CloneDataPolicy clonePolicy;
+  clonePolicy.allowIntraClusterClonableSharedObjects();
+  clonePolicy.allowSharedMemoryObjects();
+
+  StructuredCloneHolder holder(StructuredCloneHolder::CloningSupported,
+                               StructuredCloneHolder::TransferringSupported,
+                               JS::StructuredCloneScope::SameProcess);
+  holder.Write(aCx, aValue, transferArray, clonePolicy, aError);
+  if (NS_WARN_IF(aError.Failed())) {
+    return;
+  }
+
+  holder.Read(aGlobal, aCx, aRetval, clonePolicy, aError);
+  if (NS_WARN_IF(aError.Failed())) {
+    return;
+  }
+
+  nsTArray<RefPtr<MessagePort>> ports = holder.TakeTransferredPorts();
+  Unused << ports;
+}
+
+/* static */
 bool nsContentUtils::ShouldBlockReservedKeys(WidgetKeyboardEvent* aKeyEvent) {
   nsCOMPtr<nsIPrincipal> principal;
-  nsCOMPtr<Element> targetElement =
-      do_QueryInterface(aKeyEvent->mOriginalTarget);
+  RefPtr<Element> targetElement =
+      Element::FromEventTargetOrNull(aKeyEvent->mOriginalTarget);
   nsCOMPtr<nsIBrowser> targetBrowser;
   if (targetElement) {
     targetBrowser = targetElement->AsBrowser();
@@ -9799,9 +9821,8 @@ bool nsContentUtils::ShouldBlockReservedKeys(WidgetKeyboardEvent* aKeyEvent) {
                      : false;
   }
 
-  nsCOMPtr<nsIContent> content = do_QueryInterface(aKeyEvent->mOriginalTarget);
-  if (content) {
-    Document* doc = content->GetUncomposedDoc();
+  if (targetElement) {
+    Document* doc = targetElement->GetUncomposedDoc();
     if (doc) {
       RefPtr<WindowContext> wc = doc->GetWindowContext();
       if (wc) {
@@ -10514,7 +10535,20 @@ nsContentUtils::GetSubresourceCacheValidationInfo(nsIRequest* aRequest,
   //
   // TODO(emilio): Figure out which other schemes that don't have caching
   // policies are safe to cache. Blobs should be...
-  if (aURI && (aURI->SchemeIs("data") || dom::IsChromeURI(aURI))) {
+  const bool knownCacheable = [&] {
+    if (!aURI) {
+      return false;
+    }
+    if (aURI->SchemeIs("data")) {
+      return true;
+    }
+    if (dom::IsChromeURI(aURI)) {
+      return !StaticPrefs::nglayout_debug_disable_xul_cache();
+    }
+    return false;
+  }();
+
+  if (knownCacheable) {
     MOZ_ASSERT(!info.mExpirationTime);
     MOZ_ASSERT(!info.mMustRevalidate);
     info.mExpirationTime = Some(0);  // 0 means "doesn't expire".

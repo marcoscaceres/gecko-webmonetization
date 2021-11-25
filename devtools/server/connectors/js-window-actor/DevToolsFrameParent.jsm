@@ -5,7 +5,9 @@
 "use strict";
 
 var EXPORTED_SYMBOLS = ["DevToolsFrameParent"];
-const { loader } = ChromeUtils.import("resource://devtools/shared/Loader.jsm");
+const { loader } = ChromeUtils.import(
+  "resource://devtools/shared/loader/Loader.jsm"
+);
 const { EventEmitter } = ChromeUtils.import(
   "resource://gre/modules/EventEmitter.jsm"
 );
@@ -55,38 +57,38 @@ class DevToolsFrameParent extends JSWindowActorParent {
   async instantiateTarget({
     watcherActorID,
     connectionPrefix,
-    browserId,
-    watchedData,
+    context,
+    sessionData,
   }) {
     await this.sendQuery("DevToolsFrameParent:instantiate-already-available", {
       watcherActorID,
       connectionPrefix,
-      browserId,
-      watchedData,
+      context,
+      sessionData,
     });
   }
 
-  destroyTarget({ watcherActorID, browserId }) {
+  destroyTarget({ watcherActorID, context }) {
     this.sendAsyncMessage("DevToolsFrameParent:destroy", {
       watcherActorID,
-      browserId,
+      context,
     });
   }
 
   /**
    * Communicate to the content process that some data have been added.
    */
-  async addWatcherDataEntry({ watcherActorID, browserId, type, entries }) {
+  async addSessionDataEntry({ watcherActorID, context, type, entries }) {
     try {
-      await this.sendQuery("DevToolsFrameParent:addWatcherDataEntry", {
+      await this.sendQuery("DevToolsFrameParent:addSessionDataEntry", {
         watcherActorID,
-        browserId,
+        context,
         type,
         entries,
       });
     } catch (e) {
       console.warn(
-        "Failed to add watcher data entry for frame targets in browsing context",
+        "Failed to add session data entry for frame targets in browsing context",
         this.browsingContext.id
       );
       console.warn(e);
@@ -96,10 +98,10 @@ class DevToolsFrameParent extends JSWindowActorParent {
   /**
    * Communicate to the content process that some data have been removed.
    */
-  removeWatcherDataEntry({ watcherActorID, browserId, type, entries }) {
-    this.sendAsyncMessage("DevToolsFrameParent:removeWatcherDataEntry", {
+  removeSessionDataEntry({ watcherActorID, context, type, entries }) {
+    this.sendAsyncMessage("DevToolsFrameParent:removeSessionDataEntry", {
       watcherActorID,
-      browserId,
+      context,
       type,
       entries,
     });

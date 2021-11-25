@@ -25,7 +25,7 @@ loader.lazyRequireGetter(
     "isDirectShadowHostChild",
     "isMarkerPseudoElement",
     "isNativeAnonymous",
-    "isRemoteFrame",
+    "isFrameWithChildTarget",
     "isShadowHost",
     "isShadowRoot",
     "isTemplateElement",
@@ -722,7 +722,7 @@ var WalkerActor = protocol.ActorClassWithSpec(walkerSpec, {
       isShadowHost(rawNode) ||
       rawNode.nodeType != Node.ELEMENT_NODE ||
       rawNode.children.length > 0 ||
-      isRemoteFrame(rawNode)
+      isFrameWithChildTarget(this.targetActor, rawNode)
     ) {
       return undefined;
     }
@@ -1250,15 +1250,6 @@ var WalkerActor = protocol.ActorClassWithSpec(walkerSpec, {
     }
 
     return nodes;
-  },
-
-  /**
-   * Return a NodeListActor with all nodes that match the given selector in all
-   * frames of the current content page.
-   * @param {String} selector
-   */
-  multiFrameQuerySelectorAll: function(selector) {
-    return new NodeListActor(this, this._multiFrameQuerySelectorAll(selector));
   },
 
   /**
@@ -2800,6 +2791,10 @@ var WalkerActor = protocol.ActorClassWithSpec(walkerSpec, {
 
   cancelPick() {
     this.nodePicker.cancelPick();
+  },
+
+  clearPicker() {
+    this.nodePicker.resetHoveredNodeReference();
   },
 
   /**

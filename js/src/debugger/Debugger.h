@@ -29,7 +29,6 @@
 #include "debugger/Object.h"        // for DebuggerObject
 #include "ds/TraceableFifo.h"       // for TraceableFifo
 #include "gc/Barrier.h"             // for WeakHeapPtrGlobalObject, HeapPtr
-#include "gc/Marking.h"             // for IsAboutToBeFinalized, ToMarkable
 #include "gc/Rooting.h"             // for HandleSavedFrame, HandleAtom
 #include "gc/Tracer.h"              // for TraceNullableEdge, TraceEdge
 #include "gc/WeakMap.h"             // for WeakMap
@@ -828,7 +827,7 @@ class Debugger : private mozilla::LinkedListElement<Debugger> {
       jsbytecode* pc, ResumeMode& resultMode, MutableHandleValue vp);
 
   [[nodiscard]] bool processParsedHandlerResult(
-      JSContext* cx, AbstractFramePtr frame, jsbytecode* pc, bool success,
+      JSContext* cx, AbstractFramePtr frame, const jsbytecode* pc, bool success,
       ResumeMode resumeMode, HandleValue value, ResumeMode& resultMode,
       MutableHandleValue vp);
 
@@ -837,7 +836,8 @@ class Debugger : private mozilla::LinkedListElement<Debugger> {
    * on the given frame, and split the result into a ResumeMode and Value.
    */
   [[nodiscard]] bool prepareResumption(JSContext* cx, AbstractFramePtr frame,
-                                       jsbytecode* pc, ResumeMode& resumeMode,
+                                       const jsbytecode* pc,
+                                       ResumeMode& resumeMode,
                                        MutableHandleValue vp);
 
   /**
@@ -944,7 +944,7 @@ class Debugger : private mozilla::LinkedListElement<Debugger> {
    * |frame|. |global| is |frame|'s global object; if nullptr or omitted, we
    * compute it ourselves from |frame|.
    */
-  using DebuggerFrameVector = GCVector<DebuggerFrame*>;
+  using DebuggerFrameVector = GCVector<DebuggerFrame*, 0, SystemAllocPolicy>;
   [[nodiscard]] static bool getDebuggerFrames(
       AbstractFramePtr frame, MutableHandle<DebuggerFrameVector> frames);
 

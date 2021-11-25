@@ -51,6 +51,7 @@ LOCAL_INCLUDES += [
     "/js/xpconnect/src",
     "/netwerk/base",
     "/netwerk/cookie",
+    "/parser/htmlparser",
     "/toolkit/components/sessionstore",
     "/view",
 ]
@@ -77,5 +78,3 @@ FINAL_LIBRARY = "xul"
 
 if CONFIG["CC_TYPE"] in ("clang", "gcc"):
     CXXFLAGS += ["-Wno-error=shadow"]
-
-REQUIRES_UNIFIED_BUILD = True

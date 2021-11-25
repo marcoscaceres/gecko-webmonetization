@@ -10,9 +10,9 @@ macro_rules! using_opcode_database {
                 //
                 // @@@@ BEGIN OPCODES @@@@
                 (Undefined, undefined, "", 1, 0, 1, JOF_BYTE),
-                (Null, null, js_null_str, 1, 0, 1, JOF_BYTE),
-                (False, false_, js_false_str, 1, 0, 1, JOF_BYTE),
-                (True, true_, js_true_str, 1, 0, 1, JOF_BYTE),
+                (Null, null, "null", 1, 0, 1, JOF_BYTE),
+                (False, false_, "false", 1, 0, 1, JOF_BYTE),
+                (True, true_, "true", 1, 0, 1, JOF_BYTE),
                 (Int32, int32, NULL, 5, 0, 1, JOF_INT32),
                 (Zero, zero, "0", 1, 0, 1, JOF_BYTE),
                 (One, one, "1", 1, 0, 1, JOF_BYTE),
@@ -21,7 +21,7 @@ macro_rules! using_opcode_database {
                 (Uint24, uint24, NULL, 4, 0, 1, JOF_UINT24),
                 (Double, double_, NULL, 9, 0, 1, JOF_DOUBLE),
                 (BigInt, big_int, NULL, 5, 0, 1, JOF_BIGINT),
-                (String, string, NULL, 5, 0, 1, JOF_ATOM),
+                (String, string, NULL, 5, 0, 1, JOF_STRING),
                 (Symbol, symbol, NULL, 2, 0, 1, JOF_UINT8),
                 (Void, void_, NULL, 1, 1, 1, JOF_BYTE),
                 (Typeof, typeof_, NULL, 1, 1, 1, JOF_BYTE|JOF_IC),
@@ -41,8 +41,8 @@ macro_rules! using_opcode_database {
                 (Gt, gt, ">",  1, 2, 1, JOF_BYTE|JOF_IC),
                 (Le, le, "<=", 1, 2, 1, JOF_BYTE|JOF_IC),
                 (Ge, ge, ">=", 1, 2, 1, JOF_BYTE|JOF_IC),
-                (Instanceof, instanceof, js_instanceof_str, 1, 2, 1, JOF_BYTE|JOF_IC),
-                (In, in_, js_in_str, 1, 2, 1, JOF_BYTE|JOF_IC),
+                (Instanceof, instanceof, "instanceof", 1, 2, 1, JOF_BYTE|JOF_IC),
+                (In, in_, "in", 1, 2, 1, JOF_BYTE|JOF_IC),
                 (Lsh, lsh, "<<", 1, 2, 1, JOF_BYTE|JOF_IC),
                 (Rsh, rsh, ">>", 1, 2, 1, JOF_BYTE|JOF_IC),
                 (Ursh, ursh, ">>>", 1, 2, 1, JOF_BYTE|JOF_IC),
@@ -58,6 +58,7 @@ macro_rules! using_opcode_database {
                 (ToNumeric, to_numeric, NULL, 1, 1, 1, JOF_BYTE|JOF_IC),
                 (ToString, to_string, NULL, 1, 1, 1, JOF_BYTE),
                 (GlobalThis, global_this, NULL, 1, 0, 1, JOF_BYTE),
+                (NonSyntacticGlobalThis, non_syntactic_global_this, NULL, 1, 0, 1, JOF_BYTE),
                 (NewTarget, new_target, NULL, 1, 0, 1, JOF_BYTE),
                 (DynamicImport, dynamic_import, NULL, 1, 1, 1, JOF_BYTE),
                 (ImportMeta, import_meta, NULL, 1, 0, 1, JOF_BYTE),
@@ -125,13 +126,12 @@ macro_rules! using_opcode_database {
                 (FunCall, fun_call, NULL, 3, -1, 1, JOF_ARGC|JOF_INVOKE|JOF_IC),
                 (CallIgnoresRv, call_ignores_rv, NULL, 3, -1, 1, JOF_ARGC|JOF_INVOKE|JOF_IC),
                 (SpreadCall, spread_call, NULL, 1, 3, 1, JOF_BYTE|JOF_INVOKE|JOF_SPREAD|JOF_IC),
-                (OptimizeSpreadCall, optimize_spread_call, NULL, 1, 1, 2, JOF_BYTE|JOF_IC),
+                (OptimizeSpreadCall, optimize_spread_call, NULL, 1, 1, 1, JOF_BYTE|JOF_IC),
                 (Eval, eval, NULL, 3, -1, 1, JOF_ARGC|JOF_INVOKE|JOF_CHECKSLOPPY|JOF_IC),
                 (SpreadEval, spread_eval, NULL, 1, 3, 1, JOF_BYTE|JOF_INVOKE|JOF_SPREAD|JOF_CHECKSLOPPY|JOF_IC),
                 (StrictEval, strict_eval, NULL, 3, -1, 1, JOF_ARGC|JOF_INVOKE|JOF_CHECKSTRICT|JOF_IC),
                 (StrictSpreadEval, strict_spread_eval, NULL, 1, 3, 1, JOF_BYTE|JOF_INVOKE|JOF_SPREAD|JOF_CHECKSTRICT|JOF_IC),
                 (ImplicitThis, implicit_this, "", 5, 0, 1, JOF_ATOM),
-                (GImplicitThis, g_implicit_this, "", 5, 0, 1, JOF_ATOM),
                 (CallSiteObj, call_site_obj, NULL, 5, 0, 1, JOF_OBJECT),
                 (IsConstructing, is_constructing, NULL, 1, 0, 1, JOF_BYTE),
                 (New, new_, NULL, 3, -1, 1, JOF_ARGC|JOF_INVOKE|JOF_CONSTRUCT|JOF_IC),
@@ -349,6 +349,9 @@ const JOF_DEBUGCOORD: u32 = 24;
 
 /// uint32_t shape index
 const JOF_SHAPE: u32 = 25;
+
+/// uint32_t constant index
+const JOF_STRING: u32 = 26;
 
 /// mask for above immediate types
 const JOF_TYPEMASK: u32 = 0xFF;

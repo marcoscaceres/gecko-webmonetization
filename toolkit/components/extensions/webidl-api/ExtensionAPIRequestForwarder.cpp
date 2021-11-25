@@ -97,6 +97,13 @@ ExtensionAPIRequestForwarder::APIRequestHandler() {
   return *sAPIRequestHandler;
 }
 
+void ExtensionAPIRequestForwarder::SetSerializedCallerStack(
+    UniquePtr<dom::SerializedStackHolder> aCallerStack) {
+  MOZ_ASSERT(dom::IsCurrentThreadRunningWorker());
+  MOZ_ASSERT(mStackHolder.isNothing());
+  mStackHolder = Some(std::move(aCallerStack));
+}
+
 void ExtensionAPIRequestForwarder::Run(nsIGlobalObject* aGlobal, JSContext* aCx,
                                        const dom::Sequence<JS::Value>& aArgs,
                                        ExtensionEventListener* aListener,
@@ -109,6 +116,10 @@ void ExtensionAPIRequestForwarder::Run(nsIGlobalObject* aGlobal, JSContext* aCx,
 
   RefPtr<RequestWorkerRunnable> runnable =
       new RequestWorkerRunnable(workerPrivate, this);
+
+  if (mStackHolder.isSome()) {
+    runnable->SetSerializedCallerStack(mStackHolder.extract());
+  }
 
   RefPtr<dom::Promise> domPromise;
 
@@ -280,6 +291,8 @@ void RequestWorkerRunnable::Init(nsIGlobalObject* aGlobal, JSContext* aCx,
                                  ErrorResult& aRv) {
   MOZ_ASSERT(dom::IsCurrentThreadRunningWorker());
 
+  mSWDescriptorId = mWorkerPrivate->ServiceWorkerID();
+
   auto* workerScope = mWorkerPrivate->GlobalScope();
   if (NS_WARN_IF(!workerScope)) {
     aRv.Throw(NS_ERROR_UNEXPECTED);
@@ -299,7 +312,10 @@ void RequestWorkerRunnable::Init(nsIGlobalObject* aGlobal, JSContext* aCx,
     return;
   }
 
-  SerializeCallerStack(aCx);
+  if (!mStackHolder.isSome()) {
+    SerializeCallerStack(aCx);
+  }
+
   mEventListener = aListener;
 }
 
@@ -326,6 +342,13 @@ void RequestWorkerRunnable::Init(nsIGlobalObject* aGlobal, JSContext* aCx,
       &kExtensionAPIRequestStructuredCloneCallbacks);
 }
 
+void RequestWorkerRunnable::SetSerializedCallerStack(
+    UniquePtr<dom::SerializedStackHolder> aCallerStack) {
+  MOZ_ASSERT(dom::IsCurrentThreadRunningWorker());
+  MOZ_ASSERT(mStackHolder.isNothing());
+  mStackHolder = Some(std::move(aCallerStack));
+}
+
 void RequestWorkerRunnable::SerializeCallerStack(JSContext* aCx) {
   MOZ_ASSERT(dom::IsCurrentThreadRunningWorker());
   MOZ_ASSERT(mStackHolder.isNothing());
@@ -337,6 +360,7 @@ void RequestWorkerRunnable::DeserializeCallerStack(
   MOZ_ASSERT(NS_IsMainThread());
   if (mStackHolder.isSome()) {
     JS::RootedObject savedFrame(aCx, mStackHolder->get()->ReadStack(aCx));
+    MOZ_ASSERT(savedFrame);
     aRetval.set(JS::ObjectValue(*savedFrame));
     mStackHolder = Nothing();
   }
@@ -404,7 +428,7 @@ already_AddRefed<ExtensionAPIRequest> RequestWorkerRunnable::CreateAPIRequest(
 
   RefPtr<ExtensionAPIRequest> request = new ExtensionAPIRequest(
       mOuterRequest->GetRequestType(), *mOuterRequest->GetRequestTarget());
-  request->Init(mClientInfo, callArgs, callerStackValue);
+  request->Init(mClientInfo, mSWDescriptorId, callArgs, callerStackValue);
 
   if (mEventListener) {
     request->SetEventListener(mEventListener.forget());
@@ -533,12 +557,12 @@ bool RequestWorkerRunnable::ProcessHandlerResult(
 
       ErrorResult rv;
       nsIGlobalObject* glob = xpc::CurrentNativeGlobal(aCx);
-      already_AddRefed<dom::Promise> promise =
+      RefPtr<dom::Promise> retPromise =
           dom::Promise::Resolve(glob, aCx, aRetval, rv);
       if (rv.Failed()) {
         return false;
       }
-      promise.take()->AppendNativeHandler(mPromiseProxy);
+      retPromise->AppendNativeHandler(mPromiseProxy);
       return true;
     }
   }
@@ -601,6 +625,78 @@ void RequestWorkerRunnable::ReadResult(JSContext* aCx,
 
   MOZ_DIAGNOSTIC_ASSERT(false, "Unexpected API request ResultType");
   aRv.Throw(NS_ERROR_UNEXPECTED);
+}
+
+// RequestInitWorkerContextRunnable
+
+RequestInitWorkerRunnable::RequestInitWorkerRunnable(
+    dom::WorkerPrivate* aWorkerPrivate, Maybe<dom::ClientInfo>& aSWClientInfo)
+    : WorkerMainThreadRunnable(aWorkerPrivate,
+                               "extensions::RequestInitWorkerRunnable"_ns) {
+  MOZ_ASSERT(dom::IsCurrentThreadRunningWorker());
+  MOZ_ASSERT(aSWClientInfo.isSome());
+  mClientInfo = aSWClientInfo;
+}
+
+bool RequestInitWorkerRunnable::MainThreadRun() {
+  MOZ_ASSERT(NS_IsMainThread());
+
+  auto* baseURI = mWorkerPrivate->GetBaseURI();
+  RefPtr<WebExtensionPolicy> policy =
+      ExtensionPolicyService::GetSingleton().GetByURL(baseURI);
+
+  RefPtr<ExtensionServiceWorkerInfo> swInfo = new ExtensionServiceWorkerInfo(
+      *mClientInfo, mWorkerPrivate->ServiceWorkerID());
+
+  nsCOMPtr<mozIExtensionAPIRequestHandler> handler =
+      &ExtensionAPIRequestForwarder::APIRequestHandler();
+  MOZ_ASSERT(handler);
+
+  if (NS_FAILED(handler->InitExtensionWorker(policy, swInfo))) {
+    NS_WARNING("nsIExtensionAPIRequestHandler.initExtensionWorker call failed");
+  }
+
+  return true;
+}
+
+// NotifyWorkerLoadedRunnable
+
+nsresult NotifyWorkerLoadedRunnable::Run() {
+  MOZ_ASSERT(NS_IsMainThread());
+
+  RefPtr<WebExtensionPolicy> policy =
+      ExtensionPolicyService::GetSingleton().GetByURL(mSWBaseURI.get());
+
+  nsCOMPtr<mozIExtensionAPIRequestHandler> handler =
+      &ExtensionAPIRequestForwarder::APIRequestHandler();
+  MOZ_ASSERT(handler);
+
+  if (NS_FAILED(handler->OnExtensionWorkerLoaded(policy, mSWDescriptorId))) {
+    NS_WARNING(
+        "nsIExtensionAPIRequestHandler.onExtensionWorkerLoaded call failed");
+  }
+
+  return NS_OK;
+}
+
+// NotifyWorkerDestroyedRunnable
+
+nsresult NotifyWorkerDestroyedRunnable::Run() {
+  MOZ_ASSERT(NS_IsMainThread());
+
+  RefPtr<WebExtensionPolicy> policy =
+      ExtensionPolicyService::GetSingleton().GetByURL(mSWBaseURI.get());
+
+  nsCOMPtr<mozIExtensionAPIRequestHandler> handler =
+      &ExtensionAPIRequestForwarder::APIRequestHandler();
+  MOZ_ASSERT(handler);
+
+  if (NS_FAILED(handler->OnExtensionWorkerDestroyed(policy, mSWDescriptorId))) {
+    NS_WARNING(
+        "nsIExtensionAPIRequestHandler.onExtensionWorkerDestroyed call failed");
+  }
+
+  return NS_OK;
 }
 
 }  // namespace extensions

@@ -65,7 +65,7 @@ test_copyright() {
   local f
   for f in $(
       git ls-files | grep -E \
-      '(Dockerfile.*|\.c|\.cc|\.cpp|\.gni|\.h|\.java|\.sh|\.m|\.py|\.ui)$'); do
+      '(Dockerfile.*|\.c|\.cc|\.cpp|\.gni|\.h|\.java|\.sh|\.m|\.py|\.ui|\.yml)$'); do
     if [[ "${f#third_party/}" == "$f" ]]; then
       # $f is not in third_party/
       if ! head -n 10 "$f" |
@@ -81,6 +81,38 @@ test_copyright() {
       fi
     fi
   done
+  return ${ret}
+}
+
+# Check that we don't use "%zu" or "%zd" in format string for size_t.
+test_printf_size_t() {
+  local ret=0
+  if grep -n -E '%[0-9]*z[udx]' \
+      $(git ls-files | grep -E '(\.c|\.cc|\.cpp|\.h)$'); then
+    echo "Don't use '%zu' or '%zd' in a format string, instead use " \
+      "'%\" PRIuS \"' or '%\" PRIdS \"'." >&2
+    ret=1
+  fi
+
+  local f
+  for f in $(git ls-files | grep -E "\.cc$" | xargs grep 'PRI[udx]S' |
+      cut -f 1 -d : | uniq); do
+    if ! grep -F printf_macros.h "$f" >/dev/null; then
+      echo "$f: Add lib/jxl/base/printf_macros.h for PRI.S, or use other " \
+        "types for code outside lib/jxl library." >&2
+      ret=1
+    fi
+  done
+
+  for f in $(git ls-files | grep -E "\.h$" | grep -v -F printf_macros.h |
+      xargs grep -n 'PRI[udx]S'); do
+    # Having PRIuS / PRIdS in a header file means that printf_macros.h may
+    # be included before a system header, in particular before gtest headers.
+    # those may re-define PRIuS unconditionally causing a compile error.
+    echo "$f: Don't use PRI.S in header files. Sorry."
+    ret=1
+  done
+
   return ${ret}
 }
 
@@ -173,6 +205,15 @@ test_deps_version() {
       cat >&2 <<EOF
 deps.sh: SHA for project ${line} is at ${deps_sha} but the git submodule is at
 ${git_sha}. Please update deps.sh
+
+If you did not intend to change the submodule's SHA value, it is possible that
+you accidentally included this change in your commit after a rebase or checkout
+without running "git submodule --init". To revert the submodule change run from
+the top checkout directory:
+
+  git -C ${line} checkout ${deps_sha}
+  git commit --amend ${line}
+
 EOF
       return 1
     fi
@@ -197,6 +238,21 @@ EOF
     fi
   done
   return $ret
+}
+
+# Test that we don't use %n in C++ code to avoid using it in printf and scanf.
+# This test is not very precise but in cases where "module n" is needed we would
+# normally have "% n" instead of "%n". Using %n is not allowed in Android 10+.
+test_percent_n() {
+  local ret=0
+  local f
+  for f in $(git ls-files | grep -E '(\.cc|\.cpp|\.h)$'); do
+    if grep -i -H -n -E '%h*n' "$f" >&2; then
+      echo "Don't use \"%n\"." >&2
+      ret=1
+    fi
+  done
+  return ${ret}
 }
 
 main() {

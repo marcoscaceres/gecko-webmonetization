@@ -1051,6 +1051,30 @@ const FORMATS = {
     return url;
   },
 
+  origin(string, context) {
+    let url;
+    try {
+      url = new URL(string);
+    } catch (e) {
+      throw new Error(`Invalid origin: ${string}`);
+    }
+    if (!/^https?:/.test(url.protocol)) {
+      throw new Error(`Invalid origin must be http or https for URL ${string}`);
+    }
+    // url.origin is punycode so a direct check against string wont work.
+    // url.href appends a slash even if not in the original string, we we
+    // additionally check that string does not end in slash.
+    if (string.endsWith("/") || url.href != new URL(url.origin).href) {
+      throw new Error(
+        `Invalid origin for URL ${string}, replace with origin ${url.origin}`
+      );
+    }
+    if (!context.checkLoadURL(url.origin)) {
+      throw new Error(`Access denied for URL ${url}`);
+    }
+    return url.origin;
+  },
+
   relativeUrl(string, context) {
     if (!context.url) {
       // If there's no context URL, return relative URLs unresolved, and
@@ -3581,6 +3605,14 @@ this.Schemas = {
 
   _rootSchema: null,
 
+  // A weakmap for the validation Context class instances given an extension
+  // context (keyed by the extensin context instance).
+  // This is used instead of the InjectionContext for webIDL API validation
+  // and normalization (see Schemas.checkParameters).
+  paramsValidationContexts: new DefaultWeakMap(
+    extContext => new Context(extContext)
+  ),
+
   get rootSchema() {
     if (!this.initialized) {
       this.init();
@@ -3755,5 +3787,32 @@ this.Schemas = {
    */
   normalize(obj, typeName, context) {
     return this.rootSchema.normalize(obj, typeName, context);
+  },
+
+  /**
+   * Validate and normalize the arguments for an API request originated
+   * from the webIDL API bindings.
+   *
+   * This provides for calls originating through WebIDL the parameters
+   * validation and normalization guarantees that the ext-APINAMESPACE.js
+   * scripts expects (what InjectionContext does for the regular bindings).
+   *
+   * @param {object}     extContext
+   * @param {string}     apiNamespace
+   * @param {string}     apiName
+   * @param {Array<any>} args
+   *
+   * @returns {Array<any>} Normalized arguments array.
+   */
+  checkParameters(extContext, apiNamespace, apiName, args) {
+    const apiSchema = this.getNamespace(apiNamespace)?.get(apiName);
+    if (!apiSchema) {
+      throw new Error(`API Schema not found for ${apiNamespace}.${apiName}`);
+    }
+
+    return apiSchema.checkParameters(
+      args,
+      this.paramsValidationContexts.get(extContext)
+    );
   },
 };

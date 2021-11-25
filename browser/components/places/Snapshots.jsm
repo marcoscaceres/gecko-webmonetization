@@ -13,10 +13,12 @@ const { XPCOMUtils } = ChromeUtils.import(
 const VERSION_PREF = "browser.places.snapshots.version";
 
 XPCOMUtils.defineLazyModuleGetters(this, {
+  BackgroundPageThumbs: "resource://gre/modules/BackgroundPageThumbs.jsm",
   CommonNames: "resource:///modules/CommonNames.jsm",
   Interactions: "resource:///modules/Interactions.jsm",
-  PageDataCollector: "resource:///modules/pagedata/PageDataCollector.jsm",
   PageDataService: "resource:///modules/pagedata/PageDataService.jsm",
+  PageThumbs: "resource://gre/modules/PageThumbs.jsm",
+  PageThumbsStorage: "resource://gre/modules/PageThumbs.jsm",
   PlacesUtils: "resource://gre/modules/PlacesUtils.jsm",
   Services: "resource://gre/modules/Services.jsm",
 });
@@ -47,6 +49,18 @@ XPCOMUtils.defineLazyGetter(this, "logConsole", function() {
       : "Warn",
   });
 });
+
+/**
+ * Snapshots are considered overlapping if interactions took place within snapshot_overlap_limit milleseconds of each other.
+ * Default to a half-hour on each end of the interactions.
+ *
+ */
+XPCOMUtils.defineLazyPreferenceGetter(
+  this,
+  "snapshot_overlap_limit",
+  "browser.places.interactions.snapshotOverlapLimit",
+  1800000 // 1000 * 60 * 30
+);
 
 const DEFAULT_CRITERIA = [
   {
@@ -98,6 +112,10 @@ XPCOMUtils.defineLazyPreferenceGetter(
  *   True if the user created or persisted the snapshot in some way.
  * @property {Map<type, data>} pageData
  *   Collection of PageData by type. See PageDataService.jsm
+ * @property {Number} overlappingVisitScore
+ *   Calculated score based on overlapping visits to the context url. In the range [0.0, 1.0]
+ * @property {number} [relevancyScore]
+ *   The relevancy score associated with the snapshot.
  */
 
 /**
@@ -117,6 +135,22 @@ const Snapshots = new (class Snapshots {
     // want to accumulate changes and update on idle, plus store a cache of the
     // last notified pages to avoid hitting the same page continuously.
     // PageDataService.on("page-data", this.#onPageData);
+
+    PageThumbs.addExpirationFilter(this);
+  }
+
+  /**
+   * Only certain urls can be added as Snapshots, either manually or
+   * automatically.
+   * @returns {Map} A Map keyed by protocol, for each protocol an object may
+   *          define stricter requirements, like extension.
+   */
+  get urlRequirements() {
+    return new Map([
+      ["http:", {}],
+      ["https:", {}],
+      ["file:", { extension: "pdf" }],
+    ]);
   }
 
   #notify(topic, urls) {
@@ -124,55 +158,153 @@ const Snapshots = new (class Snapshots {
   }
 
   /**
+   * This is called by PageThumbs to see what thumbnails should be kept alive.
+   * Currently, the last 100 snapshots are kept alive.
+   * @param {function} callback
+   */
+  async filterForThumbnailExpiration(callback) {
+    let snapshots = await this.query();
+    let urls = [];
+    for (let snapshot of snapshots) {
+      urls.push(snapshot.url);
+    }
+    callback(urls);
+  }
+
+  /**
    * Fetches page data for the given urls and stores it with snapshots.
    * @param {Array<Objects>} urls Array of {placeId, url} tuples.
    */
   async #addPageData(urls) {
-    let index = 0;
-    let values = [];
-    let bindings = {};
+    let pageDataIndex = 0;
+    let pageDataValues = [];
+    let pageDataBindings = {};
+
+    let placesIndex = 0;
+    let placesValues = [];
+    let placesBindings = {};
+
     for (let { placeId, url } of urls) {
       let pageData = PageDataService.getCached(url);
-      if (pageData?.data.length) {
-        for (let data of pageData.data) {
-          if (Object.values(PageDataCollector.DATA_TYPE).includes(data.type)) {
-            bindings[`id${index}`] = placeId;
-            bindings[`type${index}`] = data.type;
-            // We store the whole data object that also includes type because
-            // it makes easier to query all the data at once and then build a
-            // Map from it.
-            bindings[`data${index}`] = JSON.stringify(data);
-            values.push(`(:id${index}, :type${index}, :data${index})`);
-            index++;
-          }
+      if (pageData) {
+        for (let [type, data] of Object.entries(pageData.data)) {
+          pageDataBindings[`id${pageDataIndex}`] = placeId;
+          pageDataBindings[`type${pageDataIndex}`] = type;
+          pageDataBindings[`data${pageDataIndex}`] = JSON.stringify(data);
+          pageDataValues.push(
+            `(:id${pageDataIndex}, :type${pageDataIndex}, :data${pageDataIndex})`
+          );
+          pageDataIndex++;
         }
+
+        let { siteName, description, image: previewImageURL } = pageData;
+        let pageInfo = PlacesUtils.validateItemProperties(
+          "PageInfo",
+          PlacesUtils.PAGEINFO_VALIDATORS,
+          { siteName, description, previewImageURL }
+        );
+
+        placesBindings[`id${placesIndex}`] = placeId;
+        placesBindings[`desc${placesIndex}`] = pageInfo.description ?? null;
+        placesBindings[`site${placesIndex}`] = pageInfo.siteName ?? null;
+        placesBindings[`image${placesIndex}`] =
+          pageInfo.previewImageURL?.toString() ?? null;
+        placesValues.push(
+          `(:id${placesIndex}, :desc${placesIndex}, :site${placesIndex}, :image${placesIndex})`
+        );
+        placesIndex++;
       } else {
         // TODO: queuing a fetch will notify page-data once done, if any data
         // was found, but we're not yet handling that, see the constructor.
         PageDataService.queueFetch(url).catch(console.error);
       }
+
+      this.#downloadPageImage(url, pageData?.image);
     }
 
     logConsole.debug(
-      `Inserting ${index} page data for: ${urls.map(u => u.url)}.`
+      `Inserting ${pageDataIndex} page data for: ${urls.map(u => u.url)}.`
     );
 
-    if (index == 0) {
+    if (pageDataIndex == 0 && placesIndex == 0) {
       return;
     }
 
     await PlacesUtils.withConnectionWrapper(
       "Snapshots.jsm::addPageData",
       async db => {
-        await db.execute(
-          `
+        if (placesIndex) {
+          await db.execute(
+            `
+          WITH pd("place_id", "description", "siteName", "image") AS (
+            VALUES ${placesValues.join(", ")}
+          )
+          UPDATE moz_places
+            SET
+              description = pd.description,
+              site_name = pd.siteName,
+              preview_image_url = pd.image
+            FROM pd
+            WHERE moz_places.id = pd.place_id;
+          `,
+            placesBindings
+          );
+        }
+
+        if (pageDataIndex) {
+          await db.execute(
+            `
           INSERT OR REPLACE INTO moz_places_metadata_snapshots_extra
             (place_id, type, data)
-            VALUES ${values.join(", ")}
+            VALUES ${pageDataValues.join(", ")}
           `,
-          bindings
-        );
+            pageDataBindings
+          );
+        }
       }
+    );
+  }
+
+  /**
+   * TODO: Store the downloaded and rescaled page image. For now this
+   * only kicks off the page thumbnail if there isn't a meta data image.
+   *
+   * @param {string} url The URL of the page. This is only used if there isn't
+   *    a `metaDataImageURL`.
+   * @param {string} metaDataImageURL The URL of the meta data page image. If
+   *    this exists, it is prioritized over the page thumbnail.
+   */
+  #downloadPageImage(url, metaDataImageURL = null) {
+    if (!metaDataImageURL) {
+      // No metadata image was found, start the process to capture a thumbnail
+      // so it will be ready when needed. Ignore any errors since we can
+      // fallback to a favicon.
+      BackgroundPageThumbs.captureIfMissing(url).catch(console.error);
+    }
+  }
+
+  /**
+   * Whether a given URL can be added to snapshots.
+   * The rules are defined in this.urlRequirements.
+   * @param {string|URL|nsIURI} url The URL to check.
+   * @returns {boolean} whether the url can be added to snapshots.
+   */
+  canSnapshotUrl(url) {
+    let protocol, pathname;
+    if (typeof url == "string") {
+      url = new URL(url);
+    }
+    if (url instanceof Ci.nsIURI) {
+      protocol = url.scheme + ":";
+      pathname = url.filePath;
+    } else {
+      protocol = url.protocol;
+      pathname = url.pathname;
+    }
+    let requirements = this.urlRequirements.get(protocol);
+    return (
+      requirements &&
+      (!requirements.extension || pathname.endsWith(requirements.extension))
     );
   }
 
@@ -193,6 +325,9 @@ const Snapshots = new (class Snapshots {
   async add({ url, userPersisted = false }) {
     if (!url) {
       throw new Error("Missing url parameter to Snapshots.add()");
+    }
+    if (!this.canSnapshotUrl(url)) {
+      throw new Error("This url cannot be added to snapshots");
     }
 
     let placeId = await PlacesUtils.withConnectionWrapper(
@@ -301,7 +436,9 @@ const Snapshots = new (class Snapshots {
       `
       SELECT h.url AS url, h.title AS title, created_at, removed_at,
              document_type, first_interaction_at, last_interaction_at,
-             user_persisted, group_concat(e.data, ",") AS page_data
+             user_persisted, description, site_name, preview_image_url,
+             group_concat('[' || e.type || ', ' || e.data || ']') AS page_data,
+             h.visit_count
              FROM moz_places_metadata_snapshots s
       JOIN moz_places h ON h.id = s.place_id
       LEFT JOIN moz_places_metadata_snapshots_extra e ON e.place_id = s.place_id
@@ -358,8 +495,10 @@ const Snapshots = new (class Snapshots {
       `
       SELECT h.url AS url, h.title AS title, created_at, removed_at,
              document_type, first_interaction_at, last_interaction_at,
-             user_persisted, group_concat(e.data, ",") AS page_data
-             FROM moz_places_metadata_snapshots s
+             user_persisted, description, site_name, preview_image_url,
+             group_concat('[' || e.type || ', ' || e.data || ']') AS page_data,
+             h.visit_count
+      FROM moz_places_metadata_snapshots s
       JOIN moz_places h ON h.id = s.place_id
       LEFT JOIN moz_places_metadata_snapshots_extra e ON e.place_id = s.place_id
       ${whereStatement}
@@ -371,6 +510,86 @@ const Snapshots = new (class Snapshots {
     );
 
     return rows.map(row => this.#translateRow(row));
+  }
+
+  /**
+   * Queries interaction times from the database.
+   *
+   * @param {string} url
+   *   url to query the place_id of
+   * @returns {number}
+   *   place_id of the given url or -1 if not found
+   */
+  async queryPlaceIdFromUrl(url) {
+    await this.#ensureVersionUpdates();
+    let db = await PlacesUtils.promiseDBConnection();
+
+    let rows = await db.executeCached(
+      `SELECT id from moz_places p
+      WHERE p.url = :url
+      `,
+      { url }
+    );
+
+    if (!rows.length) {
+      return -1;
+    }
+
+    return rows[0].getResultByName("id");
+  }
+
+  /**
+   * Queries snapshots that were browsed within an hour of visiting the given context url
+   *
+   * @param {string} context_url
+   *   the url that we're collection snapshots whose interactions overlapped
+   * @returns {Snapshot[]}
+   *   Returns array of overlapping snapshots in order of descending last interaction time.
+   */
+  async queryOverlapping(context_url) {
+    await this.#ensureVersionUpdates();
+
+    let current_id = await this.queryPlaceIdFromUrl(context_url);
+    if (current_id == -1) {
+      logConsole.debug(`PlaceId not found for url ${context_url}`);
+      return [];
+    }
+
+    let db = await PlacesUtils.promiseDBConnection();
+
+    let rows = await db.executeCached(
+      `SELECT h.url AS url, h.title AS title, o.overlappingVisitScore, created_at, removed_at,
+      document_type, first_interaction_at, last_interaction_at,
+      user_persisted, description, site_name, preview_image_url, group_concat(e.data, ",") AS page_data,
+      h.visit_count
+      FROM moz_places_metadata_snapshots s JOIN moz_places h ON h.id = s.place_id JOIN (
+        SELECT place_id, 1.0 AS overlappingVisitScore
+        FROM
+          (SELECT created_at - :snapshot_overlap_limit AS page_start, updated_at + :snapshot_overlap_limit AS page_end FROM moz_places_metadata WHERE place_id = :current_id) AS current_page
+          JOIN
+          (SELECT place_id, created_at AS snapshot_start, updated_at AS snapshot_end FROM moz_places_metadata WHERE place_id != :current_id) AS suggestion
+        WHERE
+          snapshot_start BETWEEN page_start AND page_end
+          OR
+          snapshot_end BETWEEN page_start AND page_end
+          OR
+          (snapshot_start < page_start AND snapshot_end > page_end)
+        GROUP BY place_id
+      ) o ON s.place_id = o.place_id
+      LEFT JOIN moz_places_metadata_snapshots_extra e ON e.place_id = s.place_id
+      GROUP BY s.place_id
+      ORDER BY o.overlappingVisitScore DESC;`,
+      { current_id, snapshot_overlap_limit }
+    );
+
+    if (!rows.length) {
+      logConsole.debug("No overlapping snapshots");
+      return [];
+    }
+
+    return rows.map(row =>
+      this.#translateRow(row, { includeOverlappingVisitScore: true })
+    );
   }
 
   /**
@@ -409,24 +628,35 @@ const Snapshots = new (class Snapshots {
    *
    * @param {object} row
    *   The database row to translate.
+   * @param {object} [options]
+   * @param {boolean} [options.includeOverlappingVisitScore]
+   *   Whether to retrieve the overlappingVisitScore field
    * @returns {Snapshot}
    */
-  #translateRow(row) {
+  #translateRow(row, { includeOverlappingVisitScore = false } = {}) {
     // Maps data type to data.
-    let pageData = new Map();
+    let pageData;
     let pageDataStr = row.getResultByName("page_data");
     if (pageDataStr) {
       try {
         let dataArray = JSON.parse(`[${pageDataStr}]`);
-        dataArray.forEach(d => pageData.set(d.type, d.data));
+        pageData = new Map(dataArray);
       } catch (e) {
         logConsole.error(e);
       }
     }
 
+    let overlappingVisitScore = 0;
+    if (includeOverlappingVisitScore) {
+      overlappingVisitScore = row.getResultByName("overlappingVisitScore");
+    }
+
     let snapshot = {
       url: row.getResultByName("url"),
       title: row.getResultByName("title"),
+      siteName: row.getResultByName("site_name"),
+      description: row.getResultByName("description"),
+      image: row.getResultByName("preview_image_url"),
       createdAt: this.#toDate(row.getResultByName("created_at")),
       removedAt: this.#toDate(row.getResultByName("removed_at")),
       firstInteractionAt: this.#toDate(
@@ -437,11 +667,36 @@ const Snapshots = new (class Snapshots {
       ),
       documentType: row.getResultByName("document_type"),
       userPersisted: !!row.getResultByName("user_persisted"),
-      pageData,
+      overlappingVisitScore,
+      pageData: pageData ?? new Map(),
+      visitCount: row.getResultByName("visit_count"),
     };
 
     snapshot.commonName = CommonNames.getName(snapshot);
     return snapshot;
+  }
+
+  /**
+   * Get the image that should represent the snapshot. The image URL
+   * returned comes from the following priority:
+   *   1) meta data page image
+   *   2) thumbnail of the page
+   * @param {Snapshot} snapshot
+   *
+   * @returns {string?}
+   */
+  async getSnapshotImageURL(snapshot) {
+    if (snapshot.image) {
+      return snapshot.image;
+    }
+    const url = snapshot.url;
+    await BackgroundPageThumbs.captureIfMissing(url).catch(console.error);
+    const exists = await PageThumbsStorage.fileExistsForURL(url);
+    if (exists) {
+      return PageThumbs.getThumbnailURL(url);
+    }
+
+    return null;
   }
 
   /**
@@ -498,16 +753,35 @@ const Snapshots = new (class Snapshots {
         let bindings = {};
 
         let urlFilter = "";
-        if (urls !== undefined) {
+        if (urls == undefined) {
+          // TODO: checking .pdf file extension in SQL is more complex than we'd
+          // like, since the manually adding API is already checking it, this is
+          // basically only allowing file:// urls added automatically, and it's
+          // likely in the future these picking rules will be replaced by some
+          // ML machinery. Thus it seems not worth the added complexity.
+          let filters = [];
+          for (let protocol of this.urlRequirements.keys()) {
+            filters.push(
+              `(url_hash BETWEEN hash('${protocol}', 'prefix_lo') AND hash('${protocol}', 'prefix_hi'))`
+            );
+          }
+          urlFilter = " WHERE " + filters.join(" OR ");
+        } else {
           let urlMatches = [];
-
           urls.forEach((url, idx) => {
+            if (!this.canSnapshotUrl(url)) {
+              logConsole.debug(`Url can't be added to snapshots: ${url}`);
+              return;
+            }
             bindings[`url${idx}`] = url;
             urlMatches.push(
               `(url_hash = hash(:url${idx}) AND url = :url${idx})`
             );
           });
-
+          if (!urlMatches.length) {
+            // All the urls were discarded.
+            return [];
+          }
           urlFilter = `WHERE ${urlMatches.join(" OR ")}`;
         }
 
@@ -522,7 +796,8 @@ const Snapshots = new (class Snapshots {
 
           if (criteria.interactionRecency) {
             wheres.push(`created_at >= :recency${idx}`);
-            bindings[`recency${idx}`] = Date.now() - criteria.interactionCount;
+            bindings[`recency${idx}`] =
+              Date.now() - criteria.interactionRecency;
           }
 
           let where = wheres.length ? `WHERE ${wheres.join(" AND ")}` : "";
@@ -550,7 +825,8 @@ const Snapshots = new (class Snapshots {
                 moz_places_metadata.*,
                 row_number() OVER (PARTITION BY place_id ORDER BY created_at DESC) AS row,
                 first_value(document_type) OVER (PARTITION BY place_id ORDER BY created_at DESC) AS doc_type
-              FROM moz_places_metadata JOIN moz_places ON moz_places_metadata.place_id = moz_places.id
+              FROM moz_places_metadata
+              JOIN moz_places h ON moz_places_metadata.place_id = h.id
               ${urlFilter}
           )
           INSERT OR IGNORE INTO moz_places_metadata_snapshots
@@ -565,6 +841,8 @@ const Snapshots = new (class Snapshots {
           ...bindings,
           createdAt: now,
         });
+
+        logConsole.debug(`Inserted ${results.length} snapshots`);
 
         let newUrls = [];
         for (let row of results) {

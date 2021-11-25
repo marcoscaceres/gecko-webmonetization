@@ -6,6 +6,7 @@
 
 #include "nsIGlobalObject.h"
 #include "mozilla/CycleCollectedJSContext.h"
+#include "mozilla/StorageAccess.h"
 #include "mozilla/dom/BlobURLProtocolHandler.h"
 #include "mozilla/dom/FunctionBinding.h"
 #include "mozilla/dom/Report.h"
@@ -243,6 +244,10 @@ nsIGlobalObject::GetOrCreateServiceWorkerRegistration(
   return nullptr;
 }
 
+mozilla::StorageAccess nsIGlobalObject::GetStorageAccess() {
+  return mozilla::StorageAccess::eDeny;
+}
+
 nsPIDOMWindowInner* nsIGlobalObject::AsInnerWindow() {
   if (MOZ_LIKELY(mIsInnerWindow)) {
     return static_cast<nsPIDOMWindowInner*>(
@@ -342,4 +347,8 @@ void nsIGlobalObject::RemoveReportRecords() {
   for (auto& observer : mReportingObservers) {
     observer->ForgetReports();
   }
+}
+
+bool nsIGlobalObject::ShouldResistFingerprinting() const {
+  return nsContentUtils::ShouldResistFingerprinting();
 }

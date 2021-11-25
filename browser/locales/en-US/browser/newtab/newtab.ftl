@@ -172,6 +172,12 @@ newtab-label-sponsored = { $sponsorOrSource } · Sponsored
 #  $sponsor (String): This is the name of a sponsor
 newtab-label-sponsored-by = Sponsored by { $sponsor }
 
+# This string is used under the image of story cards to indicate source and time to read
+# Variables:
+#  $source (String): This is the name of a company or their domain
+#  $timeToRead (Number): This is the estimated number of minutes to read this story
+newtab-label-source-read-time = { $source } · { $timeToRead } min
+
 ## Section Menu: These strings are displayed in the section context menu and are
 ## meant as a call to action for the given section.
 
@@ -223,10 +229,27 @@ newtab-discovery-empty-section-topstories-timed-out = Oops! We almost loaded thi
 
 # This is shown at the bottom of the trending stories section and precedes a list of links to popular topics.
 newtab-pocket-read-more = Popular Topics:
+newtab-pocket-new-topics-title = Want even more stories? See these popular topics from { -pocket-brand-name }
 newtab-pocket-more-recommendations = More Recommendations
 newtab-pocket-learn-more = Learn more
 newtab-pocket-cta-button = Get { -pocket-brand-name }
 newtab-pocket-cta-text = Save the stories you love in { -pocket-brand-name }, and fuel your mind with fascinating reads.
+newtab-pocket-pocket-firefox-family = { -pocket-brand-name } is part of the { -brand-product-name } family
+
+# A save to Pocket button that shows over the card thumbnail on hover.
+newtab-pocket-save-to-pocket = Save to { -pocket-brand-name }
+newtab-pocket-saved-to-pocket = Saved to { -pocket-brand-name }
+
+# This is a button shown at the bottom of the Pocket section that loads more stories when clicked.
+newtab-pocket-load-more-stories-button = Load more stories
+
+## Pocket Final Card Section.
+## This is for the final card in the Pocket grid.
+
+newtab-pocket-last-card-title = You’re all caught up!
+newtab-pocket-last-card-desc = Check back later for more.
+newtab-pocket-last-card-image =
+    .alt = You’re all caught up
 
 ## Error Fallback Content.
 ## This message and suggested action link are shown in each section of UI that fails to render.

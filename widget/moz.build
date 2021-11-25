@@ -41,6 +41,7 @@ if toolkit == "cocoa":
         "nsIMacDockSupport.idl",
         "nsIMacFinderProgress.idl",
         "nsIMacSharingService.idl",
+        "nsIMacUserActivityUpdater.idl",
         "nsIMacWebAppUtils.idl",
         "nsIStandaloneNativeMenu.idl",
         "nsITaskbarProgress.idl",
@@ -140,6 +141,7 @@ EXPORTS += [
 
 EXPORTS.mozilla += [
     "BasicEvents.h",
+    "ColorScheme.h",
     "CommandList.h",
     "ContentCache.h",
     "ContentEvents.h",
@@ -174,6 +176,7 @@ EXPORTS.mozilla.widget += [
     "ScreenManager.h",
     "ThemeChangeKind.h",
     "WidgetMessageUtils.h",
+    "WindowOcclusionState.h",
 ]
 
 UNIFIED_SOURCES += [
@@ -198,6 +201,7 @@ UNIFIED_SOURCES += [
     "nsHTMLFormatConverter.cpp",
     "nsIWidgetListener.cpp",
     "nsNativeBasicTheme.cpp",
+    "nsNativeBasicThemeCocoa.cpp",
     "nsPrimitiveHelpers.cpp",
     "nsPrintSettingsImpl.cpp",
     "nsSoundProxy.cpp",
@@ -208,9 +212,15 @@ UNIFIED_SOURCES += [
     "PuppetWidget.cpp",
     "RemoteLookAndFeel.cpp",
     "Screen.cpp",
-    "ScrollbarDrawingMac.cpp",
+    "ScrollbarDrawing.cpp",
+    "ScrollbarDrawingAndroid.cpp",
+    "ScrollbarDrawingCocoa.cpp",
+    "ScrollbarDrawingGTK.cpp",
+    "ScrollbarDrawingWin.cpp",
     "SharedWidgetUtils.cpp",
     "TextEventDispatcher.cpp",
+    "ThemeColors.cpp",
+    "ThemeDrawing.cpp",
     "TouchResampler.cpp",
     "VsyncDispatcher.cpp",
     "WidgetEventImpl.cpp",

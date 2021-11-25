@@ -14,6 +14,7 @@
 #include "GPUProcessManager.h"
 #include "gfxGradientCache.h"
 #include "GfxInfoBase.h"
+#include "CanvasManagerParent.h"
 #include "VRGPUChild.h"
 #include "VRManager.h"
 #include "VRManagerParent.h"
@@ -218,11 +219,6 @@ void GPUParent::NotifyDeviceReset() {
   Unused << SendNotifyDeviceReset(data);
 }
 
-already_AddRefed<PAPZInputBridgeParent> GPUParent::AllocPAPZInputBridgeParent(
-    const LayersId& aLayersId) {
-  return MakeAndAddRef<APZInputBridgeParent>(aLayersId);
-}
-
 mozilla::ipc::IPCResult GPUParent::RecvInit(
     nsTArray<GfxVarUpdate>&& vars, const DevicePrefs& devicePrefs,
     nsTArray<LayerTreeIdMapping>&& aMappings,
@@ -409,6 +405,13 @@ mozilla::ipc::IPCResult GPUParent::RecvInitUiCompositorController(
     const LayersId& aRootLayerTreeId,
     Endpoint<PUiCompositorControllerParent>&& aEndpoint) {
   UiCompositorControllerParent::Start(aRootLayerTreeId, std::move(aEndpoint));
+  return IPC_OK();
+}
+
+mozilla::ipc::IPCResult GPUParent::RecvInitAPZInputBridge(
+    const LayersId& aRootLayerTreeId,
+    Endpoint<PAPZInputBridgeParent>&& aEndpoint) {
+  APZInputBridgeParent::Create(aRootLayerTreeId, std::move(aEndpoint));
   return IPC_OK();
 }
 
@@ -628,6 +631,9 @@ void GPUParent::ActorDestroy(ActorDestroyReason aWhy) {
           mVsyncBridge = nullptr;
         }
         RemoteDecoderManagerParent::ShutdownVideoBridge();
+        // This could be running on either the Compositor or the Renderer
+        // thread.
+        CanvasManagerParent::Shutdown();
         CompositorThreadHolder::Shutdown();
         // There is a case that RenderThread exists when gfxVars::UseWebRender()
         // is false. This could happen when WebRender was fallbacked to

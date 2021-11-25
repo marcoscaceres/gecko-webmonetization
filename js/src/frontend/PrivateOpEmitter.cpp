@@ -8,9 +8,7 @@
 
 #include "frontend/BytecodeEmitter.h"
 #include "frontend/NameOpEmitter.h"
-#include "frontend/SharedContext.h"
 #include "vm/Opcodes.h"
-#include "vm/StringType.h"
 #include "vm/ThrowMsgKind.h"  // ThrowMsgKind
 
 using namespace js;
@@ -23,10 +21,6 @@ PrivateOpEmitter::PrivateOpEmitter(BytecodeEmitter* bce, Kind kind,
 }
 
 bool PrivateOpEmitter::init() {
-  if (!bce_->makeAtomIndex(name_, &atomIndex_)) {
-    return false;
-  }
-
   // Static analysis needs us to initialise this to something, so use Dynamic()
   NameLocation loc = NameLocation::Dynamic();
   bce_->lookupPrivate(name_, loc, brandLoc_);

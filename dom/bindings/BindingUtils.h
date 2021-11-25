@@ -621,7 +621,7 @@ struct VerifyTraceProtoAndIfaceCacheCalledTracer : public JS::CallbackTracer {
       : JS::CallbackTracer(cx, JS::TracerKind::VerifyTraceProtoAndIface),
         ok(false) {}
 
-  void onChild(const JS::GCCellPtr&) override {
+  void onChild(JS::GCCellPtr) override {
     // We don't do anything here, we only want to verify that
     // TraceProtoAndIfaceCache was called.
   }
@@ -3200,6 +3200,9 @@ class StringIdChars {
   size_t mLength;
 #endif  // DEBUG
 };
+
+already_AddRefed<Promise> CreateRejectedPromiseFromThrownException(
+    JSContext* aCx, ErrorResult& aError);
 
 }  // namespace binding_detail
 

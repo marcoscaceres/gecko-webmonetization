@@ -27,6 +27,7 @@
 // values are used internally only and so can be changed without consequence.
 // Any changes to this list should also be applied to the feature list in
 // toolkit/components/extensions/schemas/geckoProfiler.json.
+// *** Synchronize with lists in BaseProfilerState.h and geckoProfiler.json ***
 #define PROFILER_FOR_EACH_FEATURE(MACRO)                                     \
   MACRO(0, "java", Java, "Profile Java code, Android only")                  \
                                                                              \
@@ -84,7 +85,17 @@
                                                                              \
   MACRO(19, "notimerresolutionchange", NoTimerResolutionChange,              \
         "Do not adjust the timer resolution for sampling, so that other "    \
-        "Firefox timers do not get affected")
+        "Firefox timers do not get affected")                                \
+                                                                             \
+  MACRO(20, "cpuallthreads", CPUAllThreads,                                  \
+        "Sample the CPU utilization of all registered threads")              \
+                                                                             \
+  MACRO(21, "samplingallthreads", SamplingAllThreads,                        \
+        "Sample the stacks of all registered threads")                       \
+                                                                             \
+  MACRO(22, "markersallthreads", MarkersAllThreads,                          \
+        "Record markers from all registered threads")
+// *** Synchronize with lists in BaseProfilerState.h and geckoProfiler.json ***
 
 struct ProfilerFeature {
 #define DECLARE(n_, str_, Name_, desc_)                                \
@@ -163,7 +174,7 @@ using ProfilingStateChangeCallback = std::function<void(ProfilingState)>;
 #ifndef MOZ_GECKO_PROFILER
 
 [[nodiscard]] inline bool profiler_is_active() { return false; }
-[[nodiscard]] inline bool profiler_can_accept_markers() { return false; }
+[[nodiscard]] inline bool profiler_is_active_and_unpaused() { return false; }
 [[nodiscard]] inline bool profiler_feature_active(uint32_t aFeature) {
   return false;
 }
@@ -301,15 +312,8 @@ class RacyFeatures {
   return mozilla::profiler::detail::RacyFeatures::IsActive();
 }
 
-// Same as profiler_is_active(), but with the same extra checks that determine
-// if the profiler would currently store markers. So this should be used before
-// doing some potentially-expensive work that's used in a marker. E.g.:
-//
-//   if (profiler_can_accept_markers()) {
-//     ExpensiveMarkerPayload expensivePayload = CreateExpensivePayload();
-//     BASE_PROFILER_ADD_MARKER_WITH_PAYLOAD(name, OTHER, expensivePayload);
-//   }
-[[nodiscard]] inline bool profiler_can_accept_markers() {
+// Same as profiler_is_active(), but also checks if the profiler is not paused.
+[[nodiscard]] inline bool profiler_is_active_and_unpaused() {
   return mozilla::profiler::detail::RacyFeatures::IsActiveAndUnpaused();
 }
 

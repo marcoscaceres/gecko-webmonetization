@@ -240,6 +240,7 @@ nsStyleFont::nsStyleFont(const Document& aDocument)
       mLanguage(aDocument.GetLanguageForStyle()) {
   MOZ_COUNT_CTOR(nsStyleFont);
   MOZ_ASSERT(NS_IsMainThread());
+  mFont.family.is_initial = true;
   mFont.size = mSize;
   if (!nsContentUtils::IsChromeDoc(&aDocument)) {
     Length minimumFontSize =
@@ -584,8 +585,7 @@ nsStyleList::nsStyleList(const Document& aDocument)
     : mListStylePosition(NS_STYLE_LIST_STYLE_POSITION_OUTSIDE),
       mQuotes(StyleQuotes::Auto()),
       mListStyleImage(StyleImage::None()),
-      mImageRegion(StyleClipRectOrAuto::Auto()),
-      mMozListReversed(StyleMozListReversed::False) {
+      mImageRegion(StyleClipRectOrAuto::Auto()) {
   MOZ_COUNT_CTOR(nsStyleList);
   MOZ_ASSERT(NS_IsMainThread());
 
@@ -599,8 +599,7 @@ nsStyleList::nsStyleList(const nsStyleList& aSource)
       mCounterStyle(aSource.mCounterStyle),
       mQuotes(aSource.mQuotes),
       mListStyleImage(aSource.mListStyleImage),
-      mImageRegion(aSource.mImageRegion),
-      mMozListReversed(aSource.mMozListReversed) {
+      mImageRegion(aSource.mImageRegion) {
   MOZ_COUNT_CTOR(nsStyleList);
 }
 
@@ -634,11 +633,6 @@ nsChangeHint nsStyleList::CalcDifference(
   } else if (mListStylePosition != aNewData.mListStylePosition ||
              mCounterStyle != aNewData.mCounterStyle) {
     hint = nsChangeHint_NeutralChange;
-  }
-  // This is an internal UA-sheet property that is true only for <ol reversed>
-  // so hopefully it changes rarely.
-  if (mMozListReversed != aNewData.mMozListReversed) {
-    return NS_STYLE_HINT_REFLOW;
   }
   // list-style-image and -moz-image-region may affect some XUL elements
   // regardless of display value, so we still need to check them.
@@ -2156,6 +2150,7 @@ void StyleAnimation::SetInitialValues() {
   mFillMode = dom::FillMode::None;
   mPlayState = StyleAnimationPlayState::Running;
   mIterationCount = 1.0f;
+  mTimeline = StyleAnimationTimeline::Auto();
 }
 
 bool StyleAnimation::operator==(const StyleAnimation& aOther) const {
@@ -2163,7 +2158,8 @@ bool StyleAnimation::operator==(const StyleAnimation& aOther) const {
          mDuration == aOther.mDuration && mDelay == aOther.mDelay &&
          mName == aOther.mName && mDirection == aOther.mDirection &&
          mFillMode == aOther.mFillMode && mPlayState == aOther.mPlayState &&
-         mIterationCount == aOther.mIterationCount;
+         mIterationCount == aOther.mIterationCount &&
+         mTimeline == aOther.mTimeline;
 }
 
 // --------------------
@@ -2186,6 +2182,7 @@ nsStyleDisplay::nsStyleDisplay(const Document& aDocument)
       mAnimationFillModeCount(1),
       mAnimationPlayStateCount(1),
       mAnimationIterationCountCount(1),
+      mAnimationTimelineCount(1),
       mWillChange{{}, {0}},
       mDisplay(StyleDisplay::Inline),
       mOriginalDisplay(StyleDisplay::Inline),
@@ -2202,6 +2199,7 @@ nsStyleDisplay::nsStyleDisplay(const Document& aDocument)
       mOverflowY(StyleOverflow::Visible),
       mOverflowClipBoxBlock(StyleOverflowClipBox::PaddingBox),
       mOverflowClipBoxInline(StyleOverflowClipBox::PaddingBox),
+      mScrollbarGutter(StyleScrollbarGutter::AUTO),
       mResize(StyleResize::None),
       mOrient(StyleOrient::Inline),
       mIsolation(StyleIsolation::Auto),
@@ -2256,6 +2254,7 @@ nsStyleDisplay::nsStyleDisplay(const nsStyleDisplay& aSource)
       mAnimationFillModeCount(aSource.mAnimationFillModeCount),
       mAnimationPlayStateCount(aSource.mAnimationPlayStateCount),
       mAnimationIterationCountCount(aSource.mAnimationIterationCountCount),
+      mAnimationTimelineCount(aSource.mAnimationTimelineCount),
       mWillChange(aSource.mWillChange),
       mDisplay(aSource.mDisplay),
       mOriginalDisplay(aSource.mOriginalDisplay),
@@ -2272,6 +2271,7 @@ nsStyleDisplay::nsStyleDisplay(const nsStyleDisplay& aSource)
       mOverflowY(aSource.mOverflowY),
       mOverflowClipBoxBlock(aSource.mOverflowClipBoxBlock),
       mOverflowClipBoxInline(aSource.mOverflowClipBoxInline),
+      mScrollbarGutter(aSource.mScrollbarGutter),
       mResize(aSource.mResize),
       mOrient(aSource.mOrient),
       mIsolation(aSource.mIsolation),
@@ -2446,17 +2446,10 @@ nsChangeHint nsStyleDisplay::CalcDifference(
       hint |= nsChangeHint_ScrollbarChange;
     } else if (isScrollable) {
       if (ScrollbarGenerationChanged(*this, aNewData)) {
-        // We need to reframe in the case of hidden -> non-hidden case though,
-        // since ScrollFrameHelper::CreateAnonymousContent avoids creating
-        // scrollbars altogether for overflow: hidden. That seems it could
-        // create some interesting perf cliffs...
-        //
-        // We reframe when non-hidden -> hidden too, for now.
-        //
-        // FIXME(bug 1590247): Seems we could avoid reframing once we've created
-        // scrollbars, which should get us the optimization for elements that
-        // have toggled scrollbars, but would prevent the cliff of toggling
-        // overflow causing jank.
+        // We might need to reframe in the case of hidden -> non-hidden case
+        // though, since ScrollFrameHelper::CreateAnonymousContent avoids
+        // creating scrollbars altogether for overflow: hidden. That seems it
+        // could create some interesting perf cliffs...
         hint |= nsChangeHint_ScrollbarChange;
       } else {
         // Otherwise, for changes where both overflow values are scrollable,
@@ -2469,6 +2462,17 @@ nsChangeHint nsStyleDisplay::CalcDifference(
       // Here only whether we have a 'clip' changes, so just repaint and
       // update our overflow areas in that case.
       hint |= nsChangeHint_UpdateOverflow | nsChangeHint_RepaintFrame;
+    }
+  }
+
+  if (mScrollbarGutter != aNewData.mScrollbarGutter) {
+    if (IsScrollableOverflow()) {
+      // Changing scrollbar-gutter affects available inline-size of a inner
+      // scrolled frame, so we need a reflow for scrollbar change.
+      hint |= nsChangeHint_ReflowHintsForScrollbarChange;
+    } else {
+      // scrollbar-gutter only applies to the scroll containers.
+      hint |= nsChangeHint_NeutralChange;
     }
   }
 
@@ -2679,6 +2683,7 @@ nsChangeHint nsStyleDisplay::CalcDifference(
                 mAnimationPlayStateCount != aNewData.mAnimationPlayStateCount ||
                 mAnimationIterationCountCount !=
                     aNewData.mAnimationIterationCountCount ||
+                mAnimationTimelineCount != aNewData.mAnimationTimelineCount ||
                 mWillChange != aNewData.mWillChange ||
                 mOverflowAnchor != aNewData.mOverflowAnchor)) {
     hint |= nsChangeHint_NeutralChange;
@@ -2882,8 +2887,9 @@ nsChangeHint nsStyleTextReset::CalcDifference(
 //
 
 static StyleRGBA DefaultColor(const Document& aDocument) {
-  return StyleRGBA::FromColor(
-      PreferenceSheet::PrefsFor(aDocument).mColors.mDefault);
+  return StyleRGBA::FromColor(PreferenceSheet::PrefsFor(aDocument)
+                                  .ColorsFor(aDocument.DefaultColorScheme())
+                                  .mDefault);
 }
 
 nsStyleText::nsStyleText(const Document& aDocument)
@@ -3115,28 +3121,38 @@ void nsStyleUI::TriggerImageLoads(Document& aDocument,
 }
 
 nsChangeHint nsStyleUI::CalcDifference(const nsStyleUI& aNewData) const {
+  // SVGGeometryFrame's mRect depends on stroke _and_ on the value of
+  // pointer-events. See SVGGeometryFrame::ReflowSVG's use of GetHitTestFlags.
+  // (Only a reflow, no visual change.)
+  //
+  // pointer-events changes can change event regions overrides on layers and
+  // so needs a repaint.
+  const auto kPointerEventsHint =
+      nsChangeHint_NeedReflow |
+      nsChangeHint_NeedDirtyReflow |  // XXX remove me: bug 876085
+      nsChangeHint_SchedulePaint;
+
   nsChangeHint hint = nsChangeHint(0);
   if (mCursor != aNewData.mCursor) {
     hint |= nsChangeHint_UpdateCursor;
   }
 
   if (mPointerEvents != aNewData.mPointerEvents) {
-    // SVGGeometryFrame's mRect depends on stroke _and_ on the value
-    // of pointer-events. See SVGGeometryFrame::ReflowSVG's use of
-    // GetHitTestFlags. (Only a reflow, no visual change.)
-    hint |= nsChangeHint_NeedReflow |
-            nsChangeHint_NeedDirtyReflow |  // XXX remove me: bug 876085
-            nsChangeHint_SchedulePaint;     // pointer-events changes can change
-                                            // event regions overrides on layers
-                                            // and so needs a repaint.
+    hint |= kPointerEventsHint;
   }
 
   if (mUserModify != aNewData.mUserModify) {
     hint |= NS_STYLE_HINT_VISUAL;
   }
 
-  if (mUserFocus != aNewData.mUserFocus || mInert != aNewData.mInert ||
-      mUserInput != aNewData.mUserInput) {
+  if (mInert != aNewData.mInert) {
+    // inert affects pointer-events, user-modify, user-select, user-focus and
+    // -moz-user-input, do the union of all them (minus
+    // nsChangeHint_NeutralChange which isn't needed if there's any other hint).
+    hint |= NS_STYLE_HINT_VISUAL | kPointerEventsHint;
+  }
+
+  if (mUserFocus != aNewData.mUserFocus || mUserInput != aNewData.mUserInput) {
     hint |= nsChangeHint_NeutralChange;
   }
 

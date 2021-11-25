@@ -13,21 +13,13 @@
 #include "mozilla/gfx/Types.h"
 #include "nsITheme.h"
 #include "nsNativeTheme.h"
+#include "ScrollbarDrawing.h"
 
 namespace mozilla {
 
 enum class StyleSystemColor : uint8_t;
 
 namespace widget {
-
-static constexpr gfx::sRGBColor sColorWhite(gfx::sRGBColor::OpaqueWhite());
-static constexpr gfx::sRGBColor sColorWhiteAlpha50(gfx::sRGBColor::White(0.5f));
-static constexpr gfx::sRGBColor sColorWhiteAlpha80(gfx::sRGBColor::White(0.8f));
-static constexpr gfx::sRGBColor sColorBlack(gfx::sRGBColor::OpaqueBlack());
-
-static constexpr gfx::sRGBColor sDefaultAccent(
-    gfx::sRGBColor::UnusualFromARGB(0xff0060df));  // Luminance: 13.69346%
-static constexpr gfx::sRGBColor sDefaultAccentForeground(sColorWhite);
 
 static constexpr gfx::sRGBColor sColorGrey10(
     gfx::sRGBColor::UnusualFromARGB(0xffe9e9ed));
@@ -43,12 +35,8 @@ static constexpr gfx::sRGBColor sColorGrey40Alpha50(
     gfx::sRGBColor::UnusualFromARGB(0x7f8f8f9d));
 static constexpr gfx::sRGBColor sColorGrey50(
     gfx::sRGBColor::UnusualFromARGB(0xff676774));
-static constexpr gfx::sRGBColor sColorGrey50Alpha50(
-    gfx::sRGBColor::UnusualFromARGB(0x7f676774));
 static constexpr gfx::sRGBColor sColorGrey60(
     gfx::sRGBColor::UnusualFromARGB(0xff484851));
-static constexpr gfx::sRGBColor sColorGrey60Alpha50(
-    gfx::sRGBColor::UnusualFromARGB(0x7f484851));
 
 static constexpr gfx::sRGBColor sColorMeterGreen10(
     gfx::sRGBColor::UnusualFromARGB(0xff00ab60));
@@ -62,13 +50,6 @@ static constexpr gfx::sRGBColor sColorMeterRed10(
     gfx::sRGBColor::UnusualFromARGB(0xffe22850));
 static constexpr gfx::sRGBColor sColorMeterRed20(
     gfx::sRGBColor::UnusualFromARGB(0xff810220));
-
-static constexpr gfx::sRGBColor sScrollbarColor(
-    gfx::sRGBColor::UnusualFromARGB(0xfff0f0f0));
-static constexpr gfx::sRGBColor sScrollbarBorderColor(gfx::sRGBColor(1.0f, 1.0f,
-                                                                     1.0f));
-static constexpr gfx::sRGBColor sScrollbarThumbColor(
-    gfx::sRGBColor::UnusualFromARGB(0xffcdcdcd));
 
 static const CSSCoord kMinimumColorPickerHeight = 32.0f;
 static const CSSCoord kMinimumRangeThumbSize = 20.0f;
@@ -104,9 +85,20 @@ class nsNativeBasicTheme : protected nsNativeTheme, public nsITheme {
   using RectCornerRadii = mozilla::gfx::RectCornerRadii;
   using LayoutDeviceCoord = mozilla::LayoutDeviceCoord;
   using LayoutDeviceRect = mozilla::LayoutDeviceRect;
-  class AccentColor;
+  using Colors = mozilla::widget::ThemeColors;
+  using AccentColor = mozilla::widget::ThemeAccentColor;
+  using ScrollbarDrawing = mozilla::widget::ScrollbarDrawing;
+  using WebRenderBackendData = mozilla::widget::WebRenderBackendData;
+  using LookAndFeel = mozilla::LookAndFeel;
+  using ThemeChangeKind = mozilla::widget::ThemeChangeKind;
 
  public:
+  explicit nsNativeBasicTheme(
+      mozilla::UniquePtr<ScrollbarDrawing>&& aScrollbarDrawing)
+      : mScrollbarDrawing(std::move(aScrollbarDrawing)) {
+    mScrollbarDrawing->RecomputeScrollbarParams();
+  }
+
   static void Init();
   static void Shutdown();
   static void LookAndFeelChanged();
@@ -120,13 +112,6 @@ class nsNativeBasicTheme : protected nsNativeTheme, public nsITheme {
                                   StyleAppearance, const nsRect& aRect,
                                   const nsRect& aDirtyRect,
                                   DrawOverflow) override;
-
-  struct WebRenderBackendData {
-    mozilla::wr::DisplayListBuilder& mBuilder;
-    mozilla::wr::IpcResourceUpdateQueue& mResources;
-    const mozilla::layers::StackingContextHelper& mSc;
-    mozilla::layers::RenderRootStateManager* mManager;
-  };
 
   bool CreateWebRenderCommandsForWidget(
       mozilla::wr::DisplayListBuilder& aBuilder,
@@ -166,120 +151,63 @@ class nsNativeBasicTheme : protected nsNativeTheme, public nsITheme {
                                                StyleAppearance) override;
   bool ThemeSupportsWidget(nsPresContext*, nsIFrame*, StyleAppearance) override;
   bool WidgetIsContainer(StyleAppearance) override;
-  bool ThemeDrawsFocusForWidget(StyleAppearance) override;
+  bool ThemeDrawsFocusForWidget(nsIFrame*, StyleAppearance) override;
   bool ThemeNeedsComboboxDropmarker() override;
   ScrollbarSizes GetScrollbarSizes(nsPresContext*, StyleScrollbarWidth,
                                    Overlay) override;
-  static nscolor AdjustUnthemedScrollbarThumbColor(nscolor, EventStates);
-  static nscolor GetScrollbarButtonColor(nscolor aTrackColor, EventStates);
-  static mozilla::Maybe<nscolor> GetScrollbarArrowColor(nscolor aButtonColor);
-  static nscolor ComputeCustomAccentForeground(nscolor aAccent);
 
   nscoord GetCheckboxRadioPrefSize() override;
 
+  static mozilla::UniquePtr<ScrollbarDrawing>
+  DetermineScrollbarStyleSetByPrefs();
+  static mozilla::UniquePtr<ScrollbarDrawing> DetermineScrollbarStyle();
+
  protected:
-  nsNativeBasicTheme() = default;
   virtual ~nsNativeBasicTheme() = default;
 
-  static DPIRatio GetDPIRatioForScrollbarPart(nsPresContext*);
   static DPIRatio GetDPIRatio(nsPresContext*, StyleAppearance);
   static DPIRatio GetDPIRatio(nsIFrame*, StyleAppearance);
-  static bool IsDateTimeResetButton(nsIFrame*);
-  static bool IsColorPickerButton(nsIFrame*);
-
-  // Whether we should use system colors (for high contrast mode).
-  enum class UseSystemColors : bool { No, Yes };
-  static UseSystemColors ShouldUseSystemColors(const nsPresContext&);
 
   std::pair<sRGBColor, sRGBColor> ComputeCheckboxColors(const EventStates&,
                                                         StyleAppearance,
-                                                        const AccentColor&,
-                                                        UseSystemColors);
-  sRGBColor ComputeCheckmarkColor(const EventStates&, const AccentColor&,
-                                  UseSystemColors);
-  sRGBColor ComputeBorderColor(const EventStates&, UseSystemColors);
+                                                        const Colors&);
+  sRGBColor ComputeCheckmarkColor(const EventStates&, const Colors&);
+  enum class OutlineCoversBorder : bool { No, Yes };
+  sRGBColor ComputeBorderColor(const EventStates&, const Colors&,
+                               OutlineCoversBorder);
 
   std::pair<sRGBColor, sRGBColor> ComputeButtonColors(const EventStates&,
-                                                      UseSystemColors,
+                                                      const Colors&,
                                                       nsIFrame* = nullptr);
   std::pair<sRGBColor, sRGBColor> ComputeTextfieldColors(const EventStates&,
-                                                         UseSystemColors);
+                                                         const Colors&,
+                                                         OutlineCoversBorder);
   std::pair<sRGBColor, sRGBColor> ComputeRangeProgressColors(const EventStates&,
-                                                             const AccentColor&,
-                                                             UseSystemColors);
+                                                             const Colors&);
   std::pair<sRGBColor, sRGBColor> ComputeRangeTrackColors(const EventStates&,
-                                                          UseSystemColors);
+                                                          const Colors&);
   std::pair<sRGBColor, sRGBColor> ComputeRangeThumbColors(const EventStates&,
-                                                          const AccentColor&,
-                                                          UseSystemColors);
-  std::pair<sRGBColor, sRGBColor> ComputeProgressColors(const AccentColor&,
-                                                        UseSystemColors);
-  std::pair<sRGBColor, sRGBColor> ComputeProgressTrackColors(UseSystemColors);
+                                                          const Colors&);
+  std::pair<sRGBColor, sRGBColor> ComputeProgressColors(const Colors&);
+  std::pair<sRGBColor, sRGBColor> ComputeProgressTrackColors(const Colors&);
   std::pair<sRGBColor, sRGBColor> ComputeMeterchunkColors(
-      const EventStates& aMeterState, UseSystemColors);
-  std::array<sRGBColor, 3> ComputeFocusRectColors(const AccentColor&,
-                                                  UseSystemColors);
-
-  static bool ShouldUseDarkScrollbar(nsIFrame*, const ComputedStyle&);
-  sRGBColor ComputeScrollbarTrackColor(nsIFrame*, const ComputedStyle&,
-                                       const EventStates& aDocumentState,
-                                       UseSystemColors);
-  sRGBColor ComputeScrollbarThumbColor(nsIFrame*, const ComputedStyle&,
-                                       const EventStates& aElementState,
-                                       const EventStates& aDocumentState,
-                                       UseSystemColors);
-  // Returned colors are button, arrow.
-  std::pair<sRGBColor, sRGBColor> ComputeScrollbarButtonColors(
-      nsIFrame*, StyleAppearance, const ComputedStyle&,
-      const EventStates& aElementState, const EventStates& aDocumentState,
-      UseSystemColors);
+      const EventStates& aMeterState, const Colors&);
+  std::array<sRGBColor, 3> ComputeFocusRectColors(const Colors&);
 
   template <typename PaintBackendData>
   void PaintRoundedFocusRect(PaintBackendData&, const LayoutDeviceRect&,
-                             const AccentColor&, UseSystemColors, DPIRatio,
-                             CSSCoord aRadius, CSSCoord aOffset);
+                             const Colors&, DPIRatio, CSSCoord aRadius,
+                             CSSCoord aOffset);
   template <typename PaintBackendData>
   void PaintAutoStyleOutline(nsIFrame*, PaintBackendData&,
-                             const LayoutDeviceRect&, const AccentColor&,
-                             UseSystemColors, DPIRatio);
-
-  static void PaintRoundedRectWithRadius(DrawTarget&,
-                                         const LayoutDeviceRect& aRect,
-                                         const LayoutDeviceRect& aClipRect,
-                                         const sRGBColor& aBackgroundColor,
-                                         const sRGBColor& aBorderColor,
-                                         CSSCoord aBorderWidth,
-                                         CSSCoord aRadius, DPIRatio);
-  static void PaintRoundedRectWithRadius(WebRenderBackendData&,
-                                         const LayoutDeviceRect& aRect,
-                                         const LayoutDeviceRect& aClipRect,
-                                         const sRGBColor& aBackgroundColor,
-                                         const sRGBColor& aBorderColor,
-                                         CSSCoord aBorderWidth,
-                                         CSSCoord aRadius, DPIRatio);
-  template <typename PaintBackendData>
-  static void PaintRoundedRectWithRadius(PaintBackendData& aData,
-                                         const LayoutDeviceRect& aRect,
-                                         const sRGBColor& aBackgroundColor,
-                                         const sRGBColor& aBorderColor,
-                                         CSSCoord aBorderWidth,
-                                         CSSCoord aRadius, DPIRatio aDpiRatio) {
-    PaintRoundedRectWithRadius(aData, aRect, aRect, aBackgroundColor,
-                               aBorderColor, aBorderWidth, aRadius, aDpiRatio);
-  }
-
-  static void FillRect(DrawTarget&, const LayoutDeviceRect&, const sRGBColor&);
-  static void FillRect(WebRenderBackendData&, const LayoutDeviceRect&,
-                       const sRGBColor&);
+                             const LayoutDeviceRect&, const Colors&, DPIRatio);
 
   void PaintCheckboxControl(DrawTarget& aDrawTarget, const LayoutDeviceRect&,
-                            const EventStates&, const AccentColor&,
-                            UseSystemColors, DPIRatio);
+                            const EventStates&, const Colors&, DPIRatio);
   void PaintCheckMark(DrawTarget&, const LayoutDeviceRect&, const EventStates&,
-                      const AccentColor&, UseSystemColors);
+                      const Colors&);
   void PaintIndeterminateMark(DrawTarget&, const LayoutDeviceRect&,
-                              const EventStates&, const AccentColor&,
-                              UseSystemColors);
+                              const EventStates&, const Colors&);
 
   template <typename PaintBackendData>
   void PaintStrokedCircle(PaintBackendData&, const LayoutDeviceRect&,
@@ -297,128 +225,48 @@ class nsNativeBasicTheme : protected nsNativeTheme, public nsITheme {
                          CSSCoord aShadowBlurStdDev, DPIRatio);
   template <typename PaintBackendData>
   void PaintRadioControl(PaintBackendData&, const LayoutDeviceRect&,
-                         const EventStates&, const AccentColor&,
-                         UseSystemColors, DPIRatio);
+                         const EventStates&, const Colors&, DPIRatio);
   template <typename PaintBackendData>
   void PaintRadioCheckmark(PaintBackendData&, const LayoutDeviceRect&,
                            const EventStates&, DPIRatio);
   template <typename PaintBackendData>
   void PaintTextField(PaintBackendData&, const LayoutDeviceRect&,
-                      const EventStates&, const AccentColor& aAccent,
-                      UseSystemColors, DPIRatio);
+                      const EventStates&, const Colors&, DPIRatio);
   template <typename PaintBackendData>
   void PaintListbox(PaintBackendData&, const LayoutDeviceRect&,
-                    const EventStates&, const AccentColor&, UseSystemColors,
-                    DPIRatio);
+                    const EventStates&, const Colors&, DPIRatio);
   template <typename PaintBackendData>
   void PaintMenulist(PaintBackendData&, const LayoutDeviceRect&,
-                     const EventStates&, const AccentColor&, UseSystemColors,
-                     DPIRatio);
-  void PaintArrow(DrawTarget&, const LayoutDeviceRect&,
-                  const float aArrowPolygonX[], const float aArrowPolygonY[],
-                  const float aArrowPolygonSize, const int32_t aArrowNumPoints,
-                  const sRGBColor aFillColor);
+                     const EventStates&, const Colors&, DPIRatio);
   void PaintMenulistArrowButton(nsIFrame*, DrawTarget&, const LayoutDeviceRect&,
-                                const EventStates&, UseSystemColors);
+                                const EventStates&);
   void PaintSpinnerButton(nsIFrame*, DrawTarget&, const LayoutDeviceRect&,
-                          const EventStates&, StyleAppearance, UseSystemColors,
+                          const EventStates&, StyleAppearance, const Colors&,
                           DPIRatio);
   template <typename PaintBackendData>
   void PaintRange(nsIFrame*, PaintBackendData&, const LayoutDeviceRect&,
-                  const EventStates&, const AccentColor&, UseSystemColors,
-                  DPIRatio, bool aHorizontal);
+                  const EventStates&, const Colors&, DPIRatio,
+                  bool aHorizontal);
   template <typename PaintBackendData>
   void PaintProgress(nsIFrame*, PaintBackendData&, const LayoutDeviceRect&,
-                     const EventStates&, const AccentColor&, UseSystemColors,
-                     DPIRatio, bool aIsMeter);
+                     const EventStates&, const Colors&, DPIRatio,
+                     bool aIsMeter);
   template <typename PaintBackendData>
   void PaintButton(nsIFrame*, PaintBackendData&, const LayoutDeviceRect&,
-                   const EventStates&, const AccentColor&, UseSystemColors,
-                   DPIRatio);
+                   const EventStates&, const Colors&, DPIRatio);
 
-  void PaintScrollbarButton(DrawTarget&, StyleAppearance,
-                            const LayoutDeviceRect&, nsIFrame*,
-                            const ComputedStyle&,
-                            const EventStates& aElementState,
-                            const EventStates& aDocumentState, UseSystemColors,
-                            DPIRatio);
-
-  virtual bool PaintScrollbarThumb(DrawTarget&, const LayoutDeviceRect&,
-                                   bool aHorizontal, nsIFrame*,
-                                   const ComputedStyle&,
-                                   const EventStates& aElementState,
-                                   const EventStates& aDocumentState,
-                                   UseSystemColors, DPIRatio);
-  virtual bool PaintScrollbarThumb(WebRenderBackendData&,
-                                   const LayoutDeviceRect&, bool aHorizontal,
-                                   nsIFrame*, const ComputedStyle&,
-                                   const EventStates& aElementState,
-                                   const EventStates& aDocumentState,
-                                   UseSystemColors, DPIRatio);
-  template <typename PaintBackendData>
-  bool DoPaintDefaultScrollbarThumb(PaintBackendData&, const LayoutDeviceRect&,
-                                    bool aHorizontal, nsIFrame*,
-                                    const ComputedStyle&,
-                                    const EventStates& aElementState,
-                                    const EventStates& aDocumentState,
-                                    UseSystemColors aUseSystemColors, DPIRatio);
-
-  virtual bool PaintScrollbar(DrawTarget&, const LayoutDeviceRect&,
-                              bool aHorizontal, nsIFrame*, const ComputedStyle&,
-                              const EventStates& aElementState,
-                              const EventStates& aDocumentState,
-                              UseSystemColors, DPIRatio);
-  virtual bool PaintScrollbar(WebRenderBackendData&, const LayoutDeviceRect&,
-                              bool aHorizontal, nsIFrame*, const ComputedStyle&,
-                              const EventStates& aElementState,
-                              const EventStates& aDocumentState,
-                              UseSystemColors, DPIRatio);
-  template <typename PaintBackendData>
-  bool DoPaintDefaultScrollbar(PaintBackendData&, const LayoutDeviceRect&,
-                               bool aHorizontal, nsIFrame*,
-                               const ComputedStyle&,
-                               const EventStates& aElementState,
-                               const EventStates& aDocumentState,
-                               UseSystemColors aUseSystemColors, DPIRatio);
-
-  virtual bool PaintScrollbarTrack(DrawTarget&, const LayoutDeviceRect&,
-                                   bool aHorizontal, nsIFrame*,
-                                   const ComputedStyle&,
-                                   const EventStates& aDocumentState,
-                                   UseSystemColors, DPIRatio) {
-    // Draw nothing by default. Subclasses can override this.
-    return true;
-  }
-  virtual bool PaintScrollbarTrack(WebRenderBackendData&,
-                                   const LayoutDeviceRect&, bool aHorizontal,
-                                   nsIFrame*, const ComputedStyle&,
-                                   const EventStates& aDocumentState,
-                                   UseSystemColors, DPIRatio) {
-    // Draw nothing by default. Subclasses can override this.
-    return true;
+  static void PrefChangedCallback(const char*, void*) {
+    LookAndFeel::NotifyChangedAllWindows(ThemeChangeKind::Layout);
   }
 
-  virtual bool PaintScrollCorner(DrawTarget&, const LayoutDeviceRect&,
-                                 nsIFrame*, const ComputedStyle&,
-                                 const EventStates& aDocumentState,
-                                 UseSystemColors, DPIRatio);
-  virtual bool PaintScrollCorner(WebRenderBackendData&, const LayoutDeviceRect&,
-                                 nsIFrame*, const ComputedStyle&,
-                                 const EventStates& aDocumentState,
-                                 UseSystemColors, DPIRatio);
-  template <typename PaintBackendData>
-  bool DoPaintDefaultScrollCorner(PaintBackendData&, const LayoutDeviceRect&,
-                                  nsIFrame*, const ComputedStyle&,
-                                  const EventStates& aDocumentState,
-                                  UseSystemColors, DPIRatio);
+  void SetScrollbarDrawing(
+      mozilla::UniquePtr<ScrollbarDrawing>&& aScrollbarDrawing) {
+    mScrollbarDrawing = std::move(aScrollbarDrawing);
+  }
+  ScrollbarDrawing& GetScrollbarDrawing() const { return *mScrollbarDrawing; }
+  mozilla::UniquePtr<ScrollbarDrawing> mScrollbarDrawing;
 
-  static CSSIntCoord sHorizontalScrollbarHeight;
-  static CSSIntCoord sVerticalScrollbarWidth;
-  static bool sOverlayScrollbars;
-
-  static void PrefChangedCallback(const char*, void*) { LookAndFeelChanged(); }
-  static void RecomputeAccentColors();
-  static void RecomputeScrollbarParams();
+  bool ThemeSupportsScrollbarButtons() override;
 };
 
 #endif

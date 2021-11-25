@@ -40,7 +40,6 @@
 }
 
 .popup-notification-hint-text {
-  opacity: 0.6;
   margin-top: .5em !important;
 }
 
@@ -145,8 +144,8 @@ popupnotification {
 }
 
 .panel-footer > button:focus-visible {
-  outline: 2px solid var(--focus-outline-color);
-  outline-offset: var(--focus-outline-offset, 2px);
+  outline: var(--focus-outline, 1px dotted);
+  outline-offset: var(--focus-outline-offset, -2px);
 }
 
 .panel-footer > button:not([disabled]):hover {
@@ -160,6 +159,7 @@ popupnotification {
 .panel-footer > button:not([disabled])[default] {
   color: var(--button-primary-color);
   background-color: var(--button-primary-bgcolor);
+  --focus-outline-color: var(--button-primary-bgcolor);
 }
 
 .panel-footer > button:not([disabled])[default]:hover {
